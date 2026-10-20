@@ -5,12 +5,12 @@
 
 ## 首次加入
 
-维护者在团队选定的 GitHub、GitLab 或内网 Git 服务上建立**私有仓库**，邀请成员。
-仓库地址由团队提供；当前本地工程不会自动上传。首次推送前确认组织归属和代码的共享范围。
-仓库准备好后：
+团队使用私有仓库 [liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)。
+维护者 `liyunfei1994` 在仓库 Settings → Collaborators 中邀请成员；成员接受邀请并登录自己的 GitHub 账号后：
 
 ```powershell
-git clone <团队仓库地址>
+git clone https://github.com/liyunfei1994/lre-workbench.git
+cd lre-workbench
 ```
 
 进入克隆目录，双击 `setup_windows.bat`。启动器选择 Python 3.11/3.12 x64；
@@ -34,7 +34,16 @@ git diff --check
 git status
 ```
 
-只添加与该功能有关的文件，提交并推送自己的分支，再创建 Pull Request。
+只添加与该功能有关的文件，提交并推送自己的分支，再创建 Pull Request：
+
+```powershell
+git add <本次修改的文件>
+git commit -m "说明本次改动"
+git push -u origin feature/your-change
+```
+
+在仓库的 Pull requests 页面选择 New pull request，目标分支为 `main`，
+来源分支为自己的功能分支，说明改动目的与验证结果。
 由另一位成员审查，测试通过后合并。不要在未检查 `git status` 的情况下覆盖目录或强行同步。
 更新代码后双击 `start_windows.bat`，启动器会重新检查依赖；不需要手动重装整个项目。
 
@@ -43,8 +52,10 @@ git status
 - `Windows Python 3.11`
 - `Windows Python 3.12`
 
-工作流位于 `.github/workflows/validate.yml`。这是仓库配置文件；
-上传到 GitHub、启用 Actions 后才会在远端执行。分支保护需要管理员在远端设置。
+工作流位于 `.github/workflows/validate.yml`，
+实际执行状态与下载产物见 [Actions](https://github.com/liyunfei1994/lre-workbench/actions)。
+主分支提交、Pull Request 和 `v*` 标签触发检查，也可手动运行。
+分支保护需要管理员在远端设置，且取决于账户套餐对私有仓库规则的支持。
 其他 Git 服务需要按该平台的 CI 格式移植同样的安装、测试和打包命令。
 
 ## 文件边界

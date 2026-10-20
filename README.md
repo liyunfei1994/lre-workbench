@@ -21,8 +21,10 @@
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 团队代码仓库、分支、审查、测试和发布流程 |
 | [平台建设方案](docs/PLATFORM_PLAN.md) | 桌面版向内网网页平台逐步迁移的架构与边界 |
 
-**多人开发使用统一 Git 仓库。** 本地已加入自动测试工作流，连接团队 GitHub 仓库后可在每次提交 /
-Pull Request 时检查。远端仓库和分支保护需要团队完成配置。当前仍是桌面程序，尚未实现浏览器使用、
+**多人开发使用统一私有仓库：[liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)。**
+成员接受仓库邀请后，按照 [协作指南](CONTRIBUTING.md) 获取源码、提交分支并发起 Pull Request。
+主分支提交与 Pull Request 的安装、测试和打包结果见 [GitHub Actions](https://github.com/liyunfei1994/lre-workbench/actions)。
+分支保护的启用情况以仓库设置为准。当前仍是桌面程序，尚未实现浏览器使用、
 共享数据库、多人同时编辑或服务器端计算队列。
 
 桌面程序当前仍专注 Windows。通用 JSON / CSV 任务包可传给其他电脑的 CFD 适配程序；没有添加 Linux 桌面启动器。
