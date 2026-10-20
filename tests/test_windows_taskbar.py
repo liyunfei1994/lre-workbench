@@ -18,11 +18,15 @@ class TaskbarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "火箭动力 启动.lnk"
             environment = dict(os.environ, LRE_TEST_SHORTCUT=str(path))
-            subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            creation = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                "$ErrorActionPreference='Stop'; "
+                "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding; "
                 "$s=New-Object -ComObject WScript.Shell; "
                 "$l=$s.CreateShortcut($env:LRE_TEST_SHORTCUT); "
                 "$l.TargetPath=Join-Path $env:SystemRoot 'System32\\wscript.exe'; $l.Save()"],
-                env=environment, check=True, capture_output=True, timeout=20)
+                env=environment, capture_output=True, timeout=20)
+            self.assertEqual(creation.returncode, 0,
+                             creation.stderr.decode("utf-8", errors="replace"))
             configure_shortcut_identity(path, ROOT)
             result = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
                 "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding; "
@@ -31,7 +35,9 @@ class TaskbarTests(unittest.TestCase):
                 "$i=$f.ParseName((Split-Path $env:LRE_TEST_SHORTCUT -Leaf)); "
                 "@{Id=$i.ExtendedProperty('System.AppUserModel.ID'); "
                 "Icon=$i.ExtendedProperty('System.AppUserModel.RelaunchIconResource')} | ConvertTo-Json"],
-                env=environment, check=True, capture_output=True, timeout=20)
+                env=environment, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0,
+                             result.stderr.decode("utf-8", errors="replace"))
             values = json.loads(result.stdout.decode("utf-8-sig"))
             self.assertEqual(values["Id"], APP_USER_MODEL_ID)
             self.assertEqual(values["Icon"], str(ROOT / "assets" / "app.ico") + ",0")

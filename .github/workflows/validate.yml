@@ -43,6 +43,11 @@ jobs:
         run: python scripts/bootstrap.py --setup
       - name: Check dependency consistency
         run: .\.venv\Scripts\python.exe -m pip check
+      - name: Verify Windows installer and shortcut
+        run: |
+          cmd /c setup_windows.bat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe -m unittest discover -s tests -p test_windows_taskbar.py -k test_shortcut_properties_recognized_by_windows_shell -v
       - name: Run regression tests
         run: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
       - name: Capture environment
