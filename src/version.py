@@ -1,0 +1,7 @@
+APP_NAME = "火箭动力工作台"
+APP_FORMAL_NAME = "液体火箭发动机数字样机设计与分析平台"
+APP_ENGLISH_NAME = "LRE Workbench"
+APP_ENGLISH_FULL_NAME = "Liquid Rocket Engine Workbench"
+APP_VERSION = "7.1.0"
+APP_VERSION_LABEL = f"V{APP_VERSION}"
+APP_FOLDER_NAME = f"{APP_NAME}_{APP_VERSION_LABEL}"

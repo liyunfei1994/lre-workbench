@@ -1,0 +1,446 @@
+"""
+pump.py  -  供给泵模型 V9
+
+V9 修正：入口/出口密度分别计算（修复不可压缩误差 ~2%）
+  - fluid_density(fluid, T, p) 模块级函数，供 cycle.py 储箱状态点复用
+  - 泵功率/扬程/Ns 用入口密度 rho_in（正确的欧拉泵功公式）
+  - 出口 FlowState.density 用 rho_out = fluid_density(fluid, T_out, p_out)
+  - ComponentResult.outputs 新增 rho_in_kgm3 / rho_out_kgm3
+
+V8 历史：比转速(Ns)分析 与 Ns-效率曲线
+V7 历史：出口温度物理化 dT = dP/(rho*cp*eta)；LOX/CH4 密度含压力修正
+"""
+
+from __future__ import annotations
+import math
+from functools import lru_cache
+from core import ComponentResult, FlowState, ValidationError, _check_range
+
+_G      = 9.80665
+_CP_LOX = 1700.0
+_CP_CH4 = 3500.0
+_ALPHA_LOX = 3.5e-3
+_ALPHA_CH4 = 1.2e-3
+
+# ── CoolProp 真实流体密度（NIST 级，含正确高压压缩率）──────────────────
+# 旧线性拟合在高压侧（泵出口 ~700 bar）系统性偏低 ~4–5%，且非物理地预测
+# 密度「下降」（温升项压过弱的压力项）；实际致密相在 700 bar 下密度应「上升」。
+# 改用 CoolProp 实算，并按 (T, p) 量化做 lru_cache —— 入口工况在 Newton 迭代里
+# 反复以同值调用，缓存后近乎免费；出口随迭代缓变，命中也高。CoolProp 不可用或
+# 越界时回退到原线性拟合，保证健壮性。
+try:
+    from CoolProp.CoolProp import PropsSI as _PROPSSI
+    _COOLPROP_OK = True
+except Exception:
+    _COOLPROP_OK = False
+
+_COOLPROP_NAME = {"LOX": "Oxygen", "CH4": "Methane"}
+
+
+@lru_cache(maxsize=8192)
+def _coolprop_density(fluid_name: str, T_centiK: int, p_kPa: int) -> float:
+    """按 0.01 K / 1 kPa 量化缓存的 CoolProp 密度查询。"""
+    return float(_PROPSSI("D", "T", T_centiK / 100.0, "P", p_kPa * 1000.0, fluid_name))
+
+
+@lru_cache(maxsize=8192)
+def _coolprop_pump_outlet(fluid_name: str, T_in_centiK: int, p_in_kPa: int,
+                          p_out_kPa: int, eta_milli: int):
+    """
+    泵出口状态（CoolProp 严格焓法），按 (T,p,η) 量化缓存。
+    返回 (T_out_actual_K, T_out_isentropic_K, dh_s_Jkg)。
+
+      h_in, s_in (入口) → 等熵到 p_out 得 h_s/T_s → 实际焓升 = (h_s−h_in)/η
+      → h_out = h_in + 实际焓升 → 由 (h_out, p_out) 反查 T_out。
+    这比固定 cp/α 的一阶模型准确（甲烷高压压缩升温被一阶模型低估 ~7 K）。
+    """
+    Tin = T_in_centiK / 100.0
+    pin = p_in_kPa * 1000.0
+    pout = p_out_kPa * 1000.0
+    eta = max(eta_milli / 1000.0, 1e-3)
+    h_in = _PROPSSI("H", "T", Tin, "P", pin, fluid_name)
+    s_in = _PROPSSI("S", "T", Tin, "P", pin, fluid_name)
+    h_s = _PROPSSI("H", "S", s_in, "P", pout, fluid_name)          # 等熵出口焓
+    T_s = _PROPSSI("T", "S", s_in, "P", pout, fluid_name)          # 等熵出口温度
+    h_out = h_in + (h_s - h_in) / eta                              # 绝热实际焓升
+    T_out = _PROPSSI("T", "H", h_out, "P", pout, fluid_name)
+    return float(T_out), float(T_s), float(h_s - h_in)
+
+
+def _density_linear_fallback(fluid: str, T: float, p: float) -> float:
+    """线性拟合兜底（CoolProp 不可用 / 越界时）。"""
+    if fluid == "LOX":
+        rho = 1237.8 - 4.8 * (T - 70.0) + 5.0e-10 * 1237.8 * (p - 1e5)
+        return max(900.0, rho)
+    base = 439.5 - 2.6 * (T - 100.0)
+    pc   = 1.0 + 0.015 * (p - 1e5) / 1.0e7
+    return max(300.0, base * pc)
+
+
+def fluid_density(fluid: str, T: float, p: float) -> float:
+    """
+    液态推进剂密度  ρ = f(T, p)  [kg/m³]，优先 CoolProp 真实流体物性。
+
+    入口侧（致密化 LOX@70K / LCH4@100K，~9.5 bar）与出口侧（~700 bar 稠密相）
+    都用 NIST 级真实物性，修复了旧线性拟合在高压出口 -4~-5% 的偏差。
+
+    参数
+    ------
+    fluid : 'LOX' 或 'CH4'
+    T     : 温度 [K]
+    p     : 压力 [Pa]
+    """
+    if _COOLPROP_OK and fluid in _COOLPROP_NAME:
+        try:
+            return _coolprop_density(_COOLPROP_NAME[fluid], int(round(T * 100.0)), int(round(p / 1000.0)))
+        except Exception:
+            pass
+    return _density_linear_fallback(fluid, T, p)
+
+# Ns-效率曲线插值节点 (Huzel&Huang NASA SP-125; 对应论文 Figure 4)
+# Ns 单位: rad*m^(3/4)/s^2
+_NS_ETA_TABLE = [
+    (0.20, 0.30), (0.30, 0.38), (0.50, 0.48), (0.80, 0.58),
+    (1.00, 0.64), (1.50, 0.72), (2.00, 0.78), (2.50, 0.82),
+    (3.00, 0.850), (3.50, 0.865), (4.00, 0.870), (4.50, 0.870),
+    (5.00, 0.865), (5.50, 0.855), (6.00, 0.840), (7.00, 0.800),
+    (8.00, 0.748), (10.0, 0.650), (12.0, 0.550), (15.0, 0.420),
+]
+
+
+def _eta_from_ns(ns):
+    if ns <= _NS_ETA_TABLE[0][0]:
+        return _NS_ETA_TABLE[0][1]
+    if ns >= _NS_ETA_TABLE[-1][0]:
+        return _NS_ETA_TABLE[-1][1]
+    for i in range(len(_NS_ETA_TABLE) - 1):
+        ns0, eta0 = _NS_ETA_TABLE[i]
+        ns1, eta1 = _NS_ETA_TABLE[i + 1]
+        if ns0 <= ns <= ns1:
+            t = (ns - ns0) / (ns1 - ns0)
+            return eta0 + t * (eta1 - eta0)
+    return 0.80
+
+
+class Pump:
+    # ────────────────────────────────────────────────────────
+    # V10 设计原则（替代旧 _DEFAULT_RPM magic number）：
+    #   1. nr_rpm **建议**作为必传参数，从 cycle.py 经 InputParameters
+    #      的 lox_pump_speed_rpm_override / fuel_pump_speed_rpm_override 传入。
+    #   2. 同一根轴上（FFSC 双轴）的泵和涡轮必须共用一个转速；
+    #      该一致性由 cycle.py 负责，不在 Pump 类内做隐式默认。
+    #   3. 为向后兼容，nr_rpm=None 时仍走旧默认值（25000/30000 rpm，
+    #      对标 Raptor 公开估计），并发 warning 提示。
+    # ────────────────────────────────────────────────────────
+    _DEFAULT_RPM    = {"LOX": 25000.0, "CH4": 30000.0}   # V10: 改为 Raptor 公开量级
+    _DEFAULT_STAGES = {"LOX": 1,       "CH4": 2}
+
+    def __init__(self, name, fluid, mdot, p_in, p_out, t_in, eta,
+                 nr_rpm=None, n_stages=None,
+                 tip_speed_limit_ms: float = 550.0,
+                 npsh_available_pa: float | None = None,
+                 impeller_material: str | None = None,
+                 side: str | None = None):
+        """
+        Parameters
+        ──────────
+        nr_rpm              : 轴转速 [rpm]；None 时走 _DEFAULT_RPM（不推荐，会 warn）
+        n_stages            : 级数；None 时走 _DEFAULT_STAGES
+        tip_speed_limit_ms  : 叶尖速度 u_tip 上限 [m/s]，超出仅 warn
+        npsh_available_pa   : 可用净正吸入压头 [Pa]（= p_in - p_vapor）；None 时跳过 Nss 校核
+        """
+        import warnings as _w
+        _check_range(name + ".eta",  eta,  lo=0, hi=1.0, lo_inclusive=False)
+        _check_range(name + ".mdot", mdot, lo=0, lo_inclusive=False)
+        _check_range(name + ".t_in", t_in, lo=0, lo_inclusive=False)
+        _check_range(name + ".p_in", p_in, lo=0, lo_inclusive=False)
+        if p_out <= p_in:
+            raise ValidationError(
+                name + ": p_out=" + str(p_out) + " Pa <= p_in=" + str(p_in)
+                + " Pa，泵出口压力必须大于入口压力")
+        self.name     = name
+        self.fluid    = fluid
+        self.mdot     = mdot
+        self.p_in     = p_in
+        self.p_out    = p_out
+        self.t_in     = t_in
+        self.eta      = eta
+        fk = "LOX" if fluid == "LOX" else "CH4"
+        if nr_rpm is None:
+            _w.warn(
+                f"{name}: nr_rpm 未指定，使用默认 {self._DEFAULT_RPM[fk]} rpm。"
+                f"建议从 InputParameters.{'lox' if fk=='LOX' else 'fuel'}_pump_speed_rpm_override "
+                f"传入，以保证泵/涡轮同轴一致。",
+                stacklevel=2,
+            )
+            self.nr_rpm = self._DEFAULT_RPM[fk]
+        else:
+            self.nr_rpm = float(nr_rpm)
+        self.n_stages = int(n_stages)  if n_stages is not None else self._DEFAULT_STAGES[fk]
+        self.tip_speed_limit_ms = float(tip_speed_limit_ms)
+        self.npsh_available_pa  = npsh_available_pa
+        self.impeller_material  = impeller_material
+        self.side               = side or ("ox" if fluid == "LOX" else "fuel")
+
+    def _density(self, p=None, T=None):
+        """使用模块级 fluid_density；默认用入口条件 (p_in, t_in)"""
+        return fluid_density(
+            self.fluid,
+            T if T is not None else self.t_in,
+            p if p is not None else self.p_in,
+        )
+
+    def _cp(self):
+        return _CP_LOX if self.fluid == "LOX" else _CP_CH4
+
+    def _thermal_expansion(self):
+        """Approximate liquid volumetric expansion coefficient [1/K]."""
+        return _ALPHA_LOX if self.fluid == "LOX" else _ALPHA_CH4
+
+    def _specific_speed(self, rho):
+        nr_rad = self.nr_rpm * 2.0 * math.pi / 60.0
+        q    = self.mdot / rho
+        dp   = self.p_out - self.p_in
+        hp   = dp / (rho * _G)
+        hp1  = hp / max(self.n_stages, 1)
+        # PT-02 统一：对外一律报欧洲比转速 nq = N[rpm]·√Q[m³/s] / H[m]^0.75，
+        # 与 CFTurbo 的 nq、geometry/pumps.py 的 Ns_actual、core.py 的 Ns 目标
+        # 同一约定（之前 pump 报 rad 制 ~3.15、geometry 报 ~30，两套并存易读错）。
+        nq   = self.nr_rpm * math.sqrt(q) / (hp1 ** 0.75)
+        # Huzel&Huang 效率曲线 (_NS_ETA_TABLE) 以 rad 制 ω·√Q/H^0.75 标定，
+        # 故内部换算到 rad 制后查表（ns_rad = nq · 2π/60），曲线本身不动。
+        ns_rad = nr_rad * math.sqrt(q) / (hp1 ** 0.75)
+        eta_ns = _eta_from_ns(ns_rad)
+        # 离心泵最优 nq 区间 ~[28,48]（对应 rad 制 [3,5]）
+        if 28.0 <= nq <= 48.0:
+            diag = ("nq=%.1f (EU, rpm·√(m³/s)/m^0.75) [28,48] 最优离心区 ✓，"
+                    "曲线估算 eta_Ns=%.3f") % (nq, eta_ns)
+        elif nq < 28.0:
+            diag = ("nq=%.1f ⚠ 低于最优区间[28,48]，流道窄摩擦大；"
+                    "曲线估算 eta_Ns=%.3f。提高转速/减少级数可升高 nq") % (nq, eta_ns)
+        else:
+            diag = ("nq=%.1f ⚠ 高于最优区间[28,48]，趋近混流/轴流型；"
+                    "曲线估算 eta_Ns=%.3f。降低转速/增加级数可降低 nq") % (nq, eta_ns)
+        return nq, eta_ns, diag
+
+    def evaluate(self):
+        # ── 入口密度（用于泵功、扬程、Ns 计算——欧拉泵功公式基于入口比容）
+        rho_in  = self._density(p=self.p_in,  T=self.t_in)
+        cp      = self._cp()
+        dp      = self.p_out - self.p_in
+
+        # 泵轴功率（不可压水力口径，作回退/参考）：W = ṁ·ΔP / (ρ_in·η)
+        power_hydraulic = self.mdot * dp / (rho_in * self.eta)
+
+        # ── 泵出口温升 ───────────────────────────────────────────────
+        # 优先用 CoolProp 严格焓法（绝热泵：h_out=h_in+(h_s−h_in)/η，再反查 T_out）；
+        # 它正确捕捉真实流体的压缩升温（甲烷高压一阶模型低估约 7 K）。
+        # CoolProp 不可用 / 越界时回退到固定 cp/α 的一阶模型。
+        delta_t = delta_t_isentropic = delta_t_loss = None
+        dh_s_real = None   # CoolProp 真实等熵焓升 [J/kg]，成功取得后用于轴功率
+        fk = "Oxygen" if self.fluid == "LOX" else "Methane"
+        if _COOLPROP_OK:
+            try:
+                T_out_rig, T_s, dh_s_real = _coolprop_pump_outlet(
+                    fk, int(round(self.t_in * 100.0)), int(round(self.p_in / 1000.0)),
+                    int(round(self.p_out / 1000.0)), int(round(self.eta * 1000.0)),
+                )
+                delta_t = max(0.0, T_out_rig - self.t_in)
+                delta_t_isentropic = max(0.0, T_s - self.t_in)          # 等熵压缩升温
+                delta_t_loss = max(0.0, delta_t - delta_t_isentropic)   # 损失热化升温
+            except Exception:
+                delta_t = None
+                dh_s_real = None
+        if delta_t is None:
+            # 回退：固定 cp/α 一阶模型
+            delta_t_isentropic = self._thermal_expansion() * self.t_in * dp / (rho_in * cp)
+            delta_t_loss = dp / (rho_in * cp) * (1.0 / self.eta - 1.0)
+            delta_t = max(0.0, delta_t_isentropic + delta_t_loss)
+        t_out   = self.t_in + delta_t
+
+        # ── 泵轴功率：与出口温升统一功口径 ─────────────────────────────
+        # CoolProp 可用时 P = ṁ·Δh_s/η（真实等熵焓升 ∫v·dp）。不可压式 ΔP/ρ_in
+        # 沿 70 MPa 级压升路径密度上升、比容减小，比 ∫v·dp 偏大 ~2%(LOX)/~4%(CH4)，
+        # 该偏差会直接坐进涡轮-泵功率平衡残差；统一口径后轴功率、出口温升、
+        # 下游焓流三者自洽（涡轮所需功率随之下降 2–4%）。
+        if dh_s_real is not None and dh_s_real > 0.0:
+            power = self.mdot * dh_s_real / self.eta
+        else:
+            power = power_hydraulic
+
+        # ── 出口密度（用于出口 FlowState——反映出口实际压力下的密度）
+        rho_out = self._density(p=self.p_out, T=t_out)
+
+        ns, eta_ns, ns_diag = self._specific_speed(rho_in)
+        eta_diff = self.eta - eta_ns
+
+        q_m3s  = self.mdot / rho_in          # 体积流量基于入口密度
+        hp_tot = dp / (rho_in * _G)
+        hp1    = hp_tot / max(self.n_stages, 1)
+        nr_rad = self.nr_rpm * 2.0 * math.pi / 60.0
+        h_out  = cp * t_out + dp / rho_in    # 焓升 ≈ cp·dT + ΔP/ρ_in
+
+        # ── V10 新增：叶尖速度估算 + 校核 ─────────────────
+        # 用压头系数 ψ = g·H_per_stage / u_tip²，取 ψ=0.50 反推 u_tip。
+        # 这是工程一阶估算，CFTurbo 详细设计后可写回。
+        psi_pump = 0.50
+        u_tip_pump = math.sqrt(_G * max(hp1, 1.0) / psi_pump)
+        # 由 u_tip 和 ω 反推叶轮直径（仅作信息显示）
+        d_impeller_est = 2.0 * u_tip_pump / max(nr_rad, 1.0)
+        tip_speed_ok = u_tip_pump <= self.tip_speed_limit_ms
+        tip_note = (
+            f"  叶尖速度 u_tip≈{u_tip_pump:.0f} m/s（按 ψ={psi_pump} 估算，"
+            f"D_imp≈{d_impeller_est*1000:.0f} mm）"
+            f"{' ✓' if tip_speed_ok else f' ⚠ 超过上限 {self.tip_speed_limit_ms:.0f} m/s'}"
+        )
+
+        # ── 新增：泵叶轮材料 / 离心应力校核（与涡轮同口径）─────────
+        # 叶轮轮缘离心应力 σ≈ρ_材料·u_tip²（保守上界），对比材料 σy(T_入口) → SF。
+        # 富氧侧（液氧泵）硬校验 oxygen_compatible（禁 Ti）。
+        mat_outputs: dict[str, float] = {}
+        mat_notes: list[str] = []
+        if self.impeller_material is not None:
+            try:
+                from materials import material_audit_row  # noqa: WPS433
+                audit = material_audit_row(
+                    material_key=self.impeller_material,
+                    T_K=self.t_in,
+                    U_ms=u_tip_pump,
+                    side=(self.side or "fuel"),
+                )
+                mat_outputs.update({
+                    "impeller_sigma_yield_T_MPa": audit["sigma_yield_T_MPa"],
+                    "impeller_sigma_centrif_MPa": audit["sigma_centrifugal_MPa"],
+                    "impeller_safety_factor":     audit["safety_factor"],
+                    "impeller_oxygen_compatible": 1.0 if audit["oxygen_compatible"] else 0.0,
+                })
+                mat_notes.append("── 叶轮材料校核 ─────────────────────────")
+                mat_notes.append(
+                    f"  叶轮材料：{audit['material_name']}（氧兼容={'是' if audit['oxygen_compatible'] else '否'}）"
+                )
+                mat_notes.append(
+                    f"  σy(T_in={self.t_in:.0f}K)={audit['sigma_yield_T_MPa']:.0f} MPa； "
+                    f"σ_离心(ρ·u_tip²)={audit['sigma_centrifugal_MPa']:.0f} MPa； "
+                    f"SF={audit['safety_factor']:.2f}"
+                )
+                for iss in audit["issues"]:
+                    mat_notes.append(f"  {iss}")
+            except (ImportError, KeyError, ValueError) as ex:
+                mat_notes.append(f"  ⚠ 叶轮材料校核跳过：{ex}")
+
+        # ── V10 新增：吸入比转速 Nss 校核（穴蚀） ────────
+        # PT-01 修复：30000/45000 是【美制惯用】阈值 —— Nss=N[rpm]·√Q[gpm]/NPSH[ft]^0.75
+        # （火箭诱导轮范围）。故 Nss 必须用同一套美制单位算后再比，旧代码用 SI
+        # (m³/s, m) 算出 ~1046，永远 <30000 → 误报"无需诱导轮"（真实 ~54000）。
+        nss = None
+        nss_eu = None
+        sigma_thoma = None
+        npsh_m = None
+        nss_note = ""
+        if self.npsh_available_pa is not None and self.npsh_available_pa > 0:
+            npsh_m  = self.npsh_available_pa / (rho_in * _G)
+            # Thoma 空化数 σ = NPSHa / H（无量纲）：< σ_临界 即发生空化。
+            # 与 CFTurbo 空化分析口径一致（NPSHa 越大、H 越小 → σ 越大越安全）。
+            sigma_thoma = npsh_m / max(hp_tot, 1e-9)
+            q_gpm   = q_m3s * 15850.3           # m³/s → US gpm
+            npsh_ft = npsh_m * 3.280839895      # m → ft
+            nss = self.nr_rpm * math.sqrt(max(q_gpm, 1e-9)) / max(npsh_ft, 0.1) ** 0.75
+            # 同步给出欧洲制 nss(EU)=N[rpm]·√Q[m³/s]/NPSH[m]^0.75，与 CFTurbo
+            # "Suction specific speed → nss (EU)" 字段同口径（换算系数 Nss_US≈51.6·nss_EU）。
+            # CFTurbo 常规范围 150–400（最高 1200）；火箭诱导轮泵远高于此。
+            nss_eu = self.nr_rpm * math.sqrt(max(q_m3s, 1e-9)) / max(npsh_m, 0.01) ** 0.75
+            nss_ok = nss <= 45000.0
+            nss_note = (
+                f"  NPSHa={npsh_m:.1f} m → nss(EU)={nss_eu:.0f} [CFTurbo口径] / Nss(US)={nss:.0f} (rpm·√gpm/ft^0.75)"
+                f"{' ✓ (<30000，无诱导轮可行)' if nss <= 30000.0 else (' ⚠ 30000–45000，需诱导轮' if nss <= 45000.0 else ' ⚠⚠ >45000，穴蚀风险高，须强诱导轮+过冷')}"
+            )
+
+        state = FlowState(
+            name        = self.name + "_out",
+            pressure    = self.p_out,
+            temperature = t_out,
+            mass_flow   = self.mdot,
+            density     = rho_out,            # ← 出口实际密度（含压缩率修正）
+            enthalpy    = h_out,
+            composition = {self.fluid: 1.0},
+        )
+
+        note_eta = ("  ⚠ 输入eta=%.3f 与曲线估算eta_Ns=%.3f 偏差%+.3f(>5%%)，建议核查转速/级数"
+                    % (self.eta, eta_ns, eta_diff)
+                    if abs(eta_diff) > 0.05
+                    else ("  ✓ 输入效率与Ns曲线吻合，偏差=%+.3f(<5%%)" % eta_diff))
+
+        notes = [
+            "dP=%.2f MPa (%.1f bar)，温升 dT=%.2f K" % (dp/1e6, dp/1e5, delta_t),
+            "  dT_isentropic=%.2f K, dT_loss=%.2f K（液体泵近似温升模型）"
+                % (delta_t_isentropic, delta_t_loss),
+            "ρ_in=%.1f kg/m³ → ρ_out=%.1f kg/m³（压缩率修正 %+.2f%%）"
+                % (rho_in, rho_out, (rho_out/rho_in - 1)*100),
+            ("P_shaft=%.3f MW @ eta_input=%.3f（CoolProp Δh_s 口径；不可压参考 %.3f MW）"
+                % (power/1e6, self.eta, power_hydraulic/1e6)
+             if dh_s_real is not None else
+             "P_shaft=%.3f MW @ eta_input=%.3f（不可压口径 ΔP/ρ_in）" % (power/1e6, self.eta)),
+            "── 比转速(Ns)分析 ──────────────────────────",
+            "  转速 %.0f RPM (%.1f rad/s)，%d 级" % (self.nr_rpm, nr_rad, self.n_stages),
+            "  Q=%.2f L/s，Hp(总)=%.0f m，Hp/级=%.0f m" % (q_m3s*1000, hp_tot, hp1),
+            "  " + ns_diag,
+            note_eta,
+            "── 结构/汽蚀校核（V10）─────────────────────",
+            tip_note,
+        ]
+        if nss_note:
+            notes.append(nss_note)
+        notes += mat_notes
+
+        result = ComponentResult(
+            name = self.name,
+            outputs = {
+                "rho_in_kgm3"       : rho_in,
+                "rho_out_kgm3"      : rho_out,
+                "rho_kgm3"          : rho_in,   # 向后兼容别名
+                "p_in_MPa"          : self.p_in / 1e6,
+                "p_out_MPa"         : self.p_out / 1e6,
+                "p_in_bar"          : self.p_in / 1e5,
+                "p_out_bar"         : self.p_out / 1e5,
+                "delta_p_Pa"        : dp,
+                "delta_p_MPa"       : dp / 1e6,
+                "delta_p_bar"       : dp / 1e5,
+                "power_W"           : power,
+                "power_MW"          : power / 1e6,
+                # 功口径诊断：CoolProp 真实等熵焓升 vs 不可压水力式（V14 统一为前者）
+                "power_hydraulic_W" : power_hydraulic,
+                "specific_work_isentropic_Jkg": (dh_s_real if dh_s_real is not None else dp / rho_in),
+                "T_in_K"            : self.t_in,
+                "T_out_K"           : t_out,
+                "delta_T_K"         : delta_t,
+                "delta_T_isentropic_K": delta_t_isentropic,
+                "delta_T_loss_K"    : delta_t_loss,
+                "eta"               : self.eta,
+                "head_m"            : hp_tot,
+                "head_m_per_stage"  : hp1,
+                "volume_flow_m3s"   : q_m3s,
+                "volume_flow_Ls"    : q_m3s * 1000.0,
+                "volume_flow_m3h"   : q_m3s * 3600.0,   # 对标 CFTurbo Global setup（Q [m³/h]）
+                "nr_rpm"            : self.nr_rpm,
+                "nr_rad_s"          : nr_rad,
+                "n_stages"          : float(self.n_stages),
+                "specific_speed_Ns" : ns,
+                "eta_from_Ns_curve" : eta_ns,
+                "eta_deviation"     : eta_diff,
+                # ── V10 新增：结构/汽蚀诊断 ───────────────
+                "u_tip_est_ms"            : u_tip_pump,
+                "tip_speed_limit_ms"      : self.tip_speed_limit_ms,
+                "tip_speed_ok"            : 1.0 if tip_speed_ok else 0.0,
+                "d_impeller_est_m"        : d_impeller_est,
+                "psi_head_coefficient"    : psi_pump,
+                # NPSHa 按惯例(CFTurbo/泵工程)以液柱米 m 报出：npsh_m = (p_in - p_vap)/(ρ_in·g)。
+                # 入口 self.npsh_available_pa 是压力裕度[Pa]，此处转成压头[m]，与 σ/Nss/增压泵口径一致。
+                "npsh_available_m"        : (npsh_m if npsh_m is not None else 0.0),
+                "suction_specific_speed_Nss": (nss if nss is not None else 0.0),
+                "suction_specific_speed_nss_eu": (nss_eu if nss_eu is not None else 0.0),
+                "thoma_cavitation_number_sigma": (sigma_thoma if sigma_thoma is not None else 0.0),
+                **mat_outputs,
+            },
+            notes = notes,
+        )
+        return state, result

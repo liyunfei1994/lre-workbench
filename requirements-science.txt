@@ -1,0 +1,7 @@
+# Standard setup: physical properties, equilibrium chemistry and local 2D FEM.
+# --basic is an explicit interface-only opt-out with approximate fallback physics.
+# RocketCEA and PyVista are not installed automatically.
+cantera==3.1.0
+CoolProp==7.1.0
+scikit-fem==11.0.0
+scipy==1.15.3

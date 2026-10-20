@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.lnk
+release/
+ffsc_pyside6_v6_2_2/
+*.tmp
