@@ -23,7 +23,7 @@ def write_diagnostics(root: Path) -> tuple[Path, bool]:
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             report["error"] = str(exc)
     else:
-        report["error"] = "虚拟环境缺失、已搬迁或依赖的基础 Python 不可用。请运行 setup_windows.bat。"
+        report["error"] = "虚拟环境缺失、已搬迁或不是可用的标准版 Python 3.14 x64。请运行 setup_windows.bat。"
     for name, arguments in (("commit", ["rev-parse", "HEAD"]),
                             ("changes", ["status", "--short", "--untracked-files=no"])):
         try:

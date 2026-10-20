@@ -16,6 +16,26 @@ import bootstrap
 
 
 class PortableSetupTests(unittest.TestCase):
+    def test_interpreter_policy_rejects_old_or_incompatible_builds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "python.exe"
+            executable.write_bytes(b"MZ")
+            for version, bits, free_threaded, accepted in [
+                ([3, 14], 64, False, True),
+                ([3, 11], 64, False, False),
+                ([3, 12], 64, False, False),
+                ([3, 15], 64, False, False),
+                ([3, 14], 32, False, False),
+                ([3, 14], 64, True, False),
+            ]:
+                with self.subTest(version=version, bits=bits, free_threaded=free_threaded):
+                    result = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+                        "prefix": directory, "base": "base",
+                        "version": version, "bits": bits, "free_threaded": free_threaded,
+                    }))
+                    with patch.object(bootstrap.subprocess, "run", return_value=result):
+                        self.assertEqual(bootstrap.probe_interpreter(executable), accepted)
+
     def test_dead_executable_is_not_a_usable_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             dead = Path(directory) / "python.exe"

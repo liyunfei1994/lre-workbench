@@ -21,7 +21,7 @@ function Test-ProjectPython([string]$Executable, [string[]]$PrefixArguments = @(
         try {
             if ($taskExeStream.ReadByte() -ne 77 -or $taskExeStream.ReadByte() -ne 90) { return $false }
         } finally { $taskExeStream.Dispose() }
-        $taskProbe = & $Executable @PrefixArguments -I -c "import sys,struct; print('LRE_OK' if (3,11) <= sys.version_info[:2] <= (3,12) and struct.calcsize('P')==8 else 'LRE_UNSUPPORTED')" 2>$null
+        $taskProbe = & $Executable @PrefixArguments -I -c "import sys,struct,sysconfig; print('LRE_OK' if sys.version_info[:2]==(3,14) and struct.calcsize('P')==8 and not sysconfig.get_config_var('Py_GIL_DISABLED') else 'LRE_UNSUPPORTED')" 2>$null
         return ($LASTEXITCODE -eq 0 -and $taskProbe -contains 'LRE_OK')
     } catch { return $false }
 }
@@ -61,10 +61,10 @@ function Get-ManagedPython {
     $env:UV_CACHE_DIR = Join-Path $taskRoot '.cache\uv'
     $env:UV_PYTHON_INSTALL_REGISTRY = '0'
     $env:UV_PYTHON_INSTALL_BIN = '0'
-    Write-Host 'Installing a private Python 3.11 runtime for this project...'
-    & $taskUv python install 3.11 --no-config --no-bin
-    if ($LASTEXITCODE -ne 0) { throw 'Python download failed. Check GitHub access, or install Python 3.11/3.12 (64-bit) and retry.' }
-    $taskFound = & $taskUv python find 3.11 --managed-python --no-config
+    Write-Host 'Installing a private Python 3.14 runtime for this project...'
+    & $taskUv python install 3.14 --no-config --no-bin
+    if ($LASTEXITCODE -ne 0) { throw 'Python download failed. Check GitHub access, or install standard Python 3.14 (64-bit) and retry.' }
+    $taskFound = & $taskUv python find 3.14 --managed-python --no-config
     if ($LASTEXITCODE -ne 0 -or -not $taskFound) { throw 'Cannot locate the managed Python runtime.' }
     return ([string]($taskFound | Select-Object -Last 1)).Trim()
 }
@@ -78,7 +78,7 @@ try {
     $taskPrefix = @()
     if ($env:LRE_PYTHON) {
         if (-not (Test-ProjectPython $env:LRE_PYTHON)) {
-            throw 'LRE_PYTHON must point to a working Python 3.11/3.12 (64-bit).'
+            throw 'LRE_PYTHON must point to a working standard Python 3.14 (64-bit).'
         }
         $taskPython = $env:LRE_PYTHON
     }
@@ -91,7 +91,7 @@ try {
         if (-not $taskPython -and (Test-ProjectPython $taskCandidate)) { $taskPython = $taskCandidate }
     }
     if (-not $taskPython -and (Get-Command py.exe -ErrorAction SilentlyContinue)) {
-        foreach ($taskVersion in @('-3.11', '-3.12')) {
+        foreach ($taskVersion in @('-3.14')) {
             if (Test-ProjectPython 'py.exe' @($taskVersion)) {
                 $taskPython = 'py.exe'
                 $taskPrefix = @($taskVersion)

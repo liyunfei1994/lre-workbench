@@ -12,7 +12,7 @@
 
 | 需求 | 实施方式 | 本次状态 |
 | --- | --- | --- |
-| 多人开发、审查代码、查历史、回退 | Git + 分支 + PR + 自动测试 | 已建立私有仓库 [liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)，检查结果见仓库 Actions |
+| 多人开发、审查代码、查历史、回退 | Git + 分支 + PR + 自动测试 | 已建立公开仓库 [liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)，检查结果见仓库 Actions |
 | 换电脑能运行 | 自动准备解释器、依赖约束、运行时功能检测 | 已实施，验证情况见本次验证记录 |
 | 出问题能诊断 | 环境报告、版本指纹、源码包文件摘要 | 已实施 |
 | 浏览器使用，无需各自安装 | 网页界面 + 后台 API + 计算任务服务 | 尚未实施 |
@@ -65,6 +65,6 @@ flowchart LR
 
 ## 依据
 
-- [Python 官方 venv 文档](https://docs.python.org/3.11/library/venv.html)：虚拟环境不应视为可搬迁目录，应在目标机器重建。
+- [Python 官方 venv 文档](https://docs.python.org/3.14/library/venv.html)：虚拟环境不应视为可搬迁目录，应在目标机器重建。
 - [GitHub 必需检查](https://docs.github.com/en/pull-requests/reference/status-checks)：可将 CI 检查作为受保护分支的合并条件。
 - [uv 的 Python 管理](https://docs.astral.sh/uv/guides/install-python/)：可自动准备独立 Python；其分发来自 python-build-standalone。

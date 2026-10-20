@@ -16,13 +16,13 @@ import sys
 
 
 DEPENDENCIES = {
-    "PySide6": ("PySide6", "6.8.3", "interface"),
-    "numpy": ("numpy", "2.2.6", "interface"),
-    "matplotlib": ("matplotlib", "3.10.3", "interface"),
-    "cantera": ("cantera", "3.1.0", "science"),
-    "CoolProp": ("CoolProp", "7.1.0", "science"),
+    "PySide6": ("PySide6", "6.10.1", "interface"),
+    "numpy": ("numpy", "2.3.5", "interface"),
+    "matplotlib": ("matplotlib", "3.10.8", "interface"),
+    "cantera": ("cantera", "3.2.0", "science"),
+    "CoolProp": ("CoolProp", "7.2.0", "science"),
     "scikit-fem": ("skfem", "11.0.0", "science"),
-    "scipy": ("scipy", "1.15.3", "science"),
+    "scipy": ("scipy", "1.16.3", "science"),
 }
 
 # The basic installer must not attempt to repair unrelated science packages.

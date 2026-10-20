@@ -21,8 +21,9 @@
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 团队代码仓库、分支、审查、测试和发布流程 |
 | [平台建设方案](docs/PLATFORM_PLAN.md) | 桌面版向内网网页平台逐步迁移的架构与边界 |
 
-**多人开发使用统一私有仓库：[liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)。**
-成员接受仓库邀请后，按照 [协作指南](CONTRIBUTING.md) 获取源码、提交分支并发起 Pull Request。
+**多人开发使用统一公开仓库：[liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)。**
+任何人都可查看、下载和 Fork；外部贡献者从自己的 Fork 发起 Pull Request，
+受邀协作者可向仓库推送功能分支。具体步骤见 [协作指南](CONTRIBUTING.md)。
 主分支提交与 Pull Request 的安装、测试和打包结果见 [GitHub Actions](https://github.com/liyunfei1994/lre-workbench/actions)。
 分支保护的启用情况以仓库设置为准。当前仍是桌面程序，尚未实现浏览器使用、
 共享数据库、多人同时编辑或服务器端计算队列。
@@ -75,20 +76,20 @@
 
 1. 从团队发布渠道取得 `火箭动力工作台_V7.1.0-team-source.zip`，解压到可写目录。
 2. 双击 `setup_windows.bat`。需要 Windows x64；首次安装需要联网。
-3. 启动器优先使用可用的 Python 3.11 / 3.12 x64。没有时自动下载经摘要校验的 uv，
-   并在项目 `.runtime/` 内准备 Python 3.11，不修改系统 PATH 或其他项目。
+3. 启动器使用标准版 Python 3.14 x64。没有时自动下载经摘要校验的 uv，
+   并在项目 `.runtime/` 内准备 Python 3.14，不修改系统 PATH 或其他项目。
 4. 安装完整科学依赖，校验版本、Cantera 机制与 CoolProp 功能，生成当前目录快捷方式。
 5. 双击 `start_windows.bat` 或重新生成的 **火箭动力工作台 V7.1.0** 图标。
 
-每次启动都会验证真实环境。健康环境不重复下载；失效的 `.venv` 会先改名为
+每次启动都会验证真实环境。健康环境不重复下载；旧 Python 版本或失效的 `.venv` 会先改名为
 `.venv.backup-日期-标识` 再重建。检查新版本可用后可自行归档这些备份。
 同一时间只能有一个安装 / 修复流程，避免多个启动窗口同时改写依赖。
 
-依赖来源为 PyPI；自动准备 Python 还需要访问 GitHub。网络受限时，可自行安装 Python 3.11/3.12 x64，
+依赖来源为 PyPI；自动准备 Python 还需要访问 GitHub。网络受限时，可自行安装标准版 Python 3.14 x64，
 再双击安装脚本。也可以在 PowerShell 中通过 `LRE_PYTHON` 指定已有解释器的完整路径：
 
 ```powershell
-$env:LRE_PYTHON = 'D:\Python311\python.exe'  # 替换为本机真实路径
+$env:LRE_PYTHON = 'C:\Python314\python.exe'  # 替换为本机真实路径
 .\setup_windows.bat
 ```
 
@@ -104,7 +105,10 @@ python -m pip download -r requirements.txt -r requirements-science.txt -c constr
 
 不要跨电脑复制 `.venv`、`.runtime` 或快捷方式。发布 ZIP 是源码安装包，启动器负责准备运行环境；
 外部 CFD 软件及其许可证不在安装包中。Python 虚拟环境应在目标机器重建，参见
-[Python 官方说明](https://docs.python.org/3.11/library/venv.html)。
+[Python 官方说明](https://docs.python.org/3.14/library/venv.html)。
+
+当前依赖锁定为 Cantera 3.2.0、CoolProp 7.2.0 等支持 Python 3.14 的版本，
+不使用 free-threaded Python 构建。支持范围及迁移说明见 [Python 3.14 迁移记录](docs/PYTHON314.md)。
 
 ## 保存、恢复与诊断
 

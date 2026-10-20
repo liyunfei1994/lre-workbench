@@ -16,9 +16,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def probe_interpreter(python: Path, environment: Path | None = None) -> bool:
     """Do not confuse an existing executable with a functioning local venv."""
-    code = ("import sys,struct,json; print(json.dumps({'prefix':sys.prefix,"
+    code = ("import sys,struct,json,sysconfig; print(json.dumps({'prefix':sys.prefix,"
             "'base':sys.base_prefix,'version':list(sys.version_info[:2]),"
-            "'bits':struct.calcsize('P')*8}))")
+            "'bits':struct.calcsize('P')*8,"
+            "'free_threaded':bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}))")
     try:
         if os.name == "nt":
             # Avoid Windows' modal loader error for an obviously damaged file.
@@ -28,7 +29,8 @@ def probe_interpreter(python: Path, environment: Path | None = None) -> bool:
         result = subprocess.run([str(python), "-I", "-c", code], capture_output=True,
                                 text=True, encoding="utf-8", timeout=20, check=True)
         info = json.loads(result.stdout)
-        if not (3, 11) <= tuple(info["version"]) <= (3, 12) or info["bits"] != 64:
+        if (tuple(info["version"]) != (3, 14) or info["bits"] != 64
+                or info["free_threaded"]):
             return False
         return environment is None or (
             Path(info["prefix"]).resolve() == environment.resolve()
@@ -110,7 +112,7 @@ def ensure_runtime(python: Path, environment: Path, mode: str = "full", root: Pa
         pip = subprocess.run([str(python), "-m", "pip", "--version"], capture_output=True)
         if pip.returncode:
             subprocess.run([str(python), "-m", "ensurepip", "--upgrade"], check=True)
-        command = [str(python), "-m", "pip", "install", "--disable-pip-version-check",
+        command = [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--only-binary=:all:",
                    "-r", str(root / "requirements.txt")]
         if mode == "full":
             command.extend(["-r", str(root / "requirements-science.txt")])
@@ -143,8 +145,8 @@ def main():
     if os.name != "nt":
         print("当前版本只提供 Windows 启动与安装入口。", flush=True)
         return 1
-    if not (3, 11) <= sys.version_info[:2] <= (3, 12):
-        print("需要 64 位 Python 3.11–3.12，推荐 Python 3.11。", flush=True)
+    if not probe_interpreter(Path(sys.executable)):
+        print("需要标准版 64 位 CPython 3.14（不支持 free-threaded 构建）。", flush=True)
         return 1
     environment = ROOT / ".venv"
     python = environment / "Scripts/python.exe"

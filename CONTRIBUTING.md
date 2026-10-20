@@ -5,16 +5,17 @@
 
 ## 首次加入
 
-团队使用私有仓库 [liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)。
-维护者 `liyunfei1994` 在仓库 Settings → Collaborators 中邀请成员；成员接受邀请并登录自己的 GitHub 账号后：
+团队使用公开仓库 [liyunfei1994/lre-workbench](https://github.com/liyunfei1994/lre-workbench)。
+任何人都可直接下载源码。维护者在 Settings → Collaborators 中邀请需要直接推送功能分支的成员。
+外部贡献者先在 GitHub 点击 Fork，将下列克隆地址替换为自己的 Fork 地址：
 
 ```powershell
 git clone https://github.com/liyunfei1994/lre-workbench.git
 cd lre-workbench
 ```
 
-进入克隆目录，双击 `setup_windows.bat`。启动器选择 Python 3.11/3.12 x64；
-如果没有，会联网下载项目私有的 Python 3.11。无需改动其他项目的 Python。
+进入克隆目录，双击 `setup_windows.bat`。启动器选择标准版 Python 3.14 x64；
+如果没有，会联网下载项目专用的 Python 3.14。无需改动其他项目的 Python。
 PyCharm 的解释器选择本项目的 `.venv\Scripts\python.exe`。
 
 ## 日常修改
@@ -43,22 +44,19 @@ git push -u origin feature/your-change
 ```
 
 在仓库的 Pull requests 页面选择 New pull request，目标分支为 `main`，
-来源分支为自己的功能分支，说明改动目的与验证结果。
+来源分支为自己的功能分支（外部贡献者选择自己的 Fork），说明改动目的与验证结果。
 由另一位成员审查，测试通过后合并。不要在未检查 `git status` 的情况下覆盖目录或强行同步。
 更新代码后双击 `start_windows.bat`，启动器会重新检查依赖；不需要手动重装整个项目。
 
 在 GitHub 中启用 `main` 分支规则，要求至少一人审查，并将以下检查设为合并条件：
 
-- `Windows Python 3.11`
-- `Windows Python 3.12`
+- `Windows Python 3.14`
 
 工作流位于 `.github/workflows/validate.yml`，
 实际执行状态与下载产物见 [Actions](https://github.com/liyunfei1994/lre-workbench/actions)。
 主分支提交、Pull Request 和 `v*` 标签触发检查，也可手动运行。
-分支保护需要管理员在远端设置，且取决于账户套餐对私有仓库规则的支持。
-2026-10-20 为本仓库启用规则时，GitHub 返回当前套餐不支持私有仓库分支保护（HTTP 403）。
-因此当前检查会运行，但审查和检查通过尚未被强制设为合并条件；团队应手动遵守上述 PR 流程。
-仓库保持私有。以后账户具备相应能力时，再启用上列规则。
+分支保护在 GitHub 远端设置；实际生效情况以 Settings → Branches 为准。
+公开可见不代表所有访问者都能修改主分支。维护者审核 PR 后才合并代码。
 其他 Git 服务需要按该平台的 CI 格式移植同样的安装、测试和打包命令。
 
 ## 文件边界
@@ -76,7 +74,7 @@ git push -u origin feature/your-change
 ## 依赖与计算模块
 
 `requirements.txt`、`requirements-science.txt` 定义直接依赖，
-`constraints.txt` 固定其传递依赖。修改依赖必须同步这些文件并在两种 Python 版本上检查。
+`constraints.txt` 固定其传递依赖。修改依赖必须同步这些文件并在标准版 Python 3.14 x64 上检查。
 不要在本地安装最新依赖后直接把虚拟环境打包给别人。
 
 UI 修改尽量放在 `workbench.py` 和相关界面文件；计算改动放在对应计算模块，

@@ -1,6 +1,31 @@
 # Windows 验证记录
 
-## 协作维护与跨电脑启动（2026-10-20）
+## Python 3.14 迁移（2026-10-20）
+
+- 使用本机标准版 CPython **3.14.4 x64** 建立独立候选环境，再重建正式 `.venv`。
+  旧 3.11 环境保留在 `.venv.backup-20261020-194701-219f17b9`。
+- 从官方 PyPI 安装 21 项锁定依赖，均使用 wheel；`pip check` 通过。
+  Cantera 3.2.0、CoolProp 7.2.0 的功能检查及 16 项环境相关回归通过。
+- 新旧环境抽查：300 K、101325 Pa、CH4:O2:N2=1:2:7.52 的 HP 平衡温度均为
+  2225.524583477 K；90 K / 1 MPa 氧密度均为 1144.095589946 kg/m³；
+  110 K / 1 MPa 甲烷焓均为 -4470.087723521 J/kg。
+  此抽查不能证明所有工况数值等价。
+- `gri30.yaml` 的 SHA-256 为
+  `06650b1e0ee0012f6903d5328b1bb218cb6007d07f8ebe375d18f24811039345`，
+  新旧环境一致，均为 53 组分 / 325 反应。
+- 正式环境实际执行 `setup_windows.bat` 通过，重新生成 Unicode 快捷方式。
+  完整回归 **162 项通过，无跳过，156.421 秒**，含版本选择、旧环境保留、Windows Shell、
+  界面导航、计算任务、方案保存恢复、CFD 交接及发布包检查。
+  本机日志为 `diagnostics/python314-regression.log`，不进入 Git 或发布包。
+- 真实 `run_app.main()` 在独立临时用户目录下正常初始化、进入 Qt 事件循环并退出；
+  主窗口截图 `diagnostics/python314-preview.png` 经检查，界面及完整科学环境状态正常。
+- 自动测试改为 Windows Python 3.14；对应提交在另一台干净 Windows 上的安装、
+  完整回归和打包状态见 [GitHub Actions](https://github.com/liyunfei1994/lre-workbench/actions)。
+- 仓库可见性已经 GitHub API 确认为 Public；历史发布 `v7.1.0-team.1` 保留用于回退。
+
+下列记录对应旧版环境，保留作历史比较。
+
+## 协作维护与跨电脑启动（2026-10-20，Python 3.11 / 3.12 历史版本）
 
 - 本机目录：`E:\PycharmProjects\ChinaRaptor\火箭动力工作台_V7.1.0`。确认原快捷方式指向原作者桌面，
   原 `.venv` 依赖不存在的 `E:\Python3\python.exe`，而本机系统 Python 为 3.14。
