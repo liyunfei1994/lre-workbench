@@ -21,7 +21,10 @@
 - 实际 `run_app.main()` 入口在 Qt offscreen 下初始化主窗口、进入事件循环并正常关闭，
   环境状态为完整。截图 `diagnostics/preview-repaired.png` 经视觉检查无启动错误或布局异常。
 - GitHub 工作流 YAML 已解析检查，配置 Windows Python 3.11 / 3.12 的安装、测试和打包。
-  **远端 Actions 与 Python 3.12 本次尚未执行**，不能将工作流配置视为远端验证完成。
+  仓库为 `liyunfei1994/lre-workbench`；当前提交的远端执行结果以仓库 Actions 为准。
+- 首次远端回归在英文 Windows 上发现 WScript.Shell 将中文快捷方式文件名变为问号，无法保存。
+  已改用 `IShellLinkW` / `IPersistFile` 原生 Unicode 接口；回归同时检查中文目录、文件名、
+  启动参数、工作目录及任务栏标识，并在 CI 中实际执行 `setup_windows.bat`。
 
 本次没有修改物理计算模型、默认物性或求解容差，没有运行真实外部 CFD 软件。
 网页服务、账户与共享数据库不属于本次已实施功能，迁移安排见 `PLATFORM_PLAN.md`。

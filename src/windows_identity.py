@@ -67,7 +67,7 @@ def _com_apartment():
             ole.CoUninitialize()
 
 
-class _PropertyStore:
+class _ComInterface:
     def __init__(self, pointer):
         self.pointer = pointer
 
@@ -75,6 +75,11 @@ class _PropertyStore:
         table = ctypes.cast(self.pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
         return ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *arguments)(table[index])
 
+    def release(self):
+        self._method(2, result=ctypes.c_uint32)(self.pointer)
+
+
+class _PropertyStore(_ComInterface):
     def set(self, pid, value):
         key = _PropertyKey(_APP_FMTID, pid)
         variant = _PropVariant()
@@ -106,9 +111,6 @@ class _PropertyStore:
 
     def commit(self):
         _check_hresult(self._method(7)(self.pointer), "IPropertyStore.Commit")
-
-    def release(self):
-        self._method(2, result=ctypes.c_uint32)(self.pointer)
 
 
 @contextmanager
@@ -175,6 +177,59 @@ def configure_shortcut_identity(path, root):
     notify.argtypes = [ctypes.c_int32, ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_void_p]
     notify.restype = None
     notify(0x2000, 0x1005, str(Path(path).resolve()), None)  # UPDATEITEM, PATHW | FLUSH
+
+
+def create_workbench_shortcut(path, root):
+    """Save a Unicode .lnk without WScript.Shell's system-code-page conversion."""
+    if sys.platform != "win32":
+        raise OSError("Windows shortcuts require Windows")
+    from version import APP_NAME
+    root, path = Path(root).resolve(), Path(path).resolve()
+    if path.suffix.lower() != ".lnk" or not path.parent.is_dir():
+        raise ValueError("The shortcut must be an .lnk in an existing directory")
+    values = _identity_values(root)  # Also check the launcher and icon exist.
+    clsid = _guid("00021401-0000-0000-C000-000000000046")  # ShellLink
+    link_iid = _guid("000214F9-0000-0000-C000-000000000046")  # IShellLinkW
+    persist_iid = _guid("0000010B-0000-0000-C000-000000000046")  # IPersistFile
+    with _com_apartment():
+        pointer = ctypes.c_void_p()
+        create = ctypes.windll.ole32.CoCreateInstance
+        create.argtypes = [ctypes.POINTER(_GUID), ctypes.c_void_p, ctypes.c_uint32,
+                           ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
+        create.restype = ctypes.c_int32
+        _check_hresult(create(ctypes.byref(clsid), None, 1, ctypes.byref(link_iid),
+                              ctypes.byref(pointer)), "CoCreateInstance(IShellLinkW)")
+        link = _ComInterface(pointer)
+        try:
+            # IShellLinkW vtable slots; all string parameters are UTF-16.
+            for slot, value in (
+                (20, str(Path(os.environ["SystemRoot"]) / "System32" / "wscript.exe")),
+                (11, subprocess.list2cmdline([str(root / "start_windows.vbs")])),
+                (9, str(root)),
+                (7, f"{APP_NAME} {APP_VERSION}"),
+            ):
+                _check_hresult(link._method(slot, ctypes.c_wchar_p)(pointer, value),
+                               f"IShellLinkW slot {slot}")
+            _check_hresult(link._method(17, ctypes.c_wchar_p, ctypes.c_int32)(
+                pointer, values[3].rsplit(",", 1)[0], 0), "IShellLinkW.SetIconLocation")
+            persistent = ctypes.c_void_p()
+            _check_hresult(link._method(0, ctypes.POINTER(_GUID),
+                                        ctypes.POINTER(ctypes.c_void_p))(
+                pointer, ctypes.byref(persist_iid), ctypes.byref(persistent)),
+                "QueryInterface(IPersistFile)")
+            persist = _ComInterface(persistent)
+            try:
+                result = persist._method(6, ctypes.c_wchar_p, ctypes.c_int32)(
+                    persistent, str(path), 1)
+                _check_hresult(result, "IPersistFile.Save")
+                if result != 0:
+                    raise OSError("IPersistFile.Save did not complete")
+            finally:
+                persist.release()
+        finally:
+            link.release()
+    configure_shortcut_identity(path, root)
+    return path
 
 
 def read_taskbar_identity(*, hwnd=None, path=None):
