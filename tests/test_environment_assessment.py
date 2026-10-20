@@ -39,7 +39,7 @@ class EnvironmentTests(unittest.TestCase):
         report = environment_report(ROOT)
         self.assertTrue(report["ready"], report["dependencies"])
         self.assertEqual(report["physical_path"], {"equilibrium_chemistry": "Cantera", "real_fluid_properties": "CoolProp"})
-        self.assertEqual(len(report["requirements_sha256"]), 2)
+        self.assertEqual(len(report["requirements_sha256"]), 3)
         self.assertEqual(json.loads(json.dumps(report))["fingerprint"], report["fingerprint"])
 
     def test_fingerprint_tracks_versions_not_install_location(self):
@@ -49,6 +49,31 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(environment_fingerprint(report), environment_fingerprint(other))
         other["dependencies"]["cantera"]["version"] = "different"
         self.assertNotEqual(environment_fingerprint(report), environment_fingerprint(other))
+
+    def test_transitive_dependency_drift_blocks_complete_environment(self):
+        import runtime_environment
+        original = runtime_environment.importlib.metadata.version
+        def drift(name):
+            return "0.0" if name == "packaging" else original(name)
+        with patch.object(runtime_environment.importlib.metadata, "version", side_effect=drift):
+            report = environment_report(ROOT)
+        self.assertFalse(report["ready"])
+        self.assertTrue(any("packaging" in problem for problem in report["lock_problems"]))
+
+    def test_fingerprint_tracks_locked_transitive_versions(self):
+        report = environment_report(ROOT)
+        other = deepcopy(report)
+        other["locked_versions"]["packaging"] = "0.0"
+        self.assertNotEqual(environment_fingerprint(report), environment_fingerprint(other))
+
+    def test_basic_mode_does_not_require_science_dependency_lock(self):
+        import runtime_environment
+        original = runtime_environment.importlib.metadata.version
+        def drift(name):
+            return "0.0" if name == "scipy" else original(name)
+        with patch.object(runtime_environment.importlib.metadata, "version", side_effect=drift):
+            report = environment_report(ROOT, "basic")
+        self.assertTrue(report["ready"], report["lock_problems"])
 
     def test_missing_chemistry_cannot_claim_complete_environment(self):
         import runtime_environment

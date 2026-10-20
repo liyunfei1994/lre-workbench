@@ -1,12 +1,29 @@
-# 火箭动力工作台 V7.1.0 · CFD 协同
+# 火箭动力工作台 V7.1.0 · 协作维护版
 
 正式名称：**液体火箭发动机数字样机设计与分析平台**。英文名称：**LRE Workbench（Liquid Rocket Engine Workbench）**。
 
-本机新版目录：`C:\Users\Zty06\Desktop\火箭动力工作台_V7.1.0`。V7.0.0 保留在原目录，两个版本使用独立环境、任务栏标识、恢复草稿和日志。
+本次维护修复跨电脑启动，并补齐团队开发和发布流程。安装路径由当前文件夹决定，
+不再依赖原作者的用户名、桌面目录或基础 Python。计算版本及方案格式保持 V7.1.0 兼容。
 
 ## 打开新版
 
-双击桌面或版本目录中的 **火箭动力工作台 V7.1.0** 图标。备用入口为 `start_windows.bat`，安装 / 修复入口为 `setup_windows.bat`。
+**现在直接双击 `start_windows.bat`。** 第一次运行会检查并准备本机环境，完成后打开工作台。
+需要仅安装 / 修复时双击 `setup_windows.bat`，完成后会重新生成当前目录的图标。
+
+截图里的“无法找到脚本文件”是旧快捷方式指向另一台电脑造成的。搬动文件夹后，
+请使用文件夹内的 `start_windows.bat`，或重新运行安装脚本生成图标。不要复制 `.lnk` 给其他成员。
+
+| 入口 | 用途 |
+| --- | --- |
+| `start_windows.bat` | 检查环境并启动应用 |
+| `setup_windows.bat` | 准备环境，修复当前文件夹的快捷方式 |
+| `diagnose_windows.bat` | 生成 `diagnostics/` 下的环境报告，便于定位问题 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 团队代码仓库、分支、审查、测试和发布流程 |
+| [平台建设方案](docs/PLATFORM_PLAN.md) | 桌面版向内网网页平台逐步迁移的架构与边界 |
+
+**多人开发使用统一 Git 仓库。** 本地已加入自动测试工作流，连接团队 GitHub 仓库后可在每次提交 /
+Pull Request 时检查。远端仓库和分支保护需要团队完成配置。当前仍是桌面程序，尚未实现浏览器使用、
+共享数据库、多人同时编辑或服务器端计算队列。
 
 桌面程序当前仍专注 Windows。通用 JSON / CSV 任务包可传给其他电脑的 CFD 适配程序；没有添加 Linux 桌面启动器。
 
@@ -54,12 +71,38 @@
 
 ## 新电脑安装
 
-1. 安装 Python 3.10–3.12（推荐 3.11），勾选 Add Python to PATH。
-2. 解压 `release/火箭动力工作台_V7.1.0-windows.zip` 到可写目录。
-3. 双击 `setup_windows.bat`。首次安装需要联网，默认安装完整固定版本的科学计算依赖并创建带版本号的图标。
-4. 双击 **火箭动力工作台 V7.1.0** 打开。完整环境就绪时不会重复下载依赖。
+1. 从团队发布渠道取得 `火箭动力工作台_V7.1.0-team-source.zip`，解压到可写目录。
+2. 双击 `setup_windows.bat`。需要 Windows x64；首次安装需要联网。
+3. 启动器优先使用可用的 Python 3.11 / 3.12 x64。没有时自动下载经摘要校验的 uv，
+   并在项目 `.runtime/` 内准备 Python 3.11，不修改系统 PATH 或其他项目。
+4. 安装完整科学依赖，校验版本、Cantera 机制与 CoolProp 功能，生成当前目录快捷方式。
+5. 双击 `start_windows.bat` 或重新生成的 **火箭动力工作台 V7.1.0** 图标。
 
-不要跨电脑复制 `.venv`。发布 ZIP 是 Windows 源码安装包，需要 Python；外部 CFD 软件及其许可证不在安装包中。
+每次启动都会验证真实环境。健康环境不重复下载；失效的 `.venv` 会先改名为
+`.venv.backup-日期-标识` 再重建。检查新版本可用后可自行归档这些备份。
+同一时间只能有一个安装 / 修复流程，避免多个启动窗口同时改写依赖。
+
+依赖来源为 PyPI；自动准备 Python 还需要访问 GitHub。网络受限时，可自行安装 Python 3.11/3.12 x64，
+再双击安装脚本。也可以在 PowerShell 中通过 `LRE_PYTHON` 指定已有解释器的完整路径：
+
+```powershell
+$env:LRE_PYTHON = 'D:\Python311\python.exe'  # 替换为本机真实路径
+.\setup_windows.bat
+```
+
+离线安装需要提前在相同系统、架构和 Python 次版本上准备 wheel 文件，
+同时提供可用的基础 Python。准备机器执行：
+
+```powershell
+python -m pip download -r requirements.txt -r requirements-science.txt -c constraints.txt -d wheelhouse
+```
+
+目标机器设置 `PIP_NO_INDEX=1` 和 `PIP_FIND_LINKS` 为 wheelhouse 的真实目录后再运行安装。
+`--basic` 仅用于明确选择基础界面环境的调试，不等价于完整科学环境。
+
+不要跨电脑复制 `.venv`、`.runtime` 或快捷方式。发布 ZIP 是源码安装包，启动器负责准备运行环境；
+外部 CFD 软件及其许可证不在安装包中。Python 虚拟环境应在目标机器重建，参见
+[Python 官方说明](https://docs.python.org/3.11/library/venv.html)。
 
 ## 保存、恢复与诊断
 
@@ -70,6 +113,7 @@ CFD 任务进行中不能替换方案、恢复另一份草稿或直接关闭窗�
 - 草稿：`%LOCALAPPDATA%\lre-workbench\7.1.0\recovery`。
 - 应用日志：`%LOCALAPPDATA%\lre-workbench\7.1.0\logs\workbench.log`。
 - 外部任务日志与终态：任务目录中的 `adapter.log`、`run_status.json`。
+- 安装环境诊断：双击 `diagnose_windows.bat`；报告含本机路径、依赖和 Git 状态，不读取个人方案。
 
 “数值收敛”和“工程约束”继续独立显示。默认 FFSC 初算仍可能欠压或超温，CFD 求解器声明收敛也不证明网格独立性、守恒或整机可行性。材料库数据及局部模型用于初步分析。
 
@@ -81,5 +125,7 @@ CFD 任务进行中不能替换方案、恢复另一份草稿或直接关闭窗�
 ```
 
 验证记录见 [docs/VALIDATION.md](docs/VALIDATION.md)。发布包不含本机 `.venv`、个人方案、CFD 任务和运行日志。
+新包使用 `*-team-source.zip` 文件名，附 `.sha256` 校验文件及包内 `SOURCE_MANIFEST.json`。
+旧的 `*-windows.zip` 不会被本次打包覆盖。
 
 内置 Noto Sans SC 使用 SIL Open Font License 1.1；授权见 `assets/fonts/OFL.txt`。图标沿用工作台矢量资源。

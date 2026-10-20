@@ -1,4 +1,4 @@
-# Tested runtime; Python 3.10-3.12. Same direct versions on Windows and Linux.
+# Desktop runtime; Python 3.11-3.12, Windows x64. See constraints.txt.
 PySide6==6.8.3
 numpy==2.2.6
 matplotlib==3.10.3

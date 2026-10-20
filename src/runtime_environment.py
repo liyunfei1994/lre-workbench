@@ -25,11 +25,18 @@ DEPENDENCIES = {
     "scipy": ("scipy", "1.15.3", "science"),
 }
 
+# The basic installer must not attempt to repair unrelated science packages.
+BASIC_LOCK_PACKAGES = {
+    "pyside6", "pyside6-addons", "pyside6-essentials", "shiboken6",
+    "numpy", "matplotlib", "contourpy", "cycler", "fonttools", "kiwisolver",
+    "packaging", "pillow", "pyparsing", "python-dateutil", "six",
+}
+
 
 def requirements_hashes(root: Path | str | None = None) -> dict[str, str]:
     root = Path(root) if root is not None else Path(__file__).resolve().parent.parent
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-            for name in ("requirements.txt", "requirements-science.txt")
+            for name in ("requirements.txt", "requirements-science.txt", "constraints.txt")
             if (root / name).is_file()}
 
 
@@ -60,6 +67,7 @@ def environment_fingerprint(report: dict) -> str:
     payload["functional_checks"] = {
         name: {key: entry.get(key) for key in ("ready", "mechanism_sha256", "n_species", "n_reactions")}
         for name, entry in report["functional_checks"].items()}
+    payload["locked_versions"] = report.get("locked_versions", {})
     return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()
 
@@ -119,6 +127,25 @@ def environment_report(root: Path | str | None = None, mode: str = "full") -> di
                 for entry in dependencies.values() if entry["required"])
     if mode == "full":
         ready = ready and all(entry["ready"] for entry in functional_checks.values())
+    locked_versions, lock_problems = {}, []
+    lockfile = root / "constraints.txt"
+    if lockfile.is_file():
+        for line in lockfile.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            distribution, expected_version = line.split("==", 1)
+            normalized = distribution.lower().replace("_", "-").replace(".", "-")
+            if mode == "basic" and normalized not in BASIC_LOCK_PACKAGES:
+                continue
+            try:
+                actual = importlib.metadata.version(distribution)
+            except importlib.metadata.PackageNotFoundError:
+                actual = None
+            locked_versions[distribution] = actual
+            if actual != expected_version:
+                lock_problems.append(f"{distribution}: {actual or '未安装'}，锁定版本 {expected_version}")
+        ready = ready and not lock_problems
     report = {
         "schema_version": 1, "mode": mode, "ready": ready,
         "python": {"version": platform.python_version(), "implementation": platform.python_implementation(),
@@ -127,6 +154,8 @@ def environment_report(root: Path | str | None = None, mode: str = "full") -> di
         "executable": sys.executable,
         "dependencies": dependencies,
         "functional_checks": functional_checks,
+        "locked_versions": locked_versions,
+        "lock_problems": lock_problems,
         "requirements_sha256": requirements_hashes(root),
         "physical_path": {
             "equilibrium_chemistry": ("Cantera" if mechanism["ready"] else
@@ -147,4 +176,4 @@ def environment_problems(report: dict) -> list[str]:
     if report["mode"] == "full":
         problems.extend(f"{name}: {entry['error'] or '功能检查未通过'}"
                         for name, entry in report["functional_checks"].items() if not entry["ready"])
-    return problems
+    return problems + report.get("lock_problems", [])
