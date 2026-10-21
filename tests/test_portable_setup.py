@@ -118,8 +118,10 @@ class PortableSetupTests(unittest.TestCase):
                 self.assertTrue({"constraints.txt", ".python-version", "diagnose_windows.bat",
                                  "scripts/launch_windows.ps1", "CONTRIBUTING.md",
                                  ".github/workflows/validate.yml", "SOURCE_MANIFEST.json"} <= files)
+                self.assertTrue({"webapp/app.py", "webapp/static/app.js", "requirements-web.txt",
+                                 "start_web_windows.bat", "stop_web_windows.bat", "docs/WEB_LOCAL.md"} <= files)
                 self.assertFalse(any(".venv" in name or name.endswith(".lnk")
-                                     or name.startswith((".runtime/", "diagnostics/", ".git/"))
+                                     or name.startswith((".runtime/", "diagnostics/", ".git/", "user_data/", ".cache/"))
                                      for name in files))
                 manifest_name = next(name for name in archive.namelist()
                                      if name.endswith("/SOURCE_MANIFEST.json"))

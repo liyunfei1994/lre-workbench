@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="LRE Workbench 本机协作工作台：共享项目、方案版本与计算任务。">
+  <title>火箭动力工作台 · Web</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <section id="auth" class="auth-layout">
+    <div class="auth-story">
+      <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>LRE WORKBENCH / WEB</small></div></div>
+      <span class="eyebrow">从个人工作台，走向团队协作</span>
+      <h1>让每一次计算，<br>都有迹可循。</h1>
+      <p>在一个工作区保存方案、追踪修改、提交计算。<br>已有的 Python 计算核心，新的浏览器入口。</p>
+      <div class="story-flow"><span>01<br><b>共享项目</b></span><i>→</i><span>02<br><b>方案版本</b></span><i>→</i><span>03<br><b>计算记录</b></span></div>
+      <div class="local-note"><span class="dot"></span>本机试用版 · 当前仅此电脑可访问</div>
+    </div>
+    <div class="auth-panel">
+      <div class="auth-card">
+        <span class="eyebrow">你的工程工作区</span>
+        <h2 id="auth-title">正在连接工作台…</h2>
+        <p id="auth-description" class="muted">正在读取本机服务状态。</p>
+        <form id="auth-form" hidden>
+          <label id="display-label">显示名称<input id="auth-display" maxlength="40" autocomplete="name" placeholder="例如：李老师"></label>
+          <label>用户名<input id="auth-username" required pattern="[a-zA-Z0-9_-]{3,32}" maxlength="32" autocomplete="username" placeholder="3–32 位字母、数字、下划线"></label>
+          <label>密码<input id="auth-password" type="password" required maxlength="128" autocomplete="current-password"></label>
+          <p id="auth-error" class="error" role="alert"></p>
+          <button id="auth-submit" type="submit" class="primary wide">进入工作区</button>
+        </form>
+        <p class="fine">数据保存在这台电脑。首个账号是管理员，可在“成员”中创建其他账号。账号密码不会上传 GitHub。</p>
+      </div>
+    </div>
+  </section>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>LRE WORKBENCH</small></div></div>
+      <div class="workspace-label">团队工作区 <span>本机</span></div>
+      <nav aria-label="工作区导航">
+        <button data-nav="projects" class="active"><span>▦</span>共享项目</button>
+        <button data-nav="jobs"><span>◷</span>计算任务</button>
+        <button data-nav="members" id="members-nav" hidden><span>♧</span>成员管理</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="dot"></span>本机服务运行中<p>方案与结果统一保存在本机<br>此版本尚未开放局域网访问</p><span id="runtime-version"></span></div>
+    </aside>
+    <div class="main-wrap">
+      <header><div><span class="breadcrumb">工作区 / </span><b id="page-name">共享项目</b></div><div class="user-area"><span id="user-label"></span><button class="text-btn" id="logout">退出</button></div></header>
+      <main>
+        <section id="projects-page">
+          <div class="page-heading"><div><span class="eyebrow">PROJECTS</span><h1>共享项目</h1><p class="muted">把方案、修订与计算记录放在一起。工作区内的成员可访问全部项目。</p></div><button class="primary" id="new-project">＋ 新建项目</button></div>
+          <div class="stats"><div><span>工作区项目</span><b id="stat-projects">0</b></div><div><span>等待 / 计算中</span><b id="stat-active">0</b></div><div><span>最近 100 条中的已完成任务</span><b id="stat-done">0</b></div></div>
+          <div id="projects-list" class="project-grid"></div>
+        </section>
+        <section id="project-page" hidden>
+          <button class="back text-btn" id="back-projects">← 返回共享项目</button>
+          <div class="page-heading"><div><span class="eyebrow">PROJECT WORKSPACE</span><h1 id="project-title"></h1><p class="muted" id="project-meta"></p></div><div class="actions"><button id="reload-project">重新载入</button><button id="export-inputs">导出方案</button></div></div>
+          <div class="project-layout">
+            <section class="panel editor">
+              <div class="panel-heading"><h2>方案参数</h2><span id="dirty-label" class="badge">已保存</span></div>
+              <form id="project-form">
+                <label>项目名称<input id="project-name" maxlength="80" required></label>
+                <label>说明<textarea id="project-description" rows="2" maxlength="1000"></textarea></label>
+                <div class="section-label">已有参考工况</div>
+                <div class="inline-form"><select id="project-preset" aria-label="参考工况"></select><button id="apply-preset" type="button">载入</button></div>
+                <p class="fine">载入会替换当前参数；计算仍采用桌面版已有模型。</p>
+                <div class="form-grid" id="parameter-fields"></div>
+                <details><summary>完整参数 JSON（SI 单位）</summary><p class="fine">保留桌面版的全部参数。修改 JSON 后，点击“应用 JSON”。</p><textarea id="raw-inputs" rows="12" spellcheck="false" aria-label="完整参数 JSON"></textarea><div class="actions"><button type="button" id="apply-json">应用 JSON</button><label class="file-button">导入方案<input type="file" accept=".json,application/json" id="import-inputs"></label></div></details>
+                <p id="editor-error" class="error" role="alert"></p>
+                <div class="editor-actions"><button class="primary" type="submit">保存新版本</button><button id="submit-job" type="button">提交计算</button></div>
+                <p class="fine">提交使用已保存版本。修改参数后，请先保存。</p>
+              </form>
+            </section>
+            <div class="project-right">
+              <section class="panel"><div class="panel-heading"><h2>计算记录</h2><span class="muted">每次提交保留输入快照</span></div><div id="project-jobs"></div></section>
+              <section class="panel"><div class="panel-heading"><h2>方案版本</h2><span class="muted">保存时自动记录</span></div><div id="project-revisions"></div></section>
+            </div>
+          </div>
+        </section>
+        <section id="jobs-page" hidden><div class="page-heading"><div><span class="eyebrow">COMPUTE</span><h1>计算任务</h1><p class="muted">一次执行一个任务，其余排队。每个任务最多运行 10 分钟。</p></div><button id="refresh-jobs">刷新</button></div><section class="panel" id="all-jobs"></section></section>
+        <section id="members-page" hidden><div class="page-heading"><div><span class="eyebrow">PEOPLE</span><h1>成员管理</h1><p class="muted">成员共享本工作区的项目和结果，可编辑方案、提交任务。</p></div></div><div class="project-layout"><section class="panel"><h2>创建成员账号</h2><form id="member-form"><label>显示名称<input name="display_name" required maxlength="40"></label><label>用户名<input name="username" required pattern="[a-zA-Z0-9_-]{3,32}" maxlength="32"></label><label>初始密码<input name="password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label><button type="submit" class="primary">创建账号</button><p id="member-error" class="error"></p></form></section><section class="panel"><h2>工作区成员</h2><div id="members-list"></div></section></div></section>
+      </main>
+    </div>
+  </div>
+  <dialog id="new-dialog"><form id="new-form"><div class="panel-heading"><h2>新建共享项目</h2><button type="button" class="text-btn" data-close="new-dialog" aria-label="关闭">×</button></div><label>项目名称<input name="name" required maxlength="80" placeholder="例如：方案对比研究"></label><label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="说明本项目的目的，便于成员理解"></textarea></label><label>起始工况<select name="preset" id="new-preset"></select></label><p class="fine">参考工况沿用桌面版。参数与结果用于系统级初算，工程警告需独立复核。</p><p class="error" id="new-error"></p><button type="submit" class="primary wide">创建项目</button></form></dialog>
+  <dialog id="result-dialog" class="result-dialog"><div class="panel-heading"><div><span class="eyebrow">CALCULATION RECORD</span><h2 id="result-title">计算结果</h2></div><button class="text-btn" data-close="result-dialog" aria-label="关闭">×</button></div><div id="result-content"></div><div class="dialog-footer"><button id="download-result">导出完整结果 JSON</button><button data-close="result-dialog" class="primary">关闭</button></div></dialog>
+</body>
+</html>
