@@ -18,6 +18,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QTableWidget, QMessageBox
 from core import ComponentResult, CycleResults, EngineInputs, FlowState
 from workbench import WorkbenchWindow
 from workbench_fonts import configure_fonts
+from web_tests.convergence_fixture import converged_evidence
+from tests.cooling_profile_fixture import cooling_profile
 
 
 def converged_but_infeasible_result():
@@ -37,12 +39,12 @@ def converged_but_infeasible_result():
         "mdot_total_kg_s": 800, "chamber_temperature_K": 3500,
     }
     components = {
-        "cooling_marching": ComponentResult("cooling_marching", {"hydraulic_infeasible": 0, "T_wall_hot_max_K": 1343}),
+        "cooling_channel": ComponentResult("cooling_channel", {}, profile=cooling_profile(1343)),
         "ox_preburner_turbine": ComponentResult("ox_preburner_turbine", {"T_in_K": 750, "U_mean_actual_ms": 40}),
         "fuel_preburner_turbine": ComponentResult("fuel_preburner_turbine", {"T_in_K": 850, "U_mean_actual_ms": 40}),
     }
     states = {"main_chamber": FlowState("main_chamber", inputs.pc, 3500, 800)}
-    return CycleResults(inputs, summary, states, components, ["测试工况：交叉供给欠压与壁温超限"])
+    return CycleResults(inputs, summary, states, components, ["测试工况：交叉供给欠压与壁温超限"], convergence=converged_evidence(3.2e-5))
 
 
 class AssessmentUiTests(unittest.TestCase):

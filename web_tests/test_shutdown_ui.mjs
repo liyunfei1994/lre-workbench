@@ -1,0 +1,97 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {shutdownDisplayDefaults,buildShutdownRequest,shutdownEvents,shutdownPanels,renderShutdownResult,buildShutdownCsv,buildShutdownSvg,buildShutdownSnapshot,shutdownRunBlockReason,mountShutdown} from '../webapp/static/shutdown.js';
+
+const source={id:'design-1',project_id:'p1',revision:2,created:1,status:'succeeded'};
+const parameters=[{key:'duration_s',label:'积分时长',min:.01,max:100,group:'时间与事件'},{key:'sample_count',label:'采样数',min:2,max:1001,group:'时间与事件'},{key:'chemistry_enabled',label:'化学反应',type:'boolean'},{key:'initial_mode',label:'初态模式',options:[{value:'PT',label:'压力温度'},{value:'PQ',label:'压力干度'}]},{key:'pressure_Pa',label:'初始绝压',factor:1e-6,min:1e4,max:1e7,unit:'MPa'}];
+const charts=[{title:'压力与壁温独立图 · 压力',unit:'MPa',description:'库存变化的绝对压力响应',series:[{key:'pressure_Pa',label:'绝对压力',factor:1e-6,color:'#337c9b'}]},{title:'壁面余热',unit:'K',series:[{key:'wall_temperature_K',label:'壁温',color:'#6c709e'}]},{title:'流动方向',unit:'kg/s',series:[{key:'outlet_mass_flow_kg_s',label:'出口流量',color:'#b16f3d'}]}];
+const mode=(value)=>({value,label:{gas:'气相关阀与再点火',inventory:'余液泄放与再充填',rotor:'转子惰转与管网反流'}[value],description:'独立研究单元',ready:true,issues:[],defaults:{duration_s:3,sample_count:301,chemistry_enabled:true,initial_mode:'PT',pressure_Pa:1e5,...(value==='gas'?{}:{circuits:[{id:'ox',label:'氧路',fluid:'Oxygen',pressure_Pa:2e5,volume_m3:.001},{id:'fuel',label:'燃料路',fluid:'Methane',pressure_Pa:3e5,volume_m3:.002}]})},parameters,circuit_parameters:[{key:'pressure_Pa',label:'回路初始压力',factor:1e-6,min:1e4,max:1e7,unit:'MPa'},{key:'volume_m3',label:'容积',min:1e-6,max:1,factor:1000,unit:'L'}],charts,limitations:['各单元独立，不作整机再启动成功判定。']});
+const config=()=>({ready:true,issues:[],source_summary:{propellant:'LOX/CH4'},limitations:['给定输入事件'],modes:['gas','inventory','rotor'].map(mode)});
+const sample=(t)=>({time_s:t,circuits:[{id:'ox',label:'氧路',pressure_Pa:1e5+t*2e5,wall_temperature_K:300+t*10,mass_kg:.03-t*.001,outlet_mass_flow_kg_s:.001-t*.002,quality:null,composition:{O2:1}},{id:'fuel',label:'燃料路',pressure_Pa:2e5+t*1e5,wall_temperature_K:320+t*5,mass_kg:.02-t*.001,outlet_mass_flow_kg_s:.002-t*.001}]});
+const result=()=>({mode:'inventory',request:{mode:'inventory',settings:mode('inventory').defaults},source:{job_id:source.id},samples:[sample(0),sample(.5),sample(1)],charts,events:[{name:'关阀指令',time_s:.2,kind:'prescribed',observed:true},{name:'再开启指令',time_s:1.5,kind:'prescribed',observed:false}],complete:false,reason:'有效边界终止',metrics:{engine_restart_success:null},audits:{status:'pass',max_abs_mass_error_kg:1e-12,circuits:{ox:{status:'pass',max_abs_mass_error_kg:1e-12}}},model_description:{title:'独立库存单元',equations:['dm/dt = m_in - m_out']},endpoint_snapshot:{time_s:1,circuits:[{id:'ox',mass_kg:.029}]},limitations:['未耦合整机']});
+const record=()=>({id:'shutdown-1',project_id:'p1',revision:2,created:1,status:'succeeded',request:{source_job_id:source.id,mode:'inventory',settings:mode('inventory').defaults},result:result()});
+
+test('all global and circuit display units round-trip into SI without mutations or extra fields',()=>{
+ const setup=config(),m=setup.modes[1],before=structuredClone(setup),values=shutdownDisplayDefaults(m);assert.equal(values.pressure_Pa,.1);assert.equal(values.circuits[0].pressure_Pa,.2);assert.equal(values.circuits[0].volume_m3,1);values.injected='bad';values.circuits[0].id='changed';const request=buildShutdownRequest(source,setup,'inventory',values);assert.deepEqual(request,{source_job_id:'design-1',mode:'inventory',settings:before.modes[1].defaults});assert.deepEqual(setup,before);
+});
+test('typed controls preserve false and enum identity while rejecting invalid numbers and range',()=>{
+ const setup=config(),v=shutdownDisplayDefaults(setup.modes[0]);v.chemistry_enabled=false;v.initial_mode='PQ';const req=buildShutdownRequest(source,setup,'gas',v);assert.equal(req.settings.chemistry_enabled,false);assert.equal(req.settings.initial_mode,'PQ');
+ for(const raw of ['',null,true,NaN,Infinity,-1,500]){const bad={...v,pressure_Pa:raw};assert.throws(()=>buildShutdownRequest(source,setup,'gas',bad));}
+ assert.throws(()=>buildShutdownRequest(source,setup,'gas',{...v,chemistry_enabled:'false'}),/布尔/);assert.throws(()=>buildShutdownRequest(source,setup,'gas',{...v,initial_mode:'anything'}),/支持/);assert.throws(()=>buildShutdownRequest(source,setup,'gas',{...v,sample_count:2.5}),/整数/);
+});
+test('incomplete circuits, unavailable modes and invalid source never submit',()=>{
+ const setup=config(),v=shutdownDisplayDefaults(setup.modes[1]);v.circuits.pop();assert.throws(()=>buildShutdownRequest(source,setup,'inventory',v),/回路输入/);setup.modes[0].ready=false;assert.throws(()=>buildShutdownRequest(source,setup,'gas',{}),/初始化/);assert.throws(()=>buildShutdownRequest(source,setup,'unknown',{}),/初始化/);assert.throws(()=>buildShutdownRequest({...source,status:'running'},config(),'gas',{}),/已完成/);
+});
+test('charts split same physical key by circuit with display factors and preserve negative flow',()=>{
+ const panels=shutdownPanels(result());assert.equal(panels.length,3);assert.equal(panels[0].series.length,2);assert.equal(panels[0].series[0].key,'circuit.ox.pressure_Pa');assert.equal(panels[0].series[0].factor,1e-6);assert.equal(panels[2].rows[2]['circuit.ox.outlet_mass_flow_kg_s'],-.001);assert.match(renderShutdownResult(record()),/class="sd-zero"/);
+});
+test('flat gas samples and nested properties use actual returned data and global series only once',()=>{
+ const r=result();r.mode='gas';r.samples=[{time_s:0,pressure_Pa:1e5,composition:{CH4:.2}},{time_s:.5,pressure_Pa:2e5,composition:{CH4:.1}}];r.charts=[{title:'组分',unit:'%',series:[{key:'composition.CH4',label:'CH4',factor:100}]}];assert.equal(shutdownPanels(r)[0].series[0].key,'composition.CH4');assert.equal(shutdownPanels(r)[0].rows[1]['composition.CH4'],.1);r.samples=[{time_s:0,energy_error_J:1e-5,circuits:[{id:'a'},{id:'b'}]}];r.charts=[{title:'全局',series:[{key:'energy_error_J',label:'总误差',scope:'global'}]}];assert.equal(shutdownPanels(r)[0].series.length,1);
+});
+test('saved chart definitions win over new setup; empty saved definitions do not invent curves',()=>{
+ const r=result();assert.equal(shutdownPanels(r,[{title:'wrong',series:[]}])[0].name,charts[0].title);r.charts=[];assert.equal(shutdownPanels(r,charts).length,0);assert.match(renderShutdownResult({...record(),result:r}),/未保存图表定义/);delete r.charts;assert.equal(shutdownPanels(r,charts).length,3);
+});
+test('null samples break paths, absent diagnostics remain absent and lone points stay visible',()=>{
+ const rec=record();rec.result.samples[1].circuits[0].wall_temperature_K=null;const html=renderShutdownResult(rec,1),path=html.match(/data-series="circuit.ox.wall_temperature_K"[^>]*d="([^"]*)"/)[1];assert.equal((path.match(/M/g)||[]).length,2);assert.doesNotMatch(path,/L/);assert.match(html,/壁面温度 \/ K<\/span><b>—/);rec.result.samples=[sample(0)];assert.match(renderShutdownResult(rec),/<circle cx=/);delete rec.result.samples[0].circuits[0].pressure_Pa;assert.equal(shutdownPanels(rec.result)[0].series.length,1);assert.doesNotMatch(renderShutdownResult(null),/<svg/);
+});
+test('event table distinguishes observed versus future given events and filters invalid time',()=>{
+ const rec=record();rec.result.events.push({name:'invalid',time_s:null});assert.deepEqual(shutdownEvents(rec.result).map(e=>e.time_s),[.2,1.5]);const html=renderShutdownResult(rec);assert.match(html,/尚未到达/);assert.match(html,/有效积分已到达/);assert.match(html,/不代表自主燃烧或再启动成功判据/);assert.equal((html.match(/data-event-marker=/g)||[]).length,3);assert.match(html,/仅包含有效积分时间段/);assert.match(html,/有效边界终止/);assert.match(html,/本阶段不作自主判定/);
+});
+test('crowded event labels merge without removing event lines or frozen event names',()=>{
+ const rec=record();rec.result.events=[0,.001,.002,.5,.501,1].map((time_s,index)=>({name:`事件${index}`,time_s,observed:true}));const svg=renderShutdownResult(rec).match(/<svg class="sd-plot"[\s\S]*?<\/svg>/)[0];assert.equal((svg.match(/data-event-marker=/g)||[]).length,6);assert.match(svg,/data-event-label="1,2,3"/);const labels=[...svg.matchAll(/data-event-label="[^"]+" x="([^"]+)" y="[^"]+" textLength="([^"]+)"/g)].map(m=>({x:+m[1],w:+m[2]}));labels.forEach(l=>assert.ok(l.x>=88&&l.x+l.w<=595+1e-9));
+});
+test('CSV exports all circuit state and nested composition in SI, preserving zero and avoiding formulas',()=>{
+ const r=result();r.samples[0].note='=HYPERLINK("bad")';r.samples[0].circuits[0].mass_kg=0;r.samples[1].circuits[0].pressure_Pa=null;const csv=buildShutdownCsv(r);assert.match(csv,/circuit.ox.pressure_Pa/);assert.match(csv,/circuit.ox.composition.O2/);assert.match(csv,/"100000"/);assert.match(csv,/"0"/);assert.match(csv,/'=HYPERLINK/);assert.doesNotMatch(csv,/null|NaN|Infinity/);
+});
+test('HTML and standalone SVG escape all data and reject untrusted color attributes',()=>{
+ const rec=record();rec.result.source.job_id='<script>x</script>';rec.result.events=[{time_s:.2,name:'<img onerror=x>'}];rec.result.charts=[{title:'<script>x</script>',unit:'<img>',series:[{key:'pressure_Pa',label:'<img>',color:'red" onload="x'}]}];rec.result.model_description.equations=['<script>eq</script>'];rec.result.samples[0].circuits[0].label='<img>';const html=renderShutdownResult(rec),svg=buildShutdownSvg(rec.result);assert.doesNotMatch(html,/<script|<img|onload="x/);assert.doesNotMatch(svg,/<script|<img|<foreignObject|NaN|Infinity|onload="x/);assert.match(svg,/&lt;img/);assert.match(svg,/不作整机再启动成功判定/);
+});
+test('endpoint is copied with correct mode and limitations without inventing whole-engine readiness',()=>{
+ const rec=record(),snapshot=buildShutdownSnapshot(rec);assert.equal(snapshot.mode,'inventory');assert.equal(snapshot.engine_initialization_supported,false);snapshot.endpoint_snapshot.circuits[0].mass_kg=500;assert.equal(rec.result.endpoint_snapshot.circuits[0].mass_kg,.029);delete rec.result.endpoint_snapshot;assert.throws(()=>buildShutdownSnapshot(rec),/尚未生成/);assert.match(renderShutdownResult(rec),/data-shutdown-action="snapshot" disabled/);
+});
+test('actual rotor time-slice keys and model name render without missing known data',()=>{
+ const rec=record();rec.result.mode='rotor';rec.result.samples=[{time_s:0,circuits:[{id:'shaft',label:'试验轴系',manifold_pressure_Pa:2e6,pump_mass_flow_kg_s:-.25,outlet_mass_flow_kg_s:.1,speed_rpm:1234,drive_torque_Nm:2,pump_torque_Nm:1,rotor_energy_J:25,valve_opening:.5}]}];rec.result.model_description={name:'实际轴系模型名称'};const html=renderShutdownResult(rec);assert.match(html,/容腔绝压 \/ MPa<\/span><b>2/);assert.match(html,/泵支路流量 \/ kg\/s<\/span><b>-0.25/);assert.match(html,/实际轴系模型名称/);
+});
+test('external heat pulses preserve step edges rather than implying ramped input',()=>{
+ const r=result();r.samples=[{time_s:0,igniter_power_W:0},{time_s:.2,igniter_power_W:100},{time_s:.3,igniter_power_W:0}];r.charts=[{title:'给定脉冲',unit:'W',series:[{key:'igniter_power_W',label:'外部热功率'}]}];const svg=buildShutdownSvg(r),path=svg.match(/data-series="igniter_power_W"[^>]*d="([^"]*)"/)[1];assert.match(path,/H[^V]+V/);assert.doesNotMatch(path,/L/);
+});
+test('strict CSP renders timeline and legend with SVG attributes, never inline styles',()=>{
+ const rec=record();rec.result.events=[.01,.02,.5,.9].map((time_s,i)=>({name:`事件${i}`,time_s,observed:true}));const html=renderShutdownResult(rec);assert.doesNotMatch(html,/\sstyle=/);assert.match(html,/class="sd-timeline-elapsed" x1="18" x2="18"/);assert.match(html,/class="sd-timeline-marker/);assert.match(html,/class="sd-legend"><span><svg width="22"/);assert.doesNotMatch(buildShutdownSvg(rec.result),/\sstyle=/);
+});
+test('valve commands default to dashed lines and actual states remain solid',()=>{
+ const r=result();r.samples=[{time_s:0,valve_command:1,valve_opening:.5}];r.charts=[{title:'阀位',series:[{key:'valve_command',label:'指令'},{key:'valve_opening',label:'实际'}]}];const panels=shutdownPanels(r);assert.equal(panels[0].series[0].dashed,true);assert.equal(panels[0].series[1].dashed,false);
+});
+test('gas and rotor process indicators use readable Chinese labels and units',()=>{
+ const rec=record();rec.result.metrics={first_reference_pressure_time_s:.2,reference_pressure_time_resolution_s:.001,integrated_igniter_energy_J:100,restart_event_observed:true,reignition_success:null,restart_residual_mass_kg:.01,restart_wall_temperature_K:350,shutdown_to_restart_mass_change_kg:-.005,minimum_sampled_speed_rpm:50,sampled_pump_reverse_flow_observed:true,reverse_flow_observation_tolerance_kg_s:1e-9};const html=renderShutdownResult(rec);assert.match(html,/累计外部点火输入能量 \/ J/);assert.match(html,/首次观察到达到用户参考压力 \/ s/);assert.match(html,/采样中的最低轴转速 \/ rpm/);assert.doesNotMatch(html,/<td>(first_reference_pressure_time_s|reference_pressure_time_resolution_s|integrated_igniter_energy_J|restart_event_observed|reignition_success|restart_residual_mass_kg|restart_wall_temperature_K|shutdown_to_restart_mass_change_kg|minimum_sampled_speed_rpm|sampled_pump_reverse_flow_observed|reverse_flow_observation_tolerance_kg_s)<\/td>/);
+});
+test('run block reasons identify actual source, mode readiness, connection and queue constraints',()=>{
+ assert.match(shutdownRunBlockReason(null,null,'gas',false),/请选择/);assert.match(shutdownRunBlockReason(source,null,'gas',false,0,'offline'),/连接/);assert.match(shutdownRunBlockReason(source,config(),'missing',false),/当前研究单元/);assert.match(shutdownRunBlockReason(source,config(),'gas',true),/提交/);assert.match(shutdownRunBlockReason(source,config(),'gas',false,2),/已有 2 个/);assert.equal(shutdownRunBlockReason(source,config(),'gas',false),'');
+});
+
+function container(){const listeners={};return {innerHTML:'',addEventListener(type,handler){listeners[type]=handler;},action(action){listeners.click({target:{closest:()=>({dataset:{shutdownAction:action}})}});},mode(value){listeners.click({target:{closest:()=>({dataset:{shutdownMode:value}})}});},field(key,value,circuit){listeners.input({target:{dataset:{shutdownField:key,...(circuit===undefined?{}:{shutdownCircuit:String(circuit)})},value}});},typed(key,value,checked){listeners.change({target:{dataset:{shutdownField:key},value,checked,hasAttribute:()=>false}});},change(attribute,value){listeners.change({target:{dataset:{},value,hasAttribute:name=>name===attribute}});}};}
+const context=()=>({project:{id:'p1',revision:2},record:source,dirty:true});
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+
+test('mode drafts are independent, preserve circuit display edits, and submit scoped typed inputs',async()=>{
+ const view=container(),posts=[],ui=mountShutdown(view,{getContext:context,api:async(path,method,body)=>method==='POST'?(posts.push(body),{id:'new',status:'queued'}):path.includes('/setup?')?config():[]});await ui.refresh();assert.match(view.innerHTML,/三个研究单元各自保持状态连续/);assert.match(view.innerHTML,/左侧当前编辑参数不参与/);view.field('pressure_Pa','.4');view.typed('chemistry_enabled','',false);view.mode('inventory');view.field('pressure_Pa','.5',0);view.mode('gas');assert.match(view.innerHTML,/data-shutdown-field="pressure_Pa"[^>]+value=".4"/);view.mode('inventory');view.action('run');await tick();assert.equal(posts[0].mode,'inventory');assert.equal(posts[0].settings.circuits[0].pressure_Pa,5e5);assert.equal(posts[0].settings.chemistry_enabled,true);ui.onLeave();
+});
+test('unsupported gas mode stays explicit and another ready mode can be selected',async()=>{
+ const cfg=config();cfg.modes[0].ready=false;cfg.modes[0].issues=['当前工质无适用气相反应模型'];const view=container(),ui=mountShutdown(view,{getContext:context,api:async path=>path.includes('/setup?')?cfg:[]});await ui.refresh();assert.match(view.innerHTML,/当前工质无适用气相反应模型/);assert.match(view.innerHTML,/data-shutdown-action="run" disabled/);view.mode('inventory');assert.doesNotMatch(view.innerHTML,/data-shutdown-action="run" disabled/);ui.onLeave();
+});
+test('invalid inputs and API rejection remain editable without losing drafts',async()=>{
+ const view=container(),posts=[],ui=mountShutdown(view,{getContext:context,api:async(path,method,body)=>{if(method==='POST'){posts.push(body);if(posts.length===1)throw Error('422 时序不合法');return {id:'new',status:'queued'};}return path.includes('/setup?')?config():[];}});await ui.refresh();view.field('pressure_Pa','');view.action('run');await tick();assert.equal(posts.length,0);assert.match(view.innerHTML,/有限数值/);view.field('pressure_Pa','.2');view.action('run');await tick();assert.match(view.innerHTML,/422 时序不合法/);assert.doesNotMatch(view.innerHTML,/data-shutdown-action="run" disabled/);view.field('duration_s','4');view.action('run');await tick();assert.equal(posts[1].settings.duration_s,4);ui.onLeave();
+});
+test('history stays usable when setup fails and result charts remain frozen across mode switches',async()=>{
+ const rec=record(),view=container(),ui=mountShutdown(view,{getContext:context,api:async path=>{if(path.includes('/setup?'))throw Error('setup offline');return path.startsWith('/projects/')?[rec]:rec;}});await ui.refresh();assert.match(view.innerHTML,/setup offline/);assert.match(view.innerHTML,/壁面余热/);assert.match(view.innerHTML,/既有结果/);view.change('data-shutdown-sample','1');assert.match(view.innerHTML,/采样时刻：0.5 s/);ui.onLeave();
+});
+test('source/project changes invalidate late reads and leaving invalidates late submissions',async()=>{
+ const pending=deferred(),view=container();let ctx=context();const ui=mountShutdown(view,{getContext:()=>ctx,api:()=>pending.promise});const work=ui.refresh();ctx={project:{id:'p2'},record:null};ui.sync();pending.resolve([]);await work;assert.doesNotMatch(view.innerHTML,/design-1/);ui.onLeave();
+ const pendingPost=deferred(),second=container(),notifications=[],ui2=mountShutdown(second,{getContext:context,notify:v=>notifications.push(v),api:async(path,method)=>method==='POST'?pendingPost.promise:path.includes('/setup?')?config():[]});await ui2.refresh();second.action('run');ui2.onLeave();const before=second.innerHTML;pendingPost.resolve({id:'late',status:'queued'});await tick();assert.equal(second.innerHTML,before);assert.deepEqual(notifications,[]);
+});
+test('frozen historical result does not mutate when current mode or source parameters change',async()=>{
+ const rec=record(),view=container(),ui=mountShutdown(view,{getContext:context,api:async path=>path.includes('/setup?')?config():path.startsWith('/projects/')?[rec]:rec});await ui.refresh();view.mode('rotor');assert.match(view.innerHTML,/余液泄放与再充填 · 时间响应/);view.field('pressure_Pa','.9');assert.equal(rec.result.request.settings.pressure_Pa,1e5);assert.match(view.innerHTML,/下方结果与导出使用所选历史记录的冻结输入/);ui.onLeave();
+});
+test('cancel targets active record and preserves its partial result after server acknowledgment',async()=>{
+ const rec=record(),view=container(),calls=[];rec.status='running';rec.progress={completed:100,maximum:307};const ui=mountShutdown(view,{getContext:context,api:async(path,method)=>{calls.push({path,method});if(path.endsWith('/cancel')){rec.status='cancelled';return {status:'cancelled'};}return path.includes('/setup?')?config():path.startsWith('/projects/')?[rec]:rec;}});await ui.refresh();assert.match(view.innerHTML,/<progress max="307" value="100"/);view.action('cancel');await tick();await tick();assert.ok(calls.some(c=>c.path==='/shutdown-studies/shutdown-1/cancel'&&c.method==='POST'));assert.match(view.innerHTML,/已取消/);assert.match(view.innerHTML,/仅包含有效积分时间段/);ui.onLeave();
+});

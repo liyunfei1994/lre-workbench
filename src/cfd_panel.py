@@ -310,7 +310,8 @@ class CfdPanel(QWidget):
         try:
             summary = results.summary
             residual = float(summary.get("solver_residual_norm", math.inf))
-            if summary.get("solver_warning", False) or not math.isfinite(residual) or residual >= 1e-3:
+            from convergence import numerical_convergence
+            if numerical_convergence(results)["status"] != "pass":
                 return False, "初算尚未数值收敛，不能作为 CFD 任务的边界来源。"
             current_inputs = _plain_inputs(self.main._read_inputs())
             submitted = getattr(self.main, "_solved_input_snapshot", None)

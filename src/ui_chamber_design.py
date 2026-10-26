@@ -14,14 +14,14 @@ ui_chamber_design.py — 顶层「推力室设计」工作区（V19，阶段1+2�
   · 本面板的所有输入控件**注册进 MainWindow.input_edits**（单一数据源），
     _read_inputs / reset_defaults / 导出 JSON 全部无感兼容；
   · 通道分布表经隐藏 QLineEdit（cooling_channel_table_json）序列化，随输入走；
-  · 「冻结边界重算沿程」调 chamber_design.marching_preview——不进 Newton、
-    不改动 last_results，秒级看新剖面；「回写循环重跑」把 marching 需求压降
-    写回 cooling_dp_pa 并触发 run_cycle（双层循环显式握手下半环）。
+  · 冷却沿程只读取本次循环保存的 cooling_channel.profile。
+    修改通道、换热或损失参数后，调用完整循环重算；不能只回写压降。
 """
 
 from __future__ import annotations
 
 import math
+from html import escape
 import sys
 import traceback
 from typing import Any, Dict, List, Optional
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import EngineInputs
+from ui_metadata import CHAMBER_INPUTS
 import chamber_design as cd
 
 try:
@@ -68,7 +69,7 @@ class _Signals(QObject):
 
 
 class _PreviewWorker(QRunnable):
-    """冻结边界 marching 重算（后台线程，不阻塞 UI、不动主结果）。"""
+    """历史任务接口：只读保存的冷却剖面，不再独立求解冷却。"""
 
     def __init__(self, base_results, inputs):
         super().__init__()
@@ -102,7 +103,7 @@ class ChamberDesignPanel(QWidget):
         super().__init__()
         self.main = main                      # MainWindow 引用（单一数据源）
         self._defaults = EngineInputs()
-        self._wf_current = None               # 当前展示的整程 WallField（主结果或预览）
+        self._wf_current = None               # 当前循环保存的整程 WallField
         self._preview_mode = False
         self._last_preview = None
         self._cursor_idx: Optional[int] = None
@@ -212,8 +213,8 @@ class ChamberDesignPanel(QWidget):
         root.setSpacing(6)
 
         intro = QLabel(
-            "推力室部件级设计工作区：在系统级循环解出的**冻结边界**上做详细设计迭代"
-            "（型面 → 通道分布 → 沿程热分析 → 热结构 → 校核），定型后回写循环重跑闭合。"
+            "推力室工作区：查看当前循环保存的型面、通道、沿程热负荷和结构载荷估计。"
+            "修改冷却几何、换热或损失参数后，必须重新求解完整循环。结构估计不代表结构验证。"
             "本页所有输入与左侧面板同源，「运行设计点」读取的就是这里的值。")
         intro.setObjectName("MutedLabel")
         intro.setWordWrap(True)
@@ -301,7 +302,7 @@ class ChamberDesignPanel(QWidget):
             ("冷却剂入口（= CH4 主泵出口，全部燃料流经再生冷却套）",
              f"T_in = {snap.coolant_in_T_K:.1f} K ｜ p_in = {fmt_p(snap.coolant_in_p_Pa)} ｜ "
              f"ṁ = {snap.mdot_fuel:.1f} kg/s"),
-            ("冷却剂出口（单点闭合模型，对照 marching）",
+            ("冷却剂出口（当前循环采用的状态）",
              f"T_out = {snap.coolant_out_T_K:.1f} K ｜ p_out = {fmt_p(snap.coolant_out_p_Pa)}"),
             ("主喷注器入口（两股涡轮排气，FFSC 气-气）",
              f"富氧：T = {snap.inj_ox_T_K:.0f} K ｜ p = {fmt_p(snap.inj_ox_p_Pa)} ｜ "
@@ -329,14 +330,11 @@ class ChamberDesignPanel(QWidget):
         left = QVBoxLayout()
         box = QGroupBox("型面参数（改后重跑设计点生效）")
         form = QFormLayout(box)
-        self._register_edit(form, "chamber_contraction_ratio", "燃烧室收缩比 Acc/At", "—")
-        self._register_edit(form, "chamber_l_star_m", "特征长度 L*", "m")
-        self._register_edit(form, "chamber_conv_half_angle_deg", "收缩段半锥角 β", "°",
-                            "V19 起全链同口径：室分层几何 / 喷管轮廓 / marching / CSV")
-        self._register_edit(form, "nozzle_bell_fraction", "钟形长度比（0.80=80% bell）", "—",
-                            "V19 新输入：旧版恒 0.80 不可改")
-        self._register_edit(form, "cooling_cover_eps", "再生冷却覆盖面积比（0=全喷管）", "—",
-                            "如填 8 表示再生冷却只到 ε=8，其外为延伸段（暂无热模型）")
+        self._register_edit(form, "chamber_contraction_ratio", *CHAMBER_INPUTS['chamber_contraction_ratio'])
+        self._register_edit(form, "chamber_l_star_m", *CHAMBER_INPUTS['chamber_l_star_m'])
+        self._register_edit(form, "chamber_conv_half_angle_deg", *CHAMBER_INPUTS['chamber_conv_half_angle_deg'])
+        self._register_edit(form, "nozzle_bell_fraction", *CHAMBER_INPUTS['nozzle_bell_fraction'])
+        self._register_edit(form, "cooling_cover_eps", *CHAMBER_INPUTS['cooling_cover_eps'])
         left.addWidget(box)
 
         btn = QPushButton("⟳ 重跑设计点（应用型面）")
@@ -469,20 +467,20 @@ class ChamberDesignPanel(QWidget):
         top = QHBoxLayout()
         box = QGroupBox("单段基准参数（分布表为空时生效；auto_size 会反算通道深）")
         form = QFormLayout(box)
-        self._register_edit(form, "cooling_channel_auto_size", "自动定通道深 1/0", "—")
-        self._register_edit(form, "cooling_target_velocity_ms", "目标冷却剂流速", "m/s")
-        self._register_edit(form, "cooling_n_channels", "通道数 N", "—")
-        self._register_edit(form, "cooling_channel_width_m", "通道宽 w（喉部）", "mm")
-        self._register_edit(form, "cooling_channel_height_m", "通道深 h", "mm")
-        self._register_edit(form, "cooling_wall_thickness_m", "内衬热壁厚 t", "mm")
+        self._register_edit(form, "cooling_channel_auto_size", *CHAMBER_INPUTS['cooling_channel_auto_size'])
+        self._register_edit(form, "cooling_target_velocity_ms", *CHAMBER_INPUTS['cooling_target_velocity_ms'])
+        self._register_edit(form, "cooling_n_channels", *CHAMBER_INPUTS['cooling_n_channels'])
+        self._register_edit(form, "cooling_channel_width_m", *CHAMBER_INPUTS['cooling_channel_width_m'])
+        self._register_edit(form, "cooling_channel_height_m", *CHAMBER_INPUTS['cooling_channel_height_m'])
+        self._register_edit(form, "cooling_wall_thickness_m", *CHAMBER_INPUTS['cooling_wall_thickness_m'])
         top.addWidget(box, 1)
 
         box2 = QGroupBox("通道流动/校核参数")
         form2 = QFormLayout(box2)
-        self._register_edit(form2, "cooling_htc_enhancement", "喉部曲率换热强化因子", "—")
-        self._register_edit(form2, "cooling_channel_rel_roughness", "相对粗糙度 ε/D_h", "—")
-        self._register_edit(form2, "cooling_channel_k_minor", "集流环/弯头局部损失（动压头数）", "—")
-        self._register_edit(form2, "cooling_wall_temp_limit_K", "热面壁温限值", "K")
+        self._register_edit(form2, "cooling_htc_enhancement", *CHAMBER_INPUTS['cooling_htc_enhancement'])
+        self._register_edit(form2, "cooling_channel_rel_roughness", *CHAMBER_INPUTS['cooling_channel_rel_roughness'])
+        self._register_edit(form2, "cooling_channel_k_minor", *CHAMBER_INPUTS['cooling_channel_k_minor'])
+        self._register_edit(form2, "cooling_wall_temp_limit_K", *CHAMBER_INPUTS['cooling_wall_temp_limit_K'])
         top.addWidget(box2, 1)
         lay.addLayout(top)
 
@@ -533,10 +531,10 @@ class ChamberDesignPanel(QWidget):
 
         # 双层握手按钮
         act_row = QHBoxLayout()
-        self.btn_preview = QPushButton("▶ 冻结边界重算沿程（不重解循环）")
+        self.btn_preview = QPushButton("查看保存的冷却沿程")
         self.btn_preview.setObjectName("PrimaryButton")
         self.btn_preview.clicked.connect(self.run_marching_preview)
-        self.btn_writeback = QPushButton("⟳ 回写循环并重跑设计点（Δp→cooling_dp_pa）")
+        self.btn_writeback = QPushButton("按当前参数重算完整循环")
         self.btn_writeback.setObjectName("SecondaryButton")
         self.btn_writeback.clicked.connect(self._writeback_and_rerun)
         self.preview_note = QLabel("")
@@ -855,14 +853,12 @@ class ChamberDesignPanel(QWidget):
         lay.setSpacing(6)
 
         top = QHBoxLayout()
-        box = QGroupBox("膜冷却 / 辐射（marching 后处理参数，改后「冻结边界重算沿程」即可）")
+        box = QGroupBox("膜冷却 / 辐射（改变后需重算完整循环）")
         form = QFormLayout(box)
-        self._register_edit(form, "film_cooling_fraction", "膜冷却流量比例（0=关）", "—",
-                            "气膜源=富燃涡轮排气（FFSC 气-气膜），Grisson 流量标度效能模型")
-        self._register_edit(form, "film_effectiveness_initial", "膜初始效能 η₀", "—")
-        self._register_edit(form, "film_decay_length_m", "膜效能固定衰减长（0=流量标度）", "m")
-        self._register_edit(form, "cooling_gas_emissivity", "燃气辐射发射率 ε_g", "—",
-                            "V19 新输入：旧版字段不存在、恒 0.20")
+        self._register_edit(form, "film_cooling_fraction", *CHAMBER_INPUTS['film_cooling_fraction'])
+        self._register_edit(form, "film_effectiveness_initial", *CHAMBER_INPUTS['film_effectiveness_initial'])
+        self._register_edit(form, "film_decay_length_m", *CHAMBER_INPUTS['film_decay_length_m'])
+        self._register_edit(form, "cooling_gas_emissivity", *CHAMBER_INPUTS['cooling_gas_emissivity'])
         top.addWidget(box, 2)
 
         self.station_card = self._card("站位明细（在下方曲线上点击选站）", "—")
@@ -870,7 +866,7 @@ class ChamberDesignPanel(QWidget):
 
         side = QVBoxLayout()
         # 存为属性：run_marching_preview 需要把两个触发按钮一起禁用（防竞态）
-        self.btn_preview_m = QPushButton("▶ 冻结边界重算沿程")
+        self.btn_preview_m = QPushButton("查看保存的冷却沿程")
         self.btn_preview_m.setObjectName("PrimaryButton")
         self.btn_preview_m.clicked.connect(self.run_marching_preview)
         b2 = self.btn_station_fea = QPushButton("▶ 对游标站运行 2D FEM")
@@ -885,7 +881,12 @@ class ChamberDesignPanel(QWidget):
         # 嵌入 MainWindow 的再生冷却页（figure/populate 逻辑复用）
         self._cooling_widget = self.main._build_cooling_tab()
         lay.addWidget(self._cooling_widget, 1)
-        return w
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(w)
+        return scroll
 
     def _connect_cursor(self):
         """（重）连接沿程图的点击游标。populate 会重建 axes，故每次刷新后重连。"""
@@ -975,7 +976,7 @@ class ChamberDesignPanel(QWidget):
             return
         wf = self._wf_current
         if wf is None or not getattr(wf, "x", None):
-            QMessageBox.information(self, "无数据", "请先运行设计点（或冻结边界重算沿程）。")
+            QMessageBox.information(self, "无数据", "当前记录未保存统一冷却沿程；请重算完整循环。")
             return
         geom = self._get_geom()
         if geom is None:
@@ -992,8 +993,8 @@ class ChamberDesignPanel(QWidget):
         inner_key = self._mat_key("chamber_inner_wall_material", "grcop84")
         wf, geom = deepcopy(wf), deepcopy(geom)
         main_results = getattr(self.main, "last_results", None)
-        marching = main_results.components.get("cooling_marching") if main_results is not None else None
-        is_dist = bool(marching and getattr(marching, "profile", {}).get("dist_mode"))
+        cooling = main_results.components.get("cooling_channel") if main_results is not None else None
+        is_dist = bool(cooling and getattr(cooling, "profile", {}).get("dist_mode"))
         preview_mode = bool(getattr(self, "_preview_mode", False))
         start_auxiliary_task(
             self.main,
@@ -1055,22 +1056,27 @@ class ChamberDesignPanel(QWidget):
         top = QHBoxLayout()
         box = QGroupBox("结构参数")
         form = QFormLayout(box)
-        self._register_edit(form, "chamber_wall_allow_pa", "内壁许用应力", "MPa")
-        self._register_edit(form, "chamber_wall_safety_factor", "壁厚安全系数", "—")
+        self._register_edit(form, "chamber_wall_allow_pa", *CHAMBER_INPUTS['chamber_wall_allow_pa'])
+        self._register_edit(form, "chamber_wall_safety_factor", *CHAMBER_INPUTS['chamber_wall_safety_factor'])
         top.addWidget(box, 1)
 
         box2 = QGroupBox("推力室壁材料（分层）")
         form2 = QFormLayout(box2)
         self._register_material_combo(form2, "chamber_inner_wall_material",
-                                      "内壁（燃气侧·铜合金）")
+                                      CHAMBER_INPUTS['chamber_inner_wall_material'][0])
         self._register_material_combo(form2, "chamber_outer_wall_material",
-                                      "外壳（结构层·镍基）")
+                                      CHAMBER_INPUTS['chamber_outer_wall_material'][0])
         top.addWidget(box2, 2)
         lay.addLayout(top)
 
         self._thermstr_widget = self.main._build_thermstr_tab()
         lay.addWidget(self._thermstr_widget, 1)
-        return w
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(w)
+        return scroll
 
     # ---- 5 校核汇总 -----------------------------------------------
 
@@ -1098,7 +1104,7 @@ class ChamberDesignPanel(QWidget):
         self.score_table.setRowCount(0)
         if res is None or wf is None:
             return
-        inp = self._read_inputs_safe() or res.inputs
+        inp = res.inputs
         try:
             rows = cd.compute_scorecard(wf, res, inp)
         except Exception as ex:
@@ -1106,7 +1112,7 @@ class ChamberDesignPanel(QWidget):
             return
         n_fail = sum(1 for r in rows if r["status"] == "fail")
         n_warn = sum(1 for r in rows if r["status"] == "warn")
-        mode = "（预览：冻结边界重算结果，未回写循环）" if self._preview_mode else ""
+        mode = "（保存的冷却载荷；结构估计未经验证）"
         self.score_banner.setText(
             f"区域 × 判据裕度记分卡：{len(rows)} 项 ｜ ✗ 不满足 {n_fail} ｜ ~ 边缘 {n_warn}{mode}")
         for row in rows:
@@ -1124,47 +1130,34 @@ class ChamberDesignPanel(QWidget):
                 self.score_table.setItem(r, c, it)
 
     # ────────────────────────────────────────────────────────────
-    # 冻结边界重算 / 回写
+    # 保存剖面读取 / 完整循环重算
     # ────────────────────────────────────────────────────────────
 
     def _set_preview_busy(self, busy: bool):
         """两个触发按钮（通道页 + 沿程页）一起禁用/恢复——只锁一个会出现并发
         预览 worker，后完成者覆盖先完成者，界面可能显示旧输入的结果。"""
         if hasattr(self.main, "_set_busy"):
-            self.main._set_busy(busy, "冻结边界沿程重算中" if busy else "沿程重算完成")
+            self.main._set_busy(busy, "读取保存的冷却沿程" if busy else "冷却沿程已读取")
         for btn, idle_text in ((getattr(self, "btn_preview", None),
-                                "▶ 冻结边界重算沿程（不重解循环）"),
+                                "查看保存的冷却沿程"),
                                (getattr(self, "btn_preview_m", None),
-                                "▶ 冻结边界重算沿程")):
+                                "查看保存的冷却沿程")):
             if btn is not None:
                 btn.setEnabled(not busy)
-                btn.setText("⏳ 重算中…" if busy else idle_text)
+                btn.setText("读取中…" if busy else idle_text)
         self._preview_running = busy
 
     def run_marching_preview(self):
-        if getattr(self, "_preview_running", False):
+        if getattr(self, "_preview_running", False) or getattr(self.main, "_busy", False):
             return
         res = getattr(self.main, "last_results", None)
         if res is None:
-            QMessageBox.information(self, "无循环解", "请先「运行设计点」生成冻结边界。")
+            QMessageBox.information(self, "无循环解", "请先运行完整设计点。")
             return
-        inputs = self._read_inputs_safe()
-        if inputs is None:
-            QMessageBox.warning(self, "输入无效", "当前输入有误，请检查。")
-            return
-        self._set_preview_busy(True)
-        # 代际令牌：即使有遗留 worker（理论上已被 busy 锁挡住），迟到结果也会被丢弃
-        self._preview_seq = getattr(self, "_preview_seq", 0) + 1
-        seq = self._preview_seq
-        worker = _PreviewWorker(res, inputs)
-        worker.signals.finished.connect(lambda r, s=seq: self._on_preview_done(r, s))
-        worker.signals.error.connect(lambda tb, s=seq: self._on_preview_error(tb, s))
-        self._preview_worker = worker
-        self.main._active_worker = worker
-        self.main._task_kind = "preview"
-        if hasattr(self.main, "_connect_active_worker"):
-            self.main._connect_active_worker()
-        self.main.thread_pool.start(worker)
+        try:
+            self._on_preview_done(cd.saved_cooling_result(res))
+        except ValueError as ex:
+            QMessageBox.information(self, "需要完整循环重算", str(ex))
 
     def _on_preview_done(self, result: dict, seq: int = -1):
         if seq != -1 and seq != getattr(self, "_preview_seq", -1):
@@ -1174,13 +1167,13 @@ class ChamberDesignPanel(QWidget):
             profile = result.get("profile")
             comp = result.get("component")
             if not profile or comp is None:
-                raise ValueError("marching 未返回剖面（检查表/参数）")
+                raise ValueError("当前循环未保存统一冷却剖面，请重算完整循环。")
             res = self.main.last_results
             geom = self._get_geom() or {}
             from thermal_structural import (wall_field_from_profile,
                                             plot_cooling_profiles, plot_wall_field)
-            inner = self._mat_key("chamber_inner_wall_material", "grcop84")
-            outer = self._mat_key("chamber_outer_wall_material", "inconel718_wall")
+            inner = getattr(res.inputs, "chamber_inner_wall_material", "grcop84")
+            outer = getattr(res.inputs, "chamber_outer_wall_material", "inconel718_wall")
             wf_full = wall_field_from_profile(profile, res.summary, geom,
                                               inner_material_key=inner,
                                               outer_material_key=outer, domain="full")
@@ -1190,81 +1183,54 @@ class ChamberDesignPanel(QWidget):
             if wf_full is None:
                 raise ValueError("WallField 构建失败")
             self._wf_current = wf_full
-            self._preview_mode = True
+            self._preview_mode = False
             self._last_preview = result
-            # 刷新嵌入的两幅主图（预览标记在 note 里）
+            # 两幅主图采用同一循环保存的热负荷。
             if hasattr(self.main, "cooling_fig"):
                 plot_cooling_profiles(self.main.cooling_fig, wf_full)
                 self.main.cooling_canvas.draw_idle()
                 self.main.cooling_note.setText(
-                    "【预览：冻结边界重算，未回写循环】 " + "  ·  ".join(wf_full.notes))
+                    "【当前循环保存的冷却沿程】 " + "  ·  ".join(wf_full.notes))
             if wf_ch is not None and hasattr(self.main, "thermstr_fig"):
                 plot_wall_field(self.main.thermstr_fig, wf_ch)
                 self.main.thermstr_canvas.draw_idle()
                 self.main.thermstr_note.setText(
-                    "【预览：冻结边界重算，未回写循环】 " + "  ·  ".join(wf_ch.notes))
+                    "【当前循环保存的冷却载荷】 " + "  ·  ".join(wf_ch.notes))
                 self.main._render_chamber_loads(getattr(wf_ch, "loads", None))
-            # 差异卡 + 警告
-            delta = result.get("summary_delta") or {}
-            outs = comp.outputs
-            dtxt = (f"Δp={outs.get('delta_P_MPa', 0):.1f} MPa"
-                    f"（较主结果 {delta.get('delta_P_MPa', 0):+.1f}）｜ "
-                    f"T_wg,max={outs.get('T_wall_hot_max_K', 0):.0f} K"
-                    f"（{delta.get('T_wall_hot_max_K', 0):+.0f}）｜ "
-                    f"Q={outs.get('Q_total_MW', 0):.1f} MW"
-                    f"（{delta.get('Q_total_MW', 0):+.1f}）｜ "
-                    f"T_out={outs.get('T_coolant_out_K', 0):.0f} K"
-                    f"（{delta.get('T_coolant_out_K', 0):+.0f}）")
+            outs = profile.get("summary") or {}
+            def recorded(key, scale=1.0):
+                value = outs.get(key)
+                return f"{value * scale:.2f}" if isinstance(value, (int, float)) and math.isfinite(value) else "未记录"
+            dtxt = (f"Δp={recorded('dp_total_Pa', 1e-6)} MPa｜ "
+                    f"T_wg,max={recorded('T_wall_hot_max_K')} K｜ "
+                    f"Q={recorded('Q_total_W', 1e-6)} MW｜ T_out={recorded('T_out_K')} K")
             warns = result.get("warnings") or []
             if warns:
-                dtxt += "<br><span style='color:#b45309;'>" + "；".join(warns) + "</span>"
-            self.preview_note.setText(f"<b>预览结果</b>：{dtxt}")
+                dtxt += "<br><span style='color:#b45309;'>" + escape("；".join(map(str, warns))) + "</span>"
+            self.preview_note.setText(f"<b>保存的循环结果</b>：{dtxt}<br>修改参数后需重算完整循环；此处不重算热流或压降。")
             self._cursor_idx = None
             self._connect_cursor()
             self.set_cursor_station(wf_full.throat_index)
             self._refresh_channel_views()
             self._update_scorecard()
         except Exception as ex:
-            self.main._log_info("marching 预览失败\n" + traceback.format_exc(), source="Chamber")
-            QMessageBox.warning(self, "重算失败", str(ex))
+            self.main._log_info("保存的冷却剖面读取失败\n" + traceback.format_exc(), source="Chamber")
+            QMessageBox.warning(self, "读取失败", str(ex))
 
     def _on_preview_error(self, tb: str, seq: int = -1):
         if seq != -1 and seq != getattr(self, "_preview_seq", -1):
             return
         self._set_preview_busy(False)
-        self.main._log_info("marching 预览异常\n" + tb, source="Chamber")
-        QMessageBox.warning(self, "重算失败", tb.splitlines()[-1] if tb else "未知错误")
+        self.main._log_info("保存的冷却剖面读取异常\n" + tb, source="Chamber")
+        QMessageBox.warning(self, "读取失败", tb.splitlines()[-1] if tb else "未知错误")
 
     def _writeback_and_rerun(self):
-        """把 marching 需求压降回写 cooling_dp_pa（固定压降模式的口径闭合），重跑设计点。"""
-        src = None
-        if self._last_preview is not None and self._last_preview.get("component") is not None:
-            src = self._last_preview["component"].outputs
-        else:
-            res = getattr(self.main, "last_results", None)
-            if res is not None and "cooling_marching" in res.components:
-                src = res.components["cooling_marching"].outputs
-        if not src:
-            QMessageBox.information(self, "无 marching 结果", "请先运行设计点或「冻结边界重算沿程」。")
+        """Compatibility slot: recompute the entire cycle from the current inputs."""
+        if self._read_inputs_safe() is None:
+            QMessageBox.warning(self, "输入无效", "当前输入有误，请检查。")
             return
-        dp_MPa = float(src.get("delta_P_MPa", 0.0) or 0.0)
-        if dp_MPa <= 0:
-            QMessageBox.information(self, "无有效压降", "marching 压降无效。")
-            return
-        if float(src.get("hydraulic_infeasible", 0.0) or 0.0) > 0.5:
-            if QMessageBox.question(
-                self, "水力不可行",
-                f"当前通道设计水力不可行（需求压降 {dp_MPa:.1f} MPa）。仍要回写并重跑吗？",
-                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
-                return
-        G = self._G()
-        edit = self.main.input_edits.get("cooling_dp_pa")
-        if edit is None:
-            QMessageBox.warning(self, "字段缺失", "cooling_dp_pa 输入框不存在。")
-            return
-        edit.setText(G._to_display("cooling_dp_pa", dp_MPa * 1e6))
         self.main._log_step(
-            f"推力室工作区回写：cooling_dp_pa ← marching 需求压降 {dp_MPa:.2f} MPa，重跑设计点",
+            "按当前输入重算完整循环：统一冷却热负荷、压降与出口状态一起参与闭合。",
             source="Chamber")
         self.main.run_cycle()
 

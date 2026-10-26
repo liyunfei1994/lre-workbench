@@ -90,6 +90,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui_metadata import (
+    _MATERIAL_FIELD_META, DISPLAY_UNIT_MAP, CYCLE_TYPE_CHOICES, GG_LAYOUT_CHOICES, PROPELLANT_CHOICES,
+    NONLINEAR_SOLVER_CHOICES, COMBUSTION_LOSS_CHOICES, THERMO_DATASET_CHOICES,
+    FFSC_ONLY_GROUPS, GG_ONLY_GROUPS,
+    PARAM_GROUPS, OVERVIEW_GROUPS, OVERVIEW_GROUPS_GG, COMPONENT_ORDER,
+    COMPONENT_LABELS, COMPONENT_GROUPS, KEY_LABELS, STATE_LABELS
+)
 from core import EngineInputs, CycleResults
 from cycle import FFSCCycleModel
 from gg_cycle import make_cycle_model
@@ -98,27 +105,6 @@ from thermo import CANTERA_AVAILABLE, ROCKETCEA_AVAILABLE, cross_validate_cea_ca
 from sweep import sweep_ox_preburner_mr, sweep_fuel_preburner_mr, sweep_to_csv
 from ui_drawings import AutoFitGraphicsView, GeometryDrawingPanel
 from materials import MATERIALS, list_materials_for_part
-
-
-# =========================================================================
-# 涡轮材料字段元数据（V10 GUI 改进）
-# 把每个材料字段映射到 (部位, 是否限富氧兼容)，供 QComboBox 自动过滤候选。
-# =========================================================================
-_MATERIAL_FIELD_META: Dict[str, Tuple[str, bool]] = {
-    # 富氧侧：所有材料必须 oxygen_compatible=True（ASTM G124）
-    "turb_ox_rotor_material":   ("rotor_blade", True),
-    "turb_ox_stator_material":  ("stator_vane", True),
-    "turb_ox_disk_material":    ("disk",        True),
-    "turb_ox_housing_material": ("housing",     True),
-    # 富燃侧：可用含 Co 高温合金，无氧兼容硬约束
-    "turb_fuel_rotor_material":   ("rotor_blade", False),
-    "turb_fuel_stator_material":  ("stator_vane", False),
-    "turb_fuel_disk_material":    ("disk",        False),
-    "turb_fuel_housing_material": ("housing",     False),
-    # 推力室壁（V18）：内壁=铜合金燃气侧、外壳=镍基结构层；都不强制氧兼容
-    "chamber_inner_wall_material": ("chamber_inner_wall", False),
-    "chamber_outer_wall_material": ("chamber_outer_wall", False),
-}
 
 
 def _material_choices_for(field_key: str):
@@ -198,27 +184,10 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
 
-# ─── 显示单位换算表 ────────────────────────────────────────────
+# ─── 显示单位换算（共享声明位于 ui_metadata）──────────────────
 # key → (SI → 显示值 的换算系数, 显示单位字符串)
 # 显示值 = SI值 × factor；反向：SI值 = 显示值 / factor
 # 只列出需要换算的字段，其余字段保持原始 SI 单位。
-DISPLAY_UNIT_MAP: Dict[str, Tuple[float, str]] = {
-    "thrust":               (1e-3,  "kN"),    # N  → kN
-    "pc":                   (1e-6,  "MPa"),   # Pa → MPa
-    "ambient_pressure":     (1e-6,  "MPa"),   # Pa → MPa
-    "tank_pressure_pa":     (1e-5,  "bar"),   # Pa → bar（贮箱真实压力）
-    "inlet_pressure":       (1e-6,  "MPa"),   # Pa → MPa（增压泵出口）
-    "feed_line_dp_pa":      (1e-5,  "bar"),   # Pa → bar
-    "cooling_heat_load":    (1e-6,  "MW"),    # W  → MW
-    "cooling_dp_pa":        (1e-6,  "MPa"),   # Pa → MPa
-    "chamber_wall_allow_pa":(1e-6,  "MPa"),   # Pa → MPa
-    # V19 推力室设计工作区：通道几何用 mm 显示（内部 SI m）
-    "cooling_channel_width_m":  (1e3, "mm"),
-    "cooling_channel_height_m": (1e3, "mm"),
-    "cooling_wall_thickness_m": (1e3, "mm"),
-    # V20 燃气发生器循环
-    "gg_turbine_backpressure_pa": (1e-5, "bar"),   # Pa → bar
-}
 
 
 def _to_display(key: str, si_val: float) -> str:
@@ -245,629 +214,12 @@ def _from_display(key: str, display_str: str) -> float:
     return val
 
 
-# ── V20：循环方式相关 ────────────────────────────────────────
-# 循环选择器/布局选择器用 QComboBox（userData 携带内部 key），
-# 显隐控制按组名匹配：FFSC 专属组只在 FFSC 模式显示，GG 组只在 GG 模式显示。
-CYCLE_TYPE_CHOICES: List[Tuple[str, str]] = [
-    ("ffsc", "全流量分级燃烧 FFSC（Raptor 类）"),
-    ("gg",   "燃气发生器开式循环 GG（TQ-12 类）"),
-]
-GG_LAYOUT_CHOICES: List[Tuple[str, str]] = [
-    ("single_shaft", "单轴：一台涡轮驱动双泵（Merlin 布局）"),
-    ("dual_shaft",   "双轴：燃气分流双涡轮泵（Vulcain 2 布局）"),
-]
-FFSC_ONLY_GROUPS = {
-    "预燃室(FFSC) / Preburners",
-    "预燃室设计(FFSC) / Preburner design",
-    "压力网络(FFSC) / Pressure network",
-}
-GG_ONLY_GROUPS = {
-    "燃气发生器(GG) / Gas generator",
-}
-
-PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
-    (
-        "循环方式 / Engine cycle",
-        [
-            ("cycle_type", "循环方式 / Cycle", ""),
-            ("gg_layout",  "GG 轴系布局 / GG layout", ""),
-        ],
-    ),
-    (
-        "基本性能 / Design point",
-        [
-            ("thrust",           "目标推力(海平面) / Thrust SL", "kN"),
-            ("pc",               "燃烧室压力 / Chamber press.", "MPa"),
-            ("of_ratio",         "氧燃比 O/F",                  "—"),
-            ("expansion_ratio",  "喷管膨胀比 / Nozzle ε",       "—"),
-            ("target_isp",       "比冲初值(仅流量初猜) / Isp init.", "s"),
-            ("ambient_pressure", "环境压力 / Ambient press.",   "MPa"),
-        ],
-    ),
-    (
-        "入口与效率 / Inlet & efficiency",
-        [
-            ("fuel_inlet_temp",        "CH4 入口温度 / Fuel inlet T",     "K"),
-            ("ox_inlet_temp",          "LOX 入口温度 / LOX inlet T",      "K"),
-            ("tank_pressure_pa",       "贮箱自生增压压力 / Tank ullage pressure",  "bar"),
-            ("inlet_pressure",         "增压泵出口=主泵供给压力 / Boost outlet = pump supply",  "MPa"),
-            ("feed_line_dp_pa",        "增压泵→主泵短管压降 / Boost→pump duct ΔP",         "bar"),
-            ("boost_pump_efficiency",  "增压泵效率 / Boost pump η",                "—"),
-            ("pump_efficiency_ox",     "LOX 泵效率 / LOX pump η",                "—"),
-            ("pump_efficiency_fuel",   "CH4 泵效率 / CH4 pump η",         "—"),
-            ("turbine_efficiency_ox",  "富氧涡轮效率 / O-rich turbine η", "—"),
-            ("turbine_efficiency_fuel","富燃涡轮效率 / F-rich turbine η", "—"),
-            ("combustion_efficiency",  "主燃室燃烧效率 η_comb (1=理想)",  "—"),
-        ],
-    ),
-    (
-        "热力学基准 / Thermo baseline",
-        [
-            ("chamber_temp_guess",  "主燃烧室温度猜测 / T_c guess",        "K"),
-            ("chamber_gamma",       "经验比热比 / γ fallback",             "—"),
-            ("molar_mass",          "经验摩尔质量 / MW fallback",          "kg/kmol"),
-        ],
-    ),
-    (
-        "预燃室(FFSC) / Preburners",
-        [
-            # 注：此参数 = P_预燃室 / P_主燃室，实质等于涡轮进出口压比
-            # 目标混合比模式下为求解初值，自由模式下为固定输入
-            ("ox_preburner_pressure_ratio",
-             "富氧侧涡轮压比 P_pb/P_c / O-rich turbine PR",               "—"),
-            ("fuel_preburner_pressure_ratio",
-             "富燃侧涡轮压比 P_pb/P_c / F-rich turbine PR",               "—"),
-            # 注：涡轮出口热气压降比（=主喷注器压降比）只在「压力网络」组注册一次。
-            # 旧版此处重复注册同一字段 → 两个可见输入框指向一个 key，前一个的编辑
-            # 被静默忽略（V19 审查修复：同一 key 只允许一个控件）。
-            ("ox_preburner_temp_limit",   "富氧预燃室温度上限 / T_lim O-rich",  "K"),
-            ("fuel_preburner_temp_limit", "富燃预燃室温度上限 / T_lim F-rich",  "K"),
-        ],
-    ),
-    (
-        "预燃室设计(FFSC) / Preburner design",
-        [
-            # ── 温度目标模式（V11，默认开）：顶着材料极限设计 ──
-            # 开启时由目标涡轮入口温度反求 MR；下面的"目标 O/F"成为外环初值。
-            ("use_target_preburner_temp", "温度目标模式 1/0（顶材料极限）", "—"),
-            ("ox_preburner_temp_target", "富氧涡轮入口目标温度 / T_in O-rich", "K"),
-            ("fuel_preburner_temp_target", "富燃涡轮入口目标温度 / T_in F-rich", "K"),
-            ("use_target_preburner_mr", "目标预燃室混合比模式 1/0", "—"),
-            ("ox_preburner_mr_target", "富氧预燃室目标 O/F（温度模式下为初值）", "—"),
-            ("fuel_preburner_mr_target", "富燃预燃室目标 O/F（温度模式下为初值）", "—"),
-            ("fuel_split_to_ox_preburner", "燃料→富氧预燃室初始比例", "—"),
-            ("ox_split_to_ox_preburner", "氧化剂→富氧预燃室初始比例", "—"),
-        ],
-    ),
-    (
-        "燃气发生器(GG) / Gas generator",
-        [
-            # ── GG 温度目标模式（默认开）：顶着涡轮材料极限设计 ──
-            ("use_target_gg_temp",  "GG 温度目标模式 1/0（顶材料极限）", "—"),
-            ("gg_temp_target",      "GG 出口目标温度 / GG T target",     "K"),
-            ("gg_temp_limit",       "GG 温度上限(涡轮材料) / GG T limit", "K"),
-            ("gg_mr_target",        "GG 混合比 O/F（温度模式下为初值）",  "—"),
-            ("gg_fraction_guess",   "GG 流量分数初猜 / GG flow fraction", "—"),
-            ("gg_injector_dp_ratio","GG 喷注器压降比 ΔP/p_gg",           "—"),
-            ("gg_turbine_backpressure_pa", "涡轮排气背压 / Turbine backpress.", "bar"),
-            ("gg_exhaust_expansion_ratio", "排气喷管膨胀比 / Exhaust ε",  "—"),
-            ("gg_mech_efficiency",  "轴系机械效率 / Mech. η",             "—"),
-            ("injector_dp_ratio_ox",   "主喷注器压降比(LOX 液路) ΔP/pc",  "—"),
-            ("injector_dp_ratio_fuel", "主喷注器压降比(CH4 液路) ΔP/pc",  "—"),
-        ],
-    ),
-    (
-        "压力网络(FFSC) / Pressure network",
-        [
-            ("preburner_injector_dp_ratio", "预燃室喷注器压降比 ΔP/p_pre / Preburner inj. ΔP", "—"),
-            ("ox_turbine_exhaust_dp_ratio",   "富氧主喷注器压降比 ΔP/pc / Ox main-inj. ΔP",   "—"),
-            ("fuel_turbine_exhaust_dp_ratio", "富燃主喷注器压降比 ΔP/pc / Fuel main-inj. ΔP", "—"),
-        ],
-    ),
-    (
-        "压力网络·公共 / Pressure network (shared)",
-        [
-            ("cooling_dp_pa",          "再生冷却通道压降 / Cooling ΔP",              "MPa"),
-            ("valve_line_dp_ratio",    "阀门/管路压降比 ΔP/pc / Valve line ΔP",      "—"),
-        ],
-    ),
-    (
-        # V19：冷却的循环闭合级开关留在左面板；通道几何/膜冷却/型面等推力室
-        # 详细参数全部移入「推力室设计」工作区（同一 input_edits 数据源）。
-        "再生冷却·循环闭合 / Regen (cycle closure)",
-        [
-            ("cooling_bartz_mode",  "Bartz冷却模式 1=自动 0=固定热载荷",   "—"),
-            ("cooling_heat_load",   "再生冷却吸热量(固定模式) / Fixed Q",  "MW"),
-            ("coolant_cp",          "冷却剂定压比热(固定模式) / Fixed cp", "J/(kg·K)"),
-            ("cooling_dp_auto",     "压降水力实算耦合 1/0（0=用固定 ΔP）", "—"),
-            ("cooling_marching_enable", "求解后自动跑沿程 marching 1/0",   "—"),
-        ],
-    ),
-    (
-        "求解与节流 / Solver & throttle",
-        [
-            ("throttle_min", "最低节流比例", "—"),
-            ("throttle_steps", "节流扫描点数", "—"),
-        ],
-    ),
-    (
-        "涡轮泵转速 / Turbopump speed",
-        [
-            ("lox_pump_speed_rpm_override",
-             "LOX 泵转速锁定 (0=按 Ns 反推) / LOX speed override", "rpm"),
-            ("lox_pump_specific_speed_target",
-             "LOX 泵 Ns 目标 / LOX Ns target",                      "—"),
-            ("lox_pump_n_stages",
-             "LOX 泵级数 / LOX stages",                             "—"),
-            ("lox_pump_head_coefficient_psi",
-             "LOX 泵压头系数 ψ / LOX ψ",                            "—"),
-            ("fuel_pump_speed_rpm_override",
-             "CH4 泵转速锁定 (0=按 Ns 反推) / CH4 speed override",  "rpm"),
-            ("fuel_pump_specific_speed_target",
-             "CH4 泵 Ns 目标 / CH4 Ns target",                      "—"),
-            ("fuel_pump_n_stages",
-             "CH4 泵级数 / CH4 stages",                             "—"),
-            ("fuel_pump_head_coefficient_psi",
-             "CH4 泵压头系数 ψ / CH4 ψ",                            "—"),
-            ("pump_tip_speed_limit_ms",
-             "泵叶尖速度上限 / Pump u_tip max",                     "m/s"),
-        ],
-    ),
-    (
-        "涡轮气动设计 / Turbine aero design",
-        [
-            ("turb_ox_u_over_c_target",
-             "富氧涡轮 U/C0 目标 / O-rich U/C0 target",   "—"),
-            ("turb_ox_reaction_degree",
-             "富氧涡轮反动度 / O-rich reaction",            "—"),
-            ("turb_ox_n_stages_user",
-             "富氧涡轮级数 (0=自动) / O-rich stages",       "—"),
-            ("turb_ox_u_max_ms",
-             "富氧涡轮 U_max / O-rich U max",               "m/s"),
-            ("turb_fuel_u_over_c_target",
-             "富燃涡轮 U/C0 目标 / F-rich U/C0 target",   "—"),
-            ("turb_fuel_reaction_degree",
-             "富燃涡轮反动度 / F-rich reaction",            "—"),
-            ("turb_fuel_n_stages_user",
-             "富燃涡轮级数 (0=自动) / F-rich stages",       "—"),
-            ("turb_fuel_u_max_ms",
-             "富燃涡轮 U_max / F-rich U max",               "m/s"),
-        ],
-    ),
-    # V19：原「燃烧室几何」「燃烧室壁面」「推力室壁材料」三组已整体迁入
-    # 顶层「推力室设计」工作区（字段仍注册进同一 input_edits，求解读数不变）。
-    (
-        "涡轮材料 / Turbine materials",
-        [
-            # 富氧侧：必须 oxygen_compatible（含 Co > 5% 禁用，ASTM G124）
-            ("turb_ox_rotor_material",
-             "富氧涡轮动叶（限富氧兼容材料）",  ""),
-            ("turb_ox_stator_material",
-             "富氧涡轮静叶（限富氧兼容材料）",  ""),
-            ("turb_ox_disk_material",
-             "富氧涡轮轮盘（限富氧兼容材料）",  ""),
-            ("turb_ox_housing_material",
-             "富氧涡轮壳体（限富氧兼容材料）",  ""),
-            # 富燃侧：可用含 Co 高温合金
-            ("turb_fuel_rotor_material",
-             "富燃涡轮动叶",                    ""),
-            ("turb_fuel_stator_material",
-             "富燃涡轮静叶",                    ""),
-            ("turb_fuel_disk_material",
-             "富燃涡轮轮盘",                    ""),
-            ("turb_fuel_housing_material",
-             "富燃涡轮壳体",                    ""),
-        ],
-    ),
-]
-
-OVERVIEW_GROUPS = [
-    # "总体性能"小卡片已移除——推力/比冲/流量/燃烧室温度均已在顶部大KPI卡片显示，无需重复
-    ("流量分配 / Flow Split", [
-        ("mdot_fuel_kg_s", "甲烷总流量",   "kg/s"),
-        ("mdot_ox_kg_s",   "液氧总流量",   "kg/s"),
-        ("fuel_split_to_ox_preburner", "燃料→富氧预燃室比例", "—"),
-        ("ox_split_to_ox_preburner",   "氧化剂→富氧预燃室比例", "—"),
-        ("ox_preburner_mr",            "富氧预燃室 O/F 混合比", "—"),
-        ("phi_ox_preburner",           "富氧预燃室当量比 φ", "—"),
-        ("fuel_preburner_mr",          "富燃预燃室 O/F 混合比", "—"),
-        ("phi_fuel_preburner",         "富燃预燃室当量比 φ", "—"),
-    ]),
-    # 按 泵↔泵 / 涡轮↔涡轮 / 功率比↔功率比 顺序排列，左右两列自然对仗
-    ("功率平衡 / Power Balance", [
-        ("ox_pump_power_MW",             "液氧泵功率",         "MW"),
-        ("fuel_pump_power_MW",           "甲烷泵功率",         "MW"),
-        ("ox_turbine_power_MW",          "富氧预燃室涡轮功率", "MW"),
-        ("fuel_turbine_power_MW",        "富燃预燃室涡轮功率", "MW"),
-        ("ox_side_power_balance_ratio",  "液氧侧功率平衡比",   "—"),
-        ("fuel_side_power_balance_ratio","甲烷侧功率平衡比",   "—"),
-    ]),
-    # 预燃室温度已在顶部大KPI卡片显示；压力比在部件结果→涡轮卡片显示；此处只保留求解诊断信息
-    ("求解状态 / Solver Status", [
-        ("solver_iterations",       "Newton 累计步数 (3 段 continuation + Picard 外环)", "—"),
-        ("solver_inner_solves",     "内层 solve_cycle 调用次数",                          "—"),
-        ("solver_iterations_last",  "末轮 Newton 步数 (暖启动后)",                       "—"),
-        ("tc_outer_iterations",     "Tc Picard 外环轮数",                                  "—"),
-        ("tc_outer_residual_K",     "Tc Picard 末轮残差",                                  "K"),
-        ("solver_residual_norm",    "归一化残差范数",                                      "—"),
-        ("solver_warning",          "求解警告标志",                                        "—"),
-        ("thermo_source",           "热力学库（1=Cantera）",                              "—"),
-    ]),
-]
-
-# V20：GG（燃气发生器开式循环）总览分组——流量/功率行按 GG 循环语义组织
-OVERVIEW_GROUPS_GG = [
-    ("流量分配 / Flow Split (GG)", [
-        ("mdot_fuel_kg_s",      "甲烷总流量",             "kg/s"),
-        ("mdot_ox_kg_s",        "液氧总流量",             "kg/s"),
-        ("mdot_chamber_kg_s",   "主燃烧室通流（不含 GG）", "kg/s"),
-        ("chamber_mixture_ratio","主燃烧室 O/F 混合比",    "—"),
-        ("gg_mdot_kg_s",        "燃气发生器流量",          "kg/s"),
-        ("gg_fraction",         "GG 流量分数 α_gg",       "—"),
-        ("gg_mr",               "燃气发生器 O/F 混合比",   "—"),
-        ("gg_phi",              "燃气发生器当量比 φ",      "—"),
-    ]),
-    ("功率平衡 / Power Balance (GG)", [
-        ("ox_pump_power_MW",        "液氧泵功率",           "MW"),
-        ("fuel_pump_power_MW",      "甲烷泵功率",           "MW"),
-        ("gg_turbine_power_MW",     "GG 涡轮功率（毛）",     "MW"),
-        ("gg_turbine_power_delivered_MW", "GG 涡轮输出（×机械效率）", "MW"),
-        ("gg_mech_efficiency",      "轴系机械效率",          "—"),
-        ("power_balance_ratio",     "总功率平衡比",          "—"),
-    ]),
-    ("开式循环特征 / Open-cycle metrics", [
-        ("gg_pressure_MPa",        "GG 压力",                "MPa"),
-        ("gg_turbine_pi_t",        "GG 涡轮压比 π_t",        "—"),
-        ("gg_turbine_exhaust_T_K", "涡轮排气温度",           "K"),
-        ("thrust_gg_exhaust_N",    "排气喷管推力(海平面)",    "N"),
-        ("Isp_gg_exhaust_s",       "排气喷管比冲(海平面)",    "s"),
-        ("Isp_main_flow_s",        "主室流比冲(海平面)",      "s"),
-        ("Isp_gg_penalty_s",       "开式循环比冲代价 ΔIsp",  "s"),
-    ]),
-    ("求解状态 / Solver Status", [
-        ("solver_iterations",       "Newton 累计步数 (continuation + Picard 外环)", "—"),
-        ("solver_inner_solves",     "内层 solve_cycle 调用次数",                     "—"),
-        ("tc_outer_iterations",     "Tc Picard 外环轮数",                             "—"),
-        ("tc_outer_residual_K",     "Tc Picard 末轮残差",                             "K"),
-        ("gg_temp_outer_error_K",   "GG 温度目标外环残差",                            "K"),
-        ("solver_residual_norm",    "归一化残差范数",                                 "—"),
-        ("solver_warning",          "求解警告标志",                                   "—"),
-        ("thermo_source",           "热力学库（1=Cantera）",                         "—"),
-    ]),
-]
-
-COMPONENT_ORDER = [
-    "ox_pump", "fuel_pump", "cooling_channel", "cooling_marching",
-    "ox_preburner", "ox_preburner_turbine",
-    "fuel_preburner", "fuel_preburner_turbine",
-    "injector", "main_chamber", "nozzle"
-]
-
-COMPONENT_LABELS = {
-    "ox_pump":               "液氧泵",
-    "fuel_pump":             "甲烷泵",
-    "cooling_channel":       "再生冷却通道",
-    "cooling_marching":      "再生冷却沿程剖面（marching）",
-    "ox_preburner":          "富氧预燃室",
-    "ox_preburner_turbine":  "富氧涡轮 / 液氧泵涡轮",
-    "fuel_preburner":        "富燃预燃室",
-    "fuel_preburner_turbine":"富燃涡轮 / 甲烷泵涡轮",
-    "injector":              "喷注器",
-    "main_chamber":          "主燃烧室",
-    "nozzle":                "喷管",
-    # ── V20：燃气发生器循环部件 ──
-    "gas_generator":         "燃气发生器（富燃）",
-    "gg_turbine":            "GG 涡轮（单轴驱动双泵）",
-    "gg_turbine_ox":         "GG 涡轮（LOX 轴）",
-    "gg_turbine_fuel":       "GG 涡轮（CH4 轴）",
-    "gg_exhaust_nozzle":     "GG 排气喷管（开式直排）",
-}
-
-# 部件结果分组定义（大组标题 → 部件 key 列表）
-# 预燃室驱动涡轮泵，属于推进剂供应系统；喷注器属于推力室
-COMPONENT_GROUPS = [
-    (
-        "一、推进剂供应系统",
-        "（涡轮泵 + 预燃室/燃气发生器 + 再生冷却）",
-        ["ox_pump", "fuel_pump",
-         "ox_preburner", "ox_preburner_turbine",
-         "fuel_preburner", "fuel_preburner_turbine",
-         # V20 GG 循环部件（FFSC 结果中不存在，自动跳过）
-         "gas_generator", "gg_turbine", "gg_turbine_ox", "gg_turbine_fuel",
-         "cooling_channel", "cooling_marching"],
-    ),
-    (
-        "二、推力室",
-        "（喷注器 + 主燃烧室 + 喷管；GG 模式含开式排气喷管）",
-        ["injector", "main_chamber", "nozzle", "gg_exhaust_nozzle"],
-    ),
-]
-
-KEY_LABELS = {
-    "rho_in_kgm3": "入口密度 [kg/m³]",
-    "rho_out_kgm3": "出口密度 [kg/m³]",
-    "rho_kgm3": "密度 [kg/m³]",
-    "p_in_MPa": "入口压力 [MPa]",
-    "p_out_MPa": "出口压力 [MPa]",
-    "p_in_bar": "入口压力 [bar]",
-    "p_out_bar": "出口压力 [bar]",
-    "delta_p_Pa": "压升 [Pa]",
-    "power_W": "泵功率 [MW]",
-    "T_out_K": "出口温度 [K]",
-    "heat_load_W": "吸热量 [MW]",
-    "delta_T_K": "温升 [K]",
-    "delta_T_isentropic_K": "可逆压缩温升 [K]",
-    "delta_T_loss_K": "损失热化温升 [K]",
-    "mdot_total_kgs": "总流量 [kg/s]",
-    "mdot_fuel_kgs": "燃料流量 [kg/s]",
-    "mdot_ox_kgs": "氧化剂流量 [kg/s]",
-    "fuel_fraction": "燃料质量分数",
-    "phi": "当量比 φ",
-    "mixture_ratio_OF": "混合比 O/F",
-    "ox_preburner_mr": "富氧预燃室 O/F",
-    "fuel_preburner_mr": "富燃预燃室 O/F",
-    "T_combustion_K": "燃烧温度 [K]",
-    "T_exhaust_K": "涡轮出口温度 [K]",
-    "T_in_K": "入口温度 [K]",
-    "p_in_Pa": "涡轮入口压力 [MPa]",
-    "p_out_Pa": "涡轮出口压力 [MPa]",
-    "turbine_pressure_ratio": "涡轮压比 πt=p_in/p_out",
-    "pressure_recovery_ratio": "压力恢复比 p_out/p_in",
-    "ox_turbine_exhaust_dp_ratio": "富氧涡轮出口到主燃烧室压降比 [-]",
-    "fuel_turbine_exhaust_dp_ratio": "富燃涡轮出口到主燃烧室压降比 [-]",
-    "isentropic_drop_Jkg": "等熵焓降 [J/kg]",
-    "actual_drop_Jkg": "实际焓降 [J/kg]",
-    "actual_temp_drop_K": "实际温降 [K]",
-    "turbine_power_W": "涡轮功率 [MW]",
-    "turbine_power_MW": "涡轮功率 [MW]",
-    "eta_turbine": "涡轮效率",
-    "h_in_Jkg": "入口混合焓 [J/kg]",
-    "h_combustion_Jkg": "燃烧后焓 [J/kg]",
-    "h_out_Jkg": "出口焓 [J/kg]",
-    "cp_Jkgk": "定压比热 cp [J/(kg·K)]",
-    "cp_Jgk": "定压比热 cp [J/(kg·K)]",
-    "gamma": "比热比 γ",
-    "T_chamber_K": "主燃烧室温度 [K]",
-    "molar_mass_kg_per_kmol": "平均摩尔质量 [kg/kmol]",
-    "h_chamber_Jkg": "燃烧室焓 [J/kg]",
-    "thrust_N": "推力 [N]",
-    "Isp_s": "比冲 [s]",
-    "Ve_ms": "有效排气速度 [m/s]",
-    "exit_velocity_ms": "出口速度 [m/s]",
-    "c_star_ms": "特征速度 c* [m/s]",
-    "Cf": "推力系数 Cf",
-    "Cf_momentum": "动量推力系数",
-    "Cf_pressure": "压力推力系数",
-    "At_m2": "喉部面积 [m²]",
-    "Ae_m2": "出口面积 [m²]",
-    "mach_exit": "出口马赫数",
-    "exit_mach": "出口马赫数",
-    "p_exit_Pa": "出口压力 [Pa]",
-    "exit_pressure_Pa": "出口压力 [Pa]",
-    "p_amb_Pa": "环境压力 [Pa]",
-    "T_exit_K": "出口温度 [K]",
-    "gamma_exit": "出口比热比 γ",
-    "expansion_ratio": "面积膨胀比 [-]",
-    # ── 泵部件额外字段 ─────────────────────────────────────
-    "delta_p_MPa":          "压升 [MPa]",
-    "delta_p_bar":          "压升 [bar]",
-    "power_MW":             "泵功率 [MW]",
-    "eta":                  "泵等熵效率 [-]",
-    "head_m":               "扬程 [m]",
-    "head_m_per_stage":     "单级扬程 [m]",
-    "volume_flow_m3s":      "体积流量 [m³/s]",
-    "volume_flow_Ls":       "体积流量 [L/s]",
-    "volume_flow_m3h":      "体积流量 [m³/h]（对标 CFTurbo）",
-    "nr_rpm":               "转速 [rpm]",
-    "nr_rad_s":             "转速 [rad/s]",
-    "n_stages":             "泵级数",
-    "specific_speed_Ns":    "比转速 nq [EU, rpm·√(m³/s)/m^¾]",
-    "eta_from_Ns_curve":    "Ns 曲线估算效率 [-]",
-    "eta_deviation":        "效率偏差（输入 - 曲线）[-]",
-    # ── 再生冷却通道 ───────────────────────────────────────
-    "heat_load_MW":         "吸热量 [MW]",
-    "mode":                 "冷却模型模式",
-    "Q_cc_MW":              "燃烧室段吸热 [MW]",
-    "Q_conv_MW":            "收缩段吸热 [MW]",
-    "Q_throat_MW":          "喉部带吸热 [MW]",
-    "Q_noz_MW":             "喷管段吸热 [MW]",
-    "q_throat_MW_m2":       "喉部热流密度 [MW/m²]",
-    "h_g_throat_W_m2_K":    "喉部燃气侧换热系数 [W/(m²·K)]",
-    "sigma":                "Bartz 修正系数 σ [-]",
-    "D_throat_m":           "喉部直径 [m]",
-    "r_throat_m":           "喉部半径 [m]",
-    "A_throat_m2":          "喉部面积 [m²]",
-    "r_cc_m":               "燃烧室半径 [m]",
-    "L_cc_m":               "燃烧室等效长度 [m]",
-    "A_wetted_total_m2":    "冷却受热面积 [m²]",
-    "T_aw_throat_K":        "喉部绝热壁温 [K]",
-    "T_wall_cold_K":        "冷却侧壁温 [K]",
-    "T_wall_hot_K":         "燃气侧壁温 [K]",
-    "cp_avg_J_kg_K":        "冷却剂平均 cp [J/(kg·K)]",
-    "delta_P_MPa":          "冷却通道压降 [MPa]",
-    "P_in_Pa":              "冷却入口压力 [MPa]",
-    "P_out_Pa":             "冷却出口压力 [MPa]",
-    "G_throat_kg_m2_s":     "喉部质量通量 [kg/(m²·s)]",
-    "mu_Pa_s":              "燃气黏度 [Pa·s]",
-    "Pr":                   "Prandtl 数 Pr [-]",
-    # ── 喷管 ──────────────────────────────────────────────
-    "thrust_vac_N":         "真空推力 [N]",
-    "Isp_vac_s":            "真空比冲 [s]",
-    # ── 预燃室 ────────────────────────────────────────────
-    "mdot_total_kgs":       "总质量流量 [kg/s]",
-    "mdot_fuel_kgs":        "燃料流量 [kg/s]",
-    "mdot_ox_kgs":          "氧化剂流量 [kg/s]",
-    # V5.3.6 新增：预燃室喷注器压降
-    "injector_dp_ratio":      "预燃室喷注器压降比 ΔP/P_PB [-]",
-    "injector_dp_Pa":         "预燃室喷注器压降 [MPa]",
-    "injector_dp_MPa":        "预燃室喷注器压降 [MPa]",
-    "injector_dp_bar":        "预燃室喷注器压降 [bar]",
-    "preburner_pressure_Pa":  "预燃室压力 [MPa]",
-    "preburner_pressure_MPa": "预燃室压力 [MPa]",
-    # ── 主燃烧室几何 ──────────────────────────────────────
-    "cc_throat_area_m2"     : "喉部面积 At [m²]",
-    "cc_throat_diameter_mm" : "喉部直径 Dt [mm]",
-    "cc_area_m2"            : "燃烧室截面积 Acc [m²]",
-    "cc_diameter_m"         : "燃烧室直径 Dcc [m]",
-    "cc_diameter_mm"        : "燃烧室直径 Dcc [mm]",
-    "cc_contraction_ratio"  : "收缩比 ε_c = Acc/At [-]",
-    "cc_mach_number"        : "室内截面马赫数 M_cc [-]",
-    "cc_l_star_m"           : "特征长度 L* [m]",
-    "cc_volume_L"           : "燃烧室容积 V_cc [L]",
-    "cc_length_m"           : "圆柱段长度 L_cc [m]",
-    "cc_length_mm"          : "圆柱段长度 L_cc [mm]",
-    "cc_wall_thickness_mm"  : "分层壁厚合计 t_wall [mm]（内衬+通道+外壳，与几何页同口径）",
-    "cc_wall_liner_mm"      : "├ 内衬厚（传热限定厚）[mm]",
-    "cc_wall_channel_mm"    : "├ 冷却通道深 [mm]",
-    "cc_wall_jacket_mm"     : "└ 外壳厚（Barlow 对冷却剂压力）[mm]",
-    "dist_mode"             : "通道沿程分布表模式（1=启用）",
-    # ── 总和特性参数 + 完整几何（chamber_sizing 新增）──────
-    "cc_volume_m3"               : "燃烧室容积 V_cc [m³]",
-    "cc_convergent_length_mm"    : "收缩段长度 L_conv [mm]",
-    "cc_convergent_volume_L"     : "收缩段锥台体积 V_conv [L]",
-    "cc_cyl_volume_L"            : "圆柱段体积 V_cyl [L]",
-    "cc_total_length_mm"         : "表观室长 L_cyl+L_conv [mm]",
-    "cc_LD_ratio_cyl"            : "长径比 L_cyl/D_cc [-]",
-    "cc_LD_ratio_total"         : "长径比 (L_cyl+L_conv)/D_cc [-]",
-    "cc_residence_time_ms"       : "推进剂平均停留时间 t_s [ms]",
-    "cc_residence_time_s"        : "推进剂平均停留时间 t_s [s]",
-    "cc_mass_flux_chamber_kg_m2s": "燃烧室流量密度 ṁ/A_cc [kg/(m²·s)]",
-    "cc_mass_flux_throat_kg_m2s" : "喉部流量密度 ṁ/A_t [kg/(m²·s)]",
-    "cc_chamber_gas_density_kgm3": "室内燃气密度 ρ_c [kg/m³]",
-    "cc_conv_half_angle_deg"     : "收缩段半锥角 β [°]",
-    "cc_sound_speed_ms"          : "室内声速 a_c [m/s]",
-    "cc_acoustic_1T_Hz"          : "一阶切向声学模态 1T [Hz]（稳定性筛查）",
-    "cc_acoustic_1L_Hz"          : "一阶纵向声学模态 1L [Hz]",
-    # ── 再生冷却沿程 marching（V15 后处理）──────────────
-    "n_stations"                 : "marching 站数 [-]",
-    "Q_total_MW"                 : "总热载荷（沿程积分）[MW]",
-    "T_coolant_out_K"            : "冷却剂出口温度 [K]",
-    "delta_P_friction_MPa"       : "通道摩擦压降 [MPa]",
-    "delta_P_minor_MPa"          : "集流环/弯头局部压降 [MPa]",
-    "T_wall_hot_max_K"           : "热面壁温峰值 [K]",
-    "x_T_wall_max_mm"            : "壁温峰值位置 x [mm]",
-    "x_throat_mm"                : "喉部位置 x [mm]",
-    "q_max_MW_m2"                : "热流峰值 [MW/m²]",
-    "x_q_max_mm"                 : "热流峰值位置 x [mm]",
-    "wall_over_limit_fraction"   : "壁温超限站点占比 [-]",
-    "wall_temp_limit_K"          : "热面壁温限值 [K]",
-    "cover_eps"                  : "再生冷却覆盖面积比 ε [-]",
-    "film_cooling_on"            : "膜冷却开关 [-]",
-    "film_cooling_fraction"      : "膜冷却流量比例 [-]",
-    "V_coolant_max_ms"           : "冷却剂最高流速（喉部）[m/s]",
-    "T_wall_cold_max_K"          : "冷面壁温峰值（结焦校核 <950K）[K]",
-    "hydraulic_infeasible"       : "通道水力不可行标志（1=不可行）",
-    "film_mdot_kgs"              : "膜冷却流量 [kg/s]",
-    "Q_noz_ext_MW"               : "喷管延伸段热载荷 [MW]",
-    "vs_point_Q_rel_percent"     : "对单点模型 Q 偏差 [%]",
-    "vs_point_T_out_delta_K"     : "对单点模型 T_out 偏差 [K]",
-    "vs_point_dp_delta_MPa"      : "对单点模型 Δp 偏差 [MPa]",
-    "delta_P_hydraulic_MPa"      : "通道水力压降实算 [MPa]",
-    "delta_P_source"             : "压降来源（1=水力实算 0=固定输入）",
-    "channel_height_mm"          : "冷却通道深度 [mm]",
-    "channel_length_m"           : "冷却通道沿程长度 [m]",
-    "channel_friction_factor"    : "通道摩擦系数 f [-]",
-    # ── 喷注器 ────────────────────────────────────────────
-    "face_diameter_m":      "喷注面直径 [m]",
-    "face_area_m2":         "喷注面面积 [m²]",
-    "num_elements":         "喷注元件数",
-    "element_spacing_mm":   "元件间距 [mm]",
-    "dp_ox_Pa":             "氧化剂压降 [MPa]",
-    "dp_ox_MPa":            "氧化剂压降 [MPa]",
-    "dp_ox_ratio":          "氧化剂压降比 ΔP/pc [-]",
-    "dp_fuel_Pa":           "燃料压降 [MPa]",
-    "dp_fuel_MPa":          "燃料压降 [MPa]",
-    "dp_fuel_ratio":        "燃料压降比 ΔP/pc [-]",
-    "v_ox_ms":              "氧化剂喷射速度 [m/s]",
-    "v_fuel_ms":            "燃料喷射速度 [m/s]",
-    "d_ox_mm":              "氧孔直径 d_ox [mm]",
-    "d_post_mm":            "氧化剂 post 外径 [mm]",
-    "delta_fuel_mm":        "燃料环缝宽度 δ [mm]",
-    "d_outer_mm":           "元件外径 [mm]",
-    "mdot_ox_per_element_kgs":   "单元件氧化剂流量 [kg/s]",
-    "mdot_fuel_per_element_kgs": "单元件燃料流量 [kg/s]",
-    "momentum_flux_ratio_J":     "动量通量比 J [-]",
-    "swirl_number_ox":           "旋流数 S_ox [-]",
-    "swirl_number_fuel":         "旋流数 S_fuel [-]",
-    "cd_ox":                     "氧化剂流量系数 Cd [-]",
-    "cd_fuel":                   "燃料流量系数 Cd [-]",
-    "face_heat_flux_MWm2":       "喷注面热流密度 [MW/m²]",
-    # ── V10：涡轮 CFTurbo 输入参数 ────────────────────────
-    "mass_flow_kgs":             "涡轮质量流量 [kg/s]",
-    "cp_in_Jkgk":                "入口工质 cp [J/(kg·K)]",
-    "gamma_in":                  "入口工质 γ [-]",
-    "molar_mass_in":             "入口工质摩尔质量 [kg/kmol]",
-    # ── V10：涡轮速度三角形 & 几何 ────────────────────────
-    "C0_spouting_ms":            "等熵喷出速度 C₀ [m/s]",
-    "U_mean_target_ms":          "节圆速度 U 目标 [m/s]",
-    "U_mean_actual_ms":          "节圆速度 U 实际 [m/s]",
-    "D_mean_m":                  "转子中径 D [m]",
-    "u_over_c_target":           "速比 U/C₀ 目标 [-]",
-    "u_over_c_actual":           "速比 U/C₀ 实际 [-]",
-    "n_stages_recommended":      "推荐级数 [-]",
-    "reaction_degree":           "反动度 R [-]",
-    "shaft_speed_rpm":           "涡轮/泵 共轴转速 [rpm]",
-    "u_max_ms":                  "节圆速度上限 U_max [m/s]",
-    "u_mean_ok":                 "节圆速度校核（1=合格）",
-    "t_in_over_limit":           "入口温度超过上限 [K]",
-    # ── V10：涡轮材料校核 ────────────────────────────────
-    "rotor_material_key":        "动叶材料",
-    "rotor_material_name":       "动叶材料",
-    "rotor_sigma_yield_T_MPa":   "动叶 σy(T_in) [MPa]",
-    "rotor_sigma_centrif_MPa":   "动叶离心应力 σ=ρU² [MPa]",
-    "rotor_safety_factor":       "动叶安全系数 SF [-]",
-    # ── V10：泵叶尖/汽蚀诊断 ─────────────────────────────
-    "u_tip_est_ms":              "叶轮叶尖速度 u_tip [m/s]",
-    "tip_speed_limit_ms":        "叶尖速度上限 [m/s]",
-    "impeller_sigma_yield_T_MPa":"叶轮 σy(T_in) [MPa]",
-    "impeller_sigma_centrif_MPa":"叶轮离心应力 σ=ρ·u_tip² [MPa]",
-    "impeller_safety_factor":    "叶轮安全系数 SF [-]",
-    "impeller_oxygen_compatible":"叶轮材料氧兼容（1=是）",
-    "tip_speed_ok":              "叶尖速度校核（1=合格）",
-    "d_impeller_est_m":          "叶轮直径估算 [m]",
-    "psi_head_coefficient":      "压头系数 ψ [-]",
-    "npsh_available_m":          "可用净正吸入压头 NPSHa [m]",
-    "suction_specific_speed_Nss":"吸入比转速 Nss [US 制: rpm·√gpm/ft^¾]",
-    "suction_specific_speed_nss_eu":"吸入比转速 nss [EU 制: rpm·√(m³/s)/m^¾，对标 CFTurbo]",
-    "thoma_cavitation_number_sigma":"Thoma 空化数 σ = NPSHa/H [-]",
-    "boost_npsha_ox_m":          "液氧增压泵 NPSHa（贮箱处）[m]",
-    "boost_npsha_fuel_m":        "甲烷增压泵 NPSHa（贮箱处）[m]",
-    "boost_nss_ox_eu":           "液氧增压泵吸入比转速 nss(EU) [-]",
-    "boost_nss_fuel_eu":         "甲烷增压泵吸入比转速 nss(EU) [-]",
-    "boost_pump_speed_assumed_rpm":"增压泵假定转速 [rpm]",
-    "boost_pump_ox_power_MW":    "液氧增压泵功率 [MW]",
-    "boost_pump_fuel_power_MW":  "甲烷增压泵功率 [MW]",
-    "boost_pump_total_power_MW": "增压泵总功率 [MW]",
-    "boost_pump_efficiency":     "增压泵效率 [-]",
-    "tank_pressure_bar":         "贮箱压力 [bar]",
-    "boost_out_pressure_bar":    "增压泵出口压力 [bar]",
-    "main_pump_inlet_pressure_bar":"主泵入口压力 [bar]",
-    "boost_pump_dp_bar":         "增压泵压升 ΔP [bar]",
-    # ── 再生冷却通道 ────────────────────────────────────
-    "h_coolant_W_m2K":           "冷却剂侧换热系数 h_c [W/(m²·K)]",
-    "coolant_velocity_ms":       "冷却剂流速 [m/s]",
-    "coolant_Re":                "冷却剂雷诺数 Re [-]",
-    "coolant_Pr":                "冷却剂普朗特数 Pr [-]",
-    "channel_D_h_mm":            "通道水力直径 D_h [mm]",
-    "channel_A_flow_cm2":        "通道流通总面积 [cm²]",
-    "n_channels":                "冷却通道数 [-]",
-    "T_coolant_throat_K":        "喉部处冷却剂温度 [K]",
-    "liner_thickness_m":         "内衬壁厚 [m]",
-    "wall_conductivity_WmK":     "壁面导热系数 [W/(m·K)]",
-    # ── 主燃烧室 / 喷管 补充 ─────────────────────────────
-    "T_chamber_ideal_K":         "理想平衡燃烧温度（η=1）[K]",
-    "combustion_efficiency":     "燃烧效率 η_comb [-]",
-    "Cf_vac":                    "真空推力系数 Cf_vac [-]",
-    "Cf_sl":                     "海平面推力系数 Cf_sl [-]",
-    "flow_model":                "喷管流动模型 (0=冻结/1=平衡/-1=理想气体)",
-}
-
 GEOMETRY_OBJECT_LABELS = {
     "chamber": "主燃烧室",
     "nozzle": "喷管",
     "injector": "喷注器",
     "ox_pump": "液氧泵",
-    "fuel_pump": "甲烷泵",
+    "fuel_pump": "燃料泵",
     "ox_turbine": "富氧涡轮",
     "fuel_turbine": "富燃涡轮",
     "ox_preburner": "富氧预燃室",
@@ -948,20 +300,6 @@ GEOMETRY_KEY_LABELS = {
 }
 
 
-STATE_LABELS = {
-    "fuel_tank":               "甲烷储箱",
-    "lox_tank":                "液氧储箱",
-    "lox_pump_inlet":          "液氧泵入口（管路后）",
-    "fuel_pump_inlet":         "甲烷泵入口（管路后）",
-    "lox_after_pump":          "液氧泵出口",
-    "fuel_after_pump":         "甲烷泵出口",
-    "fuel_after_cooling":      "甲烷再生冷却后",
-    "ox_turbine_exhaust":      "富氧涡轮出口",
-    "fuel_turbine_exhaust":    "富燃涡轮出口",
-    "ox_preburner_outlet":     "富氧预燃室出口（涡轮入口）",
-    "fuel_preburner_outlet":   "富燃预燃室出口（涡轮入口）",
-    "main_chamber":            "主燃烧室",
-}
 
 # 流路状态点顺序：用于绘制 P-T-ρ 曲线
 _LOX_PATH = [
@@ -1155,13 +493,14 @@ class ThrottleWorker(CancellableWorker):
 class ThermoWorker(CancellableWorker):
     """在后台线程运行 cross_validate_cea_cantera()，避免阻塞 UI。"""
 
-    def __init__(self, of_list, eps_list, pc_pa, T_fuel_K, T_ox_K):
+    def __init__(self, of_list, eps_list, pc_pa, T_fuel_K, T_ox_K, methane_thermo_dataset="gri30"):
         super().__init__()
         self.of_list   = of_list
         self.eps_list  = eps_list
         self.pc_pa     = pc_pa
         self.T_fuel_K  = T_fuel_K
         self.T_ox_K    = T_ox_K
+        self.methane_thermo_dataset = methane_thermo_dataset
         self.signals   = WorkerSignals()
 
     @Slot()
@@ -1180,6 +519,7 @@ class ThermoWorker(CancellableWorker):
                             pc_pa=self.pc_pa,
                             T_fuel_K=self.T_fuel_K,
                             T_ox_K=self.T_ox_K,
+                            methane_thermo_dataset=self.methane_thermo_dataset,
                         )
                         results.extend(pts)
                         for record in pts:
@@ -1372,11 +712,15 @@ class MainWindow(QMainWindow):
                 if key in self.input_edits:
                     raise RuntimeError(f"PARAM_GROUPS 重复注册输入字段：{key}")
                 # ── V20：循环方式 / GG 轴系布局选择器（QComboBox，userData=内部 key）──
-                if key in ("cycle_type", "gg_layout"):
+                if key in ("cycle_type", "gg_layout", "propellant_pair", "nonlinear_solver", "combustion_loss_model", "methane_thermo_dataset"):
                     combo = QComboBox()
                     combo.setObjectName("ParamCombo")
-                    choices = (CYCLE_TYPE_CHOICES if key == "cycle_type"
-                               else GG_LAYOUT_CHOICES)
+                    choices = {"cycle_type": CYCLE_TYPE_CHOICES,
+                               "gg_layout": GG_LAYOUT_CHOICES,
+                               "propellant_pair": PROPELLANT_CHOICES,
+                               "nonlinear_solver": NONLINEAR_SOLVER_CHOICES,
+                               "combustion_loss_model": COMBUSTION_LOSS_CHOICES,
+                               "methane_thermo_dataset": THERMO_DATASET_CHOICES}[key]
                     default_val = getattr(defaults, key)
                     for i, (val, text) in enumerate(choices):
                         combo.addItem(text, userData=val)
@@ -1389,11 +733,18 @@ class MainWindow(QMainWindow):
                             "· GG 燃气发生器开式循环（TQ-12 类）：富燃 GG 驱动涡轮后直排\n"
                             "切换后左侧参数区自动显示对应循环的专属参数组。")
                         combo.currentIndexChanged.connect(self._on_cycle_type_changed)
-                    else:
+                    elif key == "gg_layout":
                         combo.setToolTip(
                             "GG 轴系布局（仅 GG 循环生效）：\n"
-                            "· 单轴：一台涡轮同轴驱动 LOX/CH4 双泵（Merlin/F-1 经典布局）\n"
-                            "· 双轴：GG 燃气并联分流至两台涡轮，各驱动一侧泵（Vulcain 2）")
+                            "· 单轴：一台涡轮同轴驱动氧泵和燃料泵\n"
+                            "· 双轴：GG 燃气并联分流至两台涡轮，各驱动一侧泵")
+                    elif key == "nonlinear_solver":
+                        combo.setToolTip("相同物理方程与残差验收判据；TRF 用于对照。完整收敛仍需所有启用的迭代层通过。")
+                    else:
+                        combo.setToolTip(
+                            "液氧/煤油使用正十二烷替代工质，仅支持 GG 稳态循环与指定吸热量冷却。\n"
+                            "切换工质不会自动替换数值；建议载入配套工程示例。\n"
+                            "该模型不等同于真实 RP-1 或 Merlin 1D 的性能复现。")
                     self.input_edits[key] = combo
                     form.addRow(label, combo)
                     continue
@@ -1563,7 +914,7 @@ class MainWindow(QMainWindow):
         """
         V5.3.6 重构：
         ─────────────────────────────────────────────────────
-        1. 上半部分拆成"液氧流路"与"甲烷流路"两张独立卡片（水平并排），
+        1. 上半部分拆成"液氧流路"与"燃料流路"两张独立卡片（水平并排），
            主燃烧室作为汇合点单独显示在两卡之间。
         2. 流路 P-T 曲线去掉密度子图，改为 2×2（LOX/CH4 × P/T），
            子图明显放大，更易读。
@@ -1577,7 +928,7 @@ class MainWindow(QMainWindow):
 
         intro = QLabel(
             "状态点页面展示循环中各关键截面的压力、温度、流量、组分；"
-            "上方左右两张卡片分别对应液氧流路和甲烷流路，下方为状态点详情与组分；"
+            "上方左右两张卡片分别对应液氧流路和燃料流路，下方为状态点详情与组分；"
             "右侧上为流路 P-T 曲线，下为压降瀑布图，计算后自动刷新。"
         )
         intro.setObjectName("MutedLabel")
@@ -1615,10 +966,10 @@ class MainWindow(QMainWindow):
         self.lox_path_card.setMinimumWidth(170)   # V10：220→170，可把左栏拖更窄、给右侧图表让宽
         paths_w.addWidget(self.lox_path_card)
 
-        # 甲烷流路卡片
+        # 燃料流路卡片
         self.ch4_path_card, self.ch4_path_table = self._make_path_card(
-            title="甲烷流路 CH4 Path",
-            subtitle="储箱 → 管路 → 甲烷泵 → 再生冷却 → 富燃预燃室 → 富燃涡轮 → 主燃烧室",
+            title="燃料流路 Fuel Path",
+            subtitle="储箱 → 管路 → 燃料泵 → 再生冷却 → 富燃预燃室 → 富燃涡轮 → 主燃烧室",
             accent_color="#D97706",
         )
         self.ch4_path_card.setMinimumWidth(170)   # V10：220→170，同上
@@ -2083,7 +1434,7 @@ class MainWindow(QMainWindow):
             ("富燃涡轮 (F-rich)", "壳体 housing",     "housing",     inputs.turb_fuel_housing_material, "fuel"),
         ]
 
-        # 追加：涡轮泵（液氧泵 / 甲烷泵）+ 燃烧室壁 / 喷管壁 / 喷注器（默认材料，来自 materials.py）
+        # 追加：涡轮泵（液氧泵 / 燃料泵）+ 燃烧室壁 / 喷管壁 / 喷注器（默认材料，来自 materials.py）
         try:
             from materials import (
                 DEFAULT_CHAMBER_WALL_MATERIALS as _CW,
@@ -2097,9 +1448,9 @@ class MainWindow(QMainWindow):
                 ("液氧泵 (LOX pump)", "叶轮 impeller",  "pump_impeller", inputs.lox_pump_impeller_material, "ox"),
                 ("液氧泵 (LOX pump)", "诱导轮 inducer", "pump_inducer",  _OP.get("pump_inducer",  "monelk500_impeller"),  "ox"),
                 ("液氧泵 (LOX pump)", "泵壳 housing",   "pump_housing",  _OP.get("pump_housing",  "inconel718_pump_ox"), "ox"),
-                ("甲烷泵 (CH4 pump)", "叶轮 impeller",  "pump_impeller", inputs.fuel_pump_impeller_material, "fuel"),
-                ("甲烷泵 (CH4 pump)", "诱导轮 inducer", "pump_inducer",  _FP.get("pump_inducer",  "ti6al4v"), "fuel"),
-                ("甲烷泵 (CH4 pump)", "泵壳 housing",   "pump_housing",  _FP.get("pump_housing",  "ss316l"), "fuel"),
+                ("燃料泵 (Fuel pump)", "叶轮 impeller",  "pump_impeller", inputs.fuel_pump_impeller_material, "fuel"),
+                ("燃料泵 (Fuel pump)", "诱导轮 inducer", "pump_inducer",  _FP.get("pump_inducer",  "ti6al4v"), "fuel"),
+                ("燃料泵 (Fuel pump)", "泵壳 housing",   "pump_housing",  _FP.get("pump_housing",  "ss316l"), "fuel"),
                 ("燃烧室壁 (Chamber)", "内壁 inner（再生冷却铜）", "chamber_inner_wall", getattr(inputs, "chamber_inner_wall_material", None) or _CW.get("chamber_inner_wall", "grcop84"), ""),
                 ("燃烧室壁 (Chamber)", "外壳 outer（结构层）",     "chamber_outer_wall", getattr(inputs, "chamber_outer_wall_material", None) or _CW.get("chamber_outer_wall", "inconel718_wall"), ""),
                 ("喷管壁 (Nozzle)",    "扩张段内壁 inner",         "nozzle_inner_wall",  _NW.get("nozzle_inner_wall", "grcop84"), ""),
@@ -2366,37 +1717,15 @@ class MainWindow(QMainWindow):
             return
         try:
             import material_spec as ms
-            # 取沿程 marching 的喉部冷却剂温与 h_c → 与「再生冷却」Tab 完全一致
-            T_throat = None
-            h_c_throat = None
-            try:
-                from thermal_structural import compute_chamber_wall_field
-                geom = self.last_geometry
-                if not geom:
-                    from geometry import compute_geometry, geometry_to_dict
-                    inp = results.inputs
-                    geom = geometry_to_dict(compute_geometry(
-                        results,
-                        contraction_ratio=getattr(inp, "chamber_contraction_ratio", 2.5),
-                        l_star=getattr(inp, "chamber_l_star_m", 1.0)))
-                cool = results.components.get("cooling_channel")
-                wf = compute_chamber_wall_field(
-                    results.summary, geom, cooling_outputs=cool.outputs if cool else {})
-                if wf and wf.T_coolant:
-                    ti = wf.throat_index
-                    T_throat = wf.T_coolant[ti]
-                    h_c_throat = wf.h_c[ti]
-            except Exception:
-                pass
-            rows, op = ms.compare_chamber_liner_materials(
-                results, coolant_T_throat=T_throat, h_c_throat=h_c_throat)
+            # 比较只消费本次循环保存的热负荷；更换材料后的热场需完整循环重算。
+            rows, op = ms.compare_chamber_liner_materials(results)
             text = ms.format_liner_comparison(rows, op)
         except Exception as ex:
             QMessageBox.critical(self, "铜合金对比", f"对比失败：{ex}")
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("燃烧室内壁铜合金对比（耦合冷却）")
+        dlg.setWindowTitle("燃烧室内壁材料比较（保存的热负荷）")
         dlg.resize(1000, 780)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(10, 10, 10, 10)
@@ -3978,6 +3307,7 @@ class MainWindow(QMainWindow):
             self.thermstr_fig = Figure(figsize=(11, 8), facecolor="#FAFAFA")
             self.thermstr_canvas = FigureCanvasQTAgg(self.thermstr_fig)
             self.thermstr_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.thermstr_canvas.setMinimumHeight(720)
             lay.addWidget(self.thermstr_canvas)
             self.thermstr_note = QLabel("运行设计点后自动生成云图。")
             self.thermstr_note.setObjectName("MutedLabel")
@@ -3996,12 +3326,21 @@ class MainWindow(QMainWindow):
         return w
 
     def _populate_thermstr(self, results: CycleResults):
-        """求解后刷新热结构云图。"""
+        """Read saved thermal loads and add a separately identified structural estimate."""
         if not MATPLOTLIB_AVAILABLE or not hasattr(self, "thermstr_fig"):
             return
+        self._last_wallfield = None
+        self._last_geometry_for_fea = None
+        for name in ("fea_btn", "matcmp_btn"):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(False)
+        self.thermstr_fig.clear()
+        self.thermstr_canvas.draw_idle()
+        self._render_chamber_loads(None)
         try:
-            from thermal_structural import (compute_chamber_wall_field,
-                                             wall_field_from_profile, plot_wall_field)
+            from chamber_design import saved_cooling_result
+            from thermal_structural import wall_field_from_profile, plot_wall_field
+            prof = saved_cooling_result(results)["profile"]
             geom = self.last_geometry
             if not geom:
                 from geometry import compute_geometry, geometry_to_dict
@@ -4010,57 +3349,34 @@ class MainWindow(QMainWindow):
                     results,
                     contraction_ratio=getattr(inp, "chamber_contraction_ratio", 2.5),
                     l_star=getattr(inp, "chamber_l_star_m", 1.0)))
-            cool = results.components.get("cooling_channel")
-            co = cool.outputs if cool else {}
-            # 冷却剂代表温度:取冷却后甲烷温度,缺则 300K
-            t_cool = 300.0
-            if "fuel_after_cooling" in results.states:
-                t_cool = results.states["fuel_after_cooling"].temperature
-            _MATS = __import__("materials").MATERIALS
             inner_key = getattr(results.inputs, "chamber_inner_wall_material", "grcop84")
-            inner_key = inner_key if inner_key in _MATS else "grcop84"
             outer_key = getattr(results.inputs, "chamber_outer_wall_material", "inconel718_wall")
-            outer_key = outer_key if outer_key in _MATS else "inconel718_wall"
-            # 首选系统级 marching 剖面（CoolProp+辐射+肋+Jackson），其上叠加结构层；
-            # 无剖面时回退到 1D 简化重算。
-            wf = None
-            march = results.components.get("cooling_marching")
-            prof = getattr(march, "profile", None) if march else None
-            if prof:
-                # domain="chamber"：只算主燃烧室段（喷注面→喉部，单一 GRCop-84 衬里）
-                wf = wall_field_from_profile(prof, results.summary, geom,
-                                             inner_material_key=inner_key,
-                                             outer_material_key=outer_key,
-                                             domain="chamber")
+            wf = wall_field_from_profile(prof, results.summary, geom,
+                                         inner_material_key=inner_key,
+                                         outer_material_key=outer_key, domain="chamber")
             if wf is None:
-                wf = compute_chamber_wall_field(
-                    results.summary, geom, cooling_outputs=co,
-                    inner_material_key=inner_key,
-                    outer_material_key=outer_key, coolant_temp_K=t_cool)
-            if wf is None:
-                self.thermstr_note.setText("几何/冷却数据不足,无法生成云图。")
+                self.thermstr_note.setText("保存的冷却剖面数据不完整；请重算完整循环。")
                 return
             plot_wall_field(self.thermstr_fig, wf)
             self.thermstr_canvas.draw_idle()
             self.thermstr_note.setText("  ·  ".join(wf.notes))
             self._render_chamber_loads(getattr(wf, "loads", None))
-            self._last_wallfield = wf      # 供「喉部 2D 有限元」按钮复用
+            self._last_wallfield = wf
             self._last_geometry_for_fea = geom
-            if hasattr(self, "fea_btn"):
-                self.fea_btn.setEnabled(True)
-            if hasattr(self, "matcmp_btn"):
-                self.matcmp_btn.setEnabled(True)
+            for name in ("fea_btn", "matcmp_btn"):
+                if hasattr(self, name):
+                    getattr(self, name).setEnabled(True)
         except Exception as ex:
             import traceback
-            self.thermstr_note.setText(f"云图生成失败:{ex}")
-            self._log_info("热结构云图失败\n" + traceback.format_exc(), source="ThermStr")
+            self.thermstr_note.setText(f"保存的冷却载荷不可用：{ex}")
+            self._log_info("热结构载荷读取失败\n" + traceback.format_exc(), source="ThermStr")
 
     def _render_chamber_loads(self, loads):
         """把主燃烧室壁载荷清单渲染成 HTML 表格(富文本 QLabel)。"""
         if not hasattr(self, "thermstr_loads"):
             return
         if loads is None:
-            self.thermstr_loads.setText("(当前路径无载荷清单：marching 剖面缺失)")
+            self.thermstr_loads.setText("当前记录未保存统一冷却载荷；需重算完整循环。")
             return
         head = (
             f"<div style='font-size:13px;font-weight:bold;color:#0f172a;margin-bottom:4px;'>"
@@ -4260,12 +3576,10 @@ class MainWindow(QMainWindow):
         root.setSpacing(8)
 
         intro = QLabel(
-            "再生冷却沿程剖面(L2,逐站 marching,整条回路 喷注器→喷管出口):冷却剂从喷管出口端进入、"
-            "逆流向喷注器沿程吸热升温;每站由超临界甲烷真实物性(CoolProp)+ 通道几何算冷却侧 h_c,"
-            "燃气侧 Bartz 对流 + 灰气体辐射,解穿壁串联热阻。\n"
-            "排版:顶部发动机轮廓;左列传热(① 热流 q ③ 换热系数 h ⑤ 冷却剂 ρ/V),"
-            "右列冷却剂与判定(② 三侧温度 vs 材料上限 ④ 压力 Δp ⑥ 诊断小结)。"
-            "先看「哪里最烫·烫不烫得住·水力可行吗」。"
+            "直接展示完整循环保存的统一冷却沿程：热流、壁温、冷却剂状态和压降。"
+            "图中 x 为发动机轴向坐标，冷却剂流向以记录为准；端口压降直接取保存的入口、出口状态。\n"
+            "历史记录或预算模式缺少沿程解时不补算曲线。修改几何、换热或损失参数后需重算完整循环。"
+            "热结构页仅消费这些保存的热负荷，结构估计不代表结构验证。"
         )
         intro.setObjectName("MutedLabel")
         intro.setWordWrap(True)
@@ -4277,6 +3591,7 @@ class MainWindow(QMainWindow):
             self.cooling_fig = Figure(figsize=(11, 9), facecolor="#FAFAFA")
             self.cooling_canvas = FigureCanvasQTAgg(self.cooling_fig)
             self.cooling_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.cooling_canvas.setMinimumHeight(850)
             lay.addWidget(self.cooling_canvas)
             self.cooling_note = QLabel("运行设计点后自动生成再生冷却沿程剖面。")
             self.cooling_note.setObjectName("MutedLabel")
@@ -4295,15 +3610,16 @@ class MainWindow(QMainWindow):
         return w
 
     def _populate_cooling(self, results: CycleResults):
-        """求解后刷新再生冷却沿程剖面。"""
+        """Display the cooling profile used by the cycle without recomputing physics."""
         if not MATPLOTLIB_AVAILABLE or not hasattr(self, "cooling_fig"):
             return
-        # V19 审查修复：先作废缓存——任何失败路径都不得让工作区拿着上一轮的
-        # WallField 配新结果显示（站位卡/记分卡/FEM 会静默用错数据）。
         self._last_wallfield_full = None
+        self.cooling_fig.clear()
+        self.cooling_canvas.draw_idle()
         try:
-            from thermal_structural import (compute_chamber_wall_field,
-                                             wall_field_from_profile, plot_cooling_profiles)
+            from chamber_design import saved_cooling_result
+            from thermal_structural import wall_field_from_profile, plot_cooling_profiles
+            prof = saved_cooling_result(results)["profile"]
             geom = self.last_geometry
             if not geom:
                 from geometry import compute_geometry, geometry_to_dict
@@ -4312,44 +3628,22 @@ class MainWindow(QMainWindow):
                     results,
                     contraction_ratio=getattr(inp, "chamber_contraction_ratio", 2.5),
                     l_star=getattr(inp, "chamber_l_star_m", 1.0)))
-            cool = results.components.get("cooling_channel")
-            co = cool.outputs if cool else {}
-            import materials as _m
             inner_key = getattr(results.inputs, "chamber_inner_wall_material", "grcop84")
-            inner_key = inner_key if inner_key in _m.MATERIALS else "grcop84"
             outer_key = getattr(results.inputs, "chamber_outer_wall_material", "inconel718_wall")
-            outer_key = outer_key if outer_key in _m.MATERIALS else "inconel718_wall"
-            # 首选系统级 marching 剖面（与 cooling_marching 部件同源），无则回退 1D 简化
-            wf = None
-            march = results.components.get("cooling_marching")
-            prof = getattr(march, "profile", None) if march else None
-            if prof:
-                # 冷却页展示**整条冷却回路**（喷注器→喷管出口）：domain="full"，
-                # 否则只画到喉部、漏掉喷管段（Δp 会少算大半）。
-                wf = wall_field_from_profile(prof, results.summary, geom,
-                                             inner_material_key=inner_key,
-                                             outer_material_key=outer_key, domain="full")
+            wf = wall_field_from_profile(prof, results.summary, geom,
+                                         inner_material_key=inner_key,
+                                         outer_material_key=outer_key, domain="full")
             if wf is None:
-                wf = compute_chamber_wall_field(
-                    results.summary, geom, cooling_outputs=co,
-                    inner_material_key=inner_key,
-                    outer_material_key=outer_key)
-            if wf is None:
-                self.cooling_note.setText("几何/冷却数据不足,无法生成冷却剖面。")
+                self.cooling_note.setText("保存的冷却剖面数据不完整；请重算完整循环。")
                 return
             plot_cooling_profiles(self.cooling_fig, wf)
             self.cooling_canvas.draw_idle()
             self.cooling_note.setText("  ·  ".join(wf.notes))
-            # V19：整程 WallField 供推力室工作区（站位游标/任意站 FEM/记分卡）复用。
-            # 只接受 marching 剖面来源——回退路径 compute_chamber_wall_field 的 x 坐标
-            # 原点在喉部（取自喷管 contour_x），而工作区分区/锚点/记分卡都按
-            # 喷注面原点解释，混用会把分区与站位全部错位。
-            if getattr(wf, "source", "") == "marching-profile":
-                self._last_wallfield_full = wf
+            self._last_wallfield_full = wf
         except Exception as ex:
             import traceback
-            self.cooling_note.setText(f"冷却剖面生成失败:{ex}")
-            self._log_info("再生冷却剖面失败\n" + traceback.format_exc(), source="Cooling")
+            self.cooling_note.setText(f"保存的冷却剖面不可用：{ex}")
+            self._log_info("再生冷却剖面读取失败\n" + traceback.format_exc(), source="Cooling")
 
     # ──────────────────────────────────────────────────────────────
     # 热力学对比标签页：NASA CEA × Cantera 交叉验证
@@ -4508,6 +3802,11 @@ class MainWindow(QMainWindow):
 
     def run_thermo_compare(self):
         """读取参数控件，启动 ThermoWorker 后台线程。"""
+        fuel_selector = self.input_edits.get("propellant_pair")
+        if fuel_selector is not None and fuel_selector.currentData() == "lox_kerosene":
+            QMessageBox.information(self, "热力学对比范围",
+                                    "此独立对比工具仅支持液氧/甲烷；煤油替代工质请在 GG 系统仿真中计算。")
+            return
         try:
             of_min   = float(self._thermo_of_min.text())
             of_max   = float(self._thermo_of_max.text())
@@ -4532,7 +3831,9 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, n)
         self.progress.setValue(0)
 
-        worker = ThermoWorker(of_list, eps_list, pc_pa, T_fuel, T_ox)
+        dataset_selector = self.input_edits.get("methane_thermo_dataset")
+        dataset = dataset_selector.currentData() if dataset_selector is not None else "gri30"
+        worker = ThermoWorker(of_list, eps_list, pc_pa, T_fuel, T_ox, dataset)
         worker.signals.progress.connect(self._on_thermo_progress)
         worker.signals.finished.connect(self._on_thermo_finished)
         worker.signals.error.connect(self._on_thermo_error)
@@ -4656,12 +3957,10 @@ class MainWindow(QMainWindow):
         warning_count = len(results.warnings or []) + int(bool(s.get("solver_warning", 0.0)))
         mode = str(s.get("solve_mode_text", "目标预燃室混合比模式"))
         thermo = "Cantera" if float(s.get("thermo_source", 1.0) or 0.0) > 0.5 else "经验模型"
-        if residual < 1e-4 and warning_count == 0:
-            status_text, status_state = "求解成功", "ok"
-        elif residual < 1e-3:
-            status_text, status_state = "基本收敛", "warning"
-        else:
-            status_text, status_state = "需要检查", "error"
+        from convergence import numerical_convergence
+        numerical = numerical_convergence(results)
+        status_text = numerical["label"]
+        status_state = {"pass": "ok", "unknown": "warning", "fail": "error"}[numerical["status"]]
         items = [
             (status_text, status_state),
             (thermo, "neutral"),
@@ -4723,7 +4022,7 @@ class MainWindow(QMainWindow):
              "ok" if thrust_err < 0.1 else "warning"),
             ("真空比冲 Isp_vac", self._fmt(isp_vac), "s",
              f"海平面 {self._fmt(isp_sl)} s · {flow_txt}口径", "neutral"),
-            ("总质量流量", self._fmt(s.get("mdot_total_kg_s")), "kg/s", "LOX + CH4", "neutral"),
+            ("总质量流量", self._fmt(s.get("mdot_total_kg_s")), "kg/s", "液氧 + 燃料", "neutral"),
             ("主燃烧室温度", self._fmt(s.get("chamber_temperature_K")), "K", "燃气平衡温度", "neutral"),
             ("富氧预燃室温度", self._fmt(oxT), "K", ox_pb_hint, ox_pb_state),
             ("富燃预燃室温度", self._fmt(fuelT), "K", fuel_pb_hint, fuel_pb_state),
@@ -5207,11 +4506,13 @@ class MainWindow(QMainWindow):
         s = results.summary
         residual = float(s.get("solver_residual_norm", 1.0))
         has_warning = bool(results.warnings) or bool(s.get("solver_warning", 0.0))
-        if residual < 1e-4 and not has_warning:
+        from convergence import numerical_convergence
+        numerical = numerical_convergence(results)
+        if numerical["status"] == "pass":
             self.badge.setText("已收敛")
             self.badge.setObjectName("BadgeOk")
-        elif residual < 1e-3:
-            self.badge.setText("基本收敛 / 有警告")
+        elif numerical["status"] == "unknown":
+            self.badge.setText("收敛证据不完整")
             self.badge.setObjectName("BadgeWarning")
         else:
             self.badge.setText("未完全收敛")
@@ -5361,8 +4662,15 @@ class MainWindow(QMainWindow):
             else:
                 badges.append((f"u_tip OK", "ok"))
             # Nss
-            nss = o.get("suction_specific_speed_Nss", 0)
-            if nss > 45000:
+            nss = o.get("suction_specific_speed_Nss")
+            npsh = o.get("npsh_available_m")
+            if isinstance(npsh, (int, float)) and math.isfinite(npsh) and npsh <= 0:
+                badges.append((f"NPSHa={npsh:.2g} m ≤ 0", "error"))
+            elif not isinstance(nss, (int, float)) or not math.isfinite(nss):
+                # Above the critical temperature a saturation-based NPSH is
+                # undefined; an absent value is not zero or cavitation proof.
+                badges.append(("NPSH / Nss 未判定或不适用", "neutral"))
+            elif nss > 45000:
                 badges.append((f"Nss={nss:.0f} 穴蚀", "error"))
             elif nss > 30000:
                 badges.append((f"Nss={nss:.0f} 需诱导轮", "warn"))
@@ -5474,7 +4782,8 @@ class MainWindow(QMainWindow):
             n   = int(round(o["n_stages"]));   N = float(o["nr_rpm"])
             om  = float(o["nr_rad_s"]);        npm = float(o["npsh_available_m"])
             psi = float(o["psi_head_coefficient"])
-            if Q <= 0 or H <= 0 or npm <= 0 or psi <= 0:
+            if (not all(math.isfinite(v) for v in (Q, H, N, om, npm, psi))
+                    or Q <= 0 or H <= 0 or npm <= 0 or psi <= 0):
                 return None
             hand = hand_calc(Q, H, n, N, om, npm, psi)
         except Exception:
@@ -5483,7 +4792,12 @@ class MainWindow(QMainWindow):
         all_ok = True
         max_rel = 0.0
         for label, key in self._PUMP_CC_ITEMS:
-            a = float(o.get(key, float("nan"))); b = float(hand[key])
+            try:
+                a = float(o[key]); b = float(hand[key])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if not math.isfinite(a) or not math.isfinite(b):
+                return None
             rel = abs(a - b) / max(abs(b), 1e-30)
             max_rel = max(max_rel, rel)
             ok = rel <= rtol
@@ -5682,9 +4996,9 @@ class MainWindow(QMainWindow):
         )
         panels = [
             (0, 0, "液氧流路 · 压力 [bar]"),
-            (0, 1, "甲烷流路 · 压力 [bar]"),
+            (0, 1, "燃料流路 · 压力 [bar]"),
             (1, 0, "液氧流路 · 温度 [K]"),
-            (1, 1, "甲烷流路 · 温度 [K]"),
+            (1, 1, "燃料流路 · 温度 [K]"),
         ]
         self._sf_axes = {}
         keys = ["p_lox", "p_ch4", "t_lox", "t_ch4"]
@@ -5751,9 +5065,9 @@ class MainWindow(QMainWindow):
         # Re-apply titles (cla() clears them)
         titles = [
             ("p_lox", "液氧流路 · 压力 [bar]"),
-            ("p_ch4", "甲烷流路 · 压力 [bar]"),
+            ("p_ch4", "燃料流路 · 压力 [bar]"),
             ("t_lox", "液氧流路 · 温度 [K]"),
-            ("t_ch4", "甲烷流路 · 温度 [K]"),
+            ("t_ch4", "燃料流路 · 温度 [K]"),
         ]
         for k, ttl in titles:
             self._sf_axes[k].set_title(
@@ -5780,7 +5094,7 @@ class MainWindow(QMainWindow):
         }
         for k, ax in self._wf_axes.items():
             self._style_ax_base(ax)
-            title = "液氧流路压降瀑布" if k == "lox" else "甲烷流路压降瀑布"
+            title = "液氧流路压降瀑布" if k == "lox" else "燃料流路压降瀑布"
             ax.set_title(title, fontsize=9, fontweight="bold", color="#111827", pad=4)
             ax.text(0.5, 0.5, "计算后自动绘制", ha="center", va="center",
                     transform=ax.transAxes, color="#9CA3AF", fontsize=9, style="italic")
@@ -5840,7 +5154,7 @@ class MainWindow(QMainWindow):
         ch4_steps = [
             ("储箱",            bar(st["fuel_tank"].pressure)     if "fuel_tank" in st     else 6.0,    "#94a3b8", "+"),
             ("管路后",          bar(st["fuel_pump_inlet"].pressure) if "fuel_pump_inlet" in st else 3.1, "#cbd5e1", "−"),
-            ("甲烷泵后",        ch4_pump_out,                                                            "#D97706", "+"),
+            ("燃料泵后",        ch4_pump_out,                                                            "#D97706", "+"),
             ("再生冷却后",      bar(st["fuel_after_cooling"].pressure) if "fuel_after_cooling" in st
                                 else max(0.0, ch4_pump_out - dp_cool),                                  "#10b981", "−"),
             ("阀门管路后",      max(0.0, ch4_pump_out - dp_cool - dp_valve_ch4),                         "#fb923c", "−"),
@@ -5890,7 +5204,7 @@ class MainWindow(QMainWindow):
                 prev = val
 
             title = ("液氧流路压降瀑布" if side_label == "lox"
-                     else "甲烷流路压降瀑布")
+                     else "燃料流路压降瀑布")
             ax.set_title(title, fontsize=9.5, fontweight="bold",
                          color="#111827", pad=4)
             for spine in ax.spines.values():
@@ -6103,7 +5417,9 @@ class MainWindow(QMainWindow):
         iters_val = s.get("solver_iterations")
         iters_str = self._fmt(iters_val)
         has_warning = bool(results.warnings) or bool(s.get("solver_warning", 0.0))
-        converged = (residual < 1e-4) and not has_warning
+        from convergence import numerical_convergence
+        numerical = numerical_convergence(results)
+        converged = numerical["status"] == "pass"
 
         self._log_step(
             f"热力学引擎: {'Cantera (GRI-Mech 3.0)' if CANTERA_AVAILABLE else 'Empirical fallback (无 Cantera)'}",
@@ -6116,26 +5432,26 @@ class MainWindow(QMainWindow):
 
         if converged:
             self._log_ok(
-                f"求解收敛 — 推力 / 比冲 / 流量 / 涡轮功率均满足平衡 (residual {residual:.2e} < 1e-4)",
+                f"完整数值收敛 — 内层、热反馈、温度目标与目标工况均已通过 (内层残差 {residual:.2e})",
                 source="Solver",
             )
             self._set_log_status("空闲 / Idle", conv=f"✓ 已收敛 ({residual:.1e})", conv_kind="ok")
-        elif residual < 1e-3:
+        elif numerical["status"] == "unknown":
             self._log_warn(
-                f"基本收敛但有警告 — 残差 {residual:.2e}，建议复核温度/材料/几何校核",
+                f"完整收敛证据不足 — 内层残差 {residual:.2e} 不能替代外环及目标工况检查，请重新计算。",
                 source="Solver",
             )
-            self._set_log_status("空闲 / Idle", conv=f"⚠ 基本收敛 ({residual:.1e})", conv_kind="warn")
+            self._set_log_status("空闲 / Idle", conv="⚠ 收敛证据不完整", conv_kind="warn")
         else:
             self._log_error(
-                f"未完全收敛 — 残差 {residual:.2e} > 1e-3，结果不可信",
+                f"未完全收敛 — 至少一层未通过；内层残差 {residual:.2e}，结果仅供诊断。",
                 source="Solver",
             )
             self._set_log_status("空闲 / Idle", conv=f"✗ 未收敛 ({residual:.1e})", conv_kind="error")
 
         if s.get("solver_warning", 0.0):
             self._log_warn(
-                "solver_warning = 1：达到最大迭代步或未满足严格收敛阈值",
+                "solver_warning = 1：内层、热反馈、温度目标或目标工况尚未完整通过。",
                 source="Solver",
             )
 
@@ -6150,7 +5466,7 @@ class MainWindow(QMainWindow):
             ("富氧预燃室温度",   "ox_preburner_T_combustion_K",    "K",    lambda v: f"{v:.0f}"),
             ("富燃预燃室温度",   "fuel_preburner_T_combustion_K",  "K",    lambda v: f"{v:.0f}"),
             ("液氧泵功率",       "ox_pump_power_MW",               "MW",   lambda v: f"{v:.2f}"),
-            ("甲烷泵功率",       "fuel_pump_power_MW",             "MW",   lambda v: f"{v:.2f}"),
+            ("燃料泵功率",       "fuel_pump_power_MW",             "MW",   lambda v: f"{v:.2f}"),
         ]:
             v = s.get(key)
             if v is None:
@@ -6394,9 +5710,9 @@ class MainWindow(QMainWindow):
         rows = [
             ("总流量 ṁ",        _kgs("mdot_total_kg_s")),
             ("LOX 流量",         _kgs("mdot_ox_kg_s")),
-            ("CH4 流量",         _kgs("mdot_fuel_kg_s")),
+            ("燃料流量",         _kgs("mdot_fuel_kg_s")),
             ("LOX 泵出口 P",     _mpa("lox_pump_out_pressure_Pa")),
-            ("CH4 泵出口 P",     _mpa("fuel_pump_out_pressure_Pa")),
+            ("燃料泵出口 P",     _mpa("fuel_pump_out_pressure_Pa")),
             ("富氧 PB  O/F",     _num("ox_preburner_mr",   "{:.2f}")),
             ("富燃 PB  O/F",     _num("fuel_preburner_mr", "{:.3f}")),
             ("主燃室 Pc",        _mpa("chamber_pressure_Pa")),
@@ -6465,7 +5781,7 @@ class MainWindow(QMainWindow):
 
         rows = [
             ("循环 Cycle",        "FFSC 全流量分级燃烧"),
-            ("推进剂 Propellant", "LOX + CH4"),
+            ("推进剂 Propellant", "液氧 + 燃料"),
             ("设计推力 F",         _kn()),
             ("真空比冲 Isp_vac",   _isp()),
             ("燃烧室压力 Pc",      _mpa(inp.pc)),
@@ -6650,7 +5966,7 @@ class MainWindow(QMainWindow):
         self._append_log(f"已导出 JSON: {path}")
 
     def export_cfturbo_md(self):
-        """把四个叶轮机械（液氧泵/甲烷泵/富氧涡轮/富燃涡轮）设计点导出为
+        """把四个叶轮机械（液氧泵/燃料泵/富氧涡轮/富燃涡轮）设计点导出为
         CFTurbo 录入参考的 Markdown 文档。"""
         if self.last_results is None:
             QMessageBox.information(self, "没有可导出结果", "请先运行设计点求解。")
@@ -6666,7 +5982,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"已导出 CFTurbo 设计点 Markdown: {path}")
             QMessageBox.information(
                 self, "导出成功",
-                f"已导出液氧泵/甲烷泵/富氧涡轮/富燃涡轮的 CFTurbo 录入参考：\n{path}")
+                f"已导出液氧泵/燃料泵/富氧涡轮/富燃涡轮的 CFTurbo 录入参考：\n{path}")
         except Exception as ex:
             QMessageBox.warning(self, "导出失败", f"无法导出 CFTurbo Markdown：\n{ex}")
 

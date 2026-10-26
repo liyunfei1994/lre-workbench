@@ -111,9 +111,12 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(response.status_code,200)
         self.assertIn("frame-ancestors 'none'",response.headers["content-security-policy"])
         self.assertEqual(response.headers["cache-control"],"no-store")
-        for name in ("app.js","style.css"):
+        for name in ("app.js","results.js","style.css","workbench.css"):
             self.assertEqual(self.admin.get("/static/"+name).status_code,200)
         self.assertIn("javascript", self.admin.get("/static/app.js").headers["content-type"])
+        self.assertIn("javascript", self.admin.get("/static/results.js").headers["content-type"])
+        self.assertIn("text/css", self.admin.get("/static/workbench.css").headers["content-type"])
+        self.assertEqual(self.admin.get("/static/missing.js").status_code, 404)
 
     def test_invalid_inputs_rejected_and_queue_bounded(self):
         for inputs in ({"pc":-1},{"thrust":True},{"unknown_field":1},{"gg_layout":"other"},
@@ -139,6 +142,17 @@ class WorkspaceTests(unittest.TestCase):
             self.assertTrue(fresh.get("/api/auth/status").json()["initialized"])
             self.assertEqual(fresh.post("/api/auth/login",json={"username":"admin","password":TEST_PASSWORD}).status_code,200)
             self.assertEqual(fresh.get("/api/projects").json()[0]["id"],p["id"])
+
+    def test_info_exposes_desktop_parameters_and_result_labels(self):
+        response = self.admin.get("/api/info")
+        self.assertEqual(response.status_code, 200, response.text)
+        schema = response.json()["ui_schema"]
+        fields = {f["key"]: f for g in schema["groups"] for f in g["fields"]}
+        self.assertEqual(set(fields), set(schema["defaults"]))
+        self.assertEqual(fields["pc"]["unit"], "MPa")
+        self.assertEqual(fields["pc"]["factor"], 1e-6)
+        self.assertIn("gg", schema["overview_groups"])
+        self.assertEqual(schema["component_labels"]["gas_generator"], "燃气发生器（富燃）")
 
     def test_queue_lock_and_recovery(self):
         p = self.project()
@@ -190,7 +204,7 @@ class WorkspaceTests(unittest.TestCase):
         queue = JobQueue(self.app.state.store,timeout=180)
         queue.start()
         try:
-            for key in ("tq12a_gg","raptor3_ffsc"):
+            for key in ("tq12a_gg","raptor3_ffsc","merlin1d_gg"):
                 with self.subTest(preset=key):
                     p = self.project(key)
                     job = member.post(f"/api/projects/{p['id']}/jobs",json={"revision":1}).json()
@@ -201,7 +215,13 @@ class WorkspaceTests(unittest.TestCase):
                         time.sleep(.25)
                     self.assertEqual(record["status"],"succeeded",record.get("error"))
                     result = record["result"]
-                    self.assertEqual(result["environment"]["physics"],{"chemistry":"Cantera","properties":"CoolProp"})
+                    physics = result["environment"]["physics"]
+                    self.assertEqual((physics["chemistry"], physics["properties"]), ("Cantera", "CoolProp"))
+                    self.assertEqual(physics["propellant_pair"], p["inputs"]["propellant_pair"])
+                    self.assertEqual(result["propellant_model"]["id"], p["inputs"]["propellant_pair"])
+                    self.assertEqual(physics["fuel_species"], "c12h26" if key == "merlin1d_gg" else "CH4")
+                    expected_data = "nDodecane_Reitz.yaml" if key == "merlin1d_gg" else p["inputs"].get("methane_thermo_dataset", "gri30") + ".yaml"
+                    self.assertEqual(physics["mechanism"], expected_data)
                     self.assertGreater(result["calculation"]["summary"]["Isp_s"],0)
                     self.assertEqual(result["submitted_inputs"],p["inputs"])
                     self.assertIn("numerical",result["assessment"])

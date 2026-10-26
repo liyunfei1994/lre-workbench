@@ -13,13 +13,13 @@ import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from webapp.store import Store
 from webapp.jobs import JobQueue
-from webapp.solver import input_values, presets, SCIENCE_PINS
+from webapp.solver import input_values, presets, reference_engines, SCIENCE_PINS
+from webapp.ui_schema import design_ui_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 COOKIE = "lre_session"
@@ -246,7 +246,8 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         session_user(request)
         return {"python": os.sys.version.split()[0], "scope": "local",
                 "max_parallel_jobs": 1, "job_timeout_seconds": job_timeout,
-                "presets": presets(),
+                "presets": presets(), "reference_engines": reference_engines(),
+                "ui_schema": design_ui_schema(),
                 "dependencies": {k: importlib.metadata.version(k) for k in SCIENCE_PINS}}
 
     @app.get("/api/projects")
@@ -254,7 +255,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         session_user(request)
         return store.all(
             "SELECT p.id,p.name,p.description,p.revision,p.created,p.updated,u.display_name AS author,"
-            "(SELECT COUNT(*) FROM jobs j WHERE j.project_id=p.id) AS job_count "
+            "(SELECT COUNT(*) FROM jobs j WHERE j.project_id=p.id AND j.kind='design') AS job_count "
             "FROM projects p JOIN users u ON u.id=p.updated_by ORDER BY p.updated DESC")
 
     @app.post("/api/projects")
@@ -340,7 +341,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         sql = ("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.started,j.finished,"
                "j.progress,j.error,p.name AS project_name,u.display_name AS author FROM jobs j "
                "JOIN projects p ON p.id=j.project_id JOIN users u ON u.id=j.submitted_by ")
-        rows = store.all(sql + ("WHERE j.project_id=? " if project_id else "") + "ORDER BY j.created DESC LIMIT 100",
+        rows = store.all(sql + "WHERE j.kind='design' " + ("AND j.project_id=? " if project_id else "") + "ORDER BY j.created DESC LIMIT 100",
                          (project_id,) if project_id else ())
         for row in rows:
             row["progress"] = json.loads(row["progress"]) if row["progress"] else None
@@ -350,7 +351,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
     def job(job_id: str, request: Request):
         session_user(request)
         row = store.one("SELECT j.*,u.display_name AS author FROM jobs j "
-                        "JOIN users u ON u.id=j.submitted_by WHERE j.id=?", (job_id,))
+                        "JOIN users u ON u.id=j.submitted_by WHERE j.id=? AND j.kind='design'", (job_id,))
         if not row:
             raise HTTPException(404, "任务不存在。")
         for field in ("inputs", "result", "progress"):
@@ -379,18 +380,612 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         return JSONResponse(record, headers={
             "Content-Disposition": f'attachment; filename="lre-result-{record["id"]}.json"'})
 
+    @app.get("/api/validation/capabilities")
+    def validation_capabilities(request: Request):
+        session_user(request)
+        from webapp.validation import capabilities
+        return capabilities()
+
+    @app.get("/api/projects/{project_id}/validations")
+    def validations(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.finished,"
+                         "j.progress,j.error,j.inputs,u.display_name AS author FROM jobs j "
+                         "JOIN users u ON u.id=j.submitted_by WHERE j.project_id=? AND j.kind='validation' "
+                         "ORDER BY j.created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/validations")
+    async def submit_validation(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+                raise ValueError("请选择已完成的来源计算记录。")
+            try:
+                uuid.UUID(value["source_job_id"])
+            except (ValueError, AttributeError):
+                raise ValueError("来源计算记录标识无效。") from None
+        except (ValueError, RecursionError) as exc:
+            raise HTTPException(422, "校核 JSON 或来源记录标识无效。") from exc
+        key, now = str(uuid.uuid4()), time.time()
+        from webapp.validation import normalize_request
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                             "AND status='succeeded' AND result IS NOT NULL",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源记录必须是本项目已完成的系统设计计算。")
+            source = dict(row)
+            source["inputs"] = json.loads(source["inputs"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                detail = str(exc)[:1600].encode("utf-8", "backslashreplace").decode("utf-8")
+                raise HTTPException(422, detail)
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')",
+                             (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) "
+                       "VALUES(?,?,?,?,?,?,?,'validation')", (key, project_id, source["revision"], user["id"],
+                        "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/validations/{validation_id}")
+    def validation_record(validation_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT j.*,u.display_name AS author FROM jobs j JOIN users u ON u.id=j.submitted_by "
+                        "WHERE j.id=? AND j.kind='validation'", (validation_id,))
+        if not row:
+            raise HTTPException(404, "校核记录不存在。")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/validations/{validation_id}/cancel")
+    async def cancel_validation(validation_id: str, request: Request):
+        validation_record(validation_id, request)
+        return await cancel(validation_id, request)
+
+    @app.get("/api/projects/{project_id}/throttles")
+    def throttles(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.started,j.finished,"
+                         "j.progress,j.error,j.inputs,u.display_name AS author FROM jobs j "
+                         "JOIN users u ON u.id=j.submitted_by WHERE j.project_id=? AND j.kind='throttle' "
+                         "ORDER BY j.created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["kind"] = "throttle"
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/throttles")
+    async def submit_throttle(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+                raise ValueError("请选择已完成的来源计算记录。")
+            uuid.UUID(value["source_job_id"])
+        except (ValueError, AttributeError, RecursionError) as exc:
+            raise HTTPException(422, "节流请求 JSON 或来源记录标识无效。") from exc
+        from webapp.throttle import normalize_request
+        key, now = str(uuid.uuid4()), time.time()
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                             "AND status='succeeded' AND result IS NOT NULL",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源记录必须是本项目已完成的稳态设计计算。")
+            source = dict(row)
+            source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                detail = str(exc)[:1600].encode("utf-8", "backslashreplace").decode("utf-8")
+                raise HTTPException(422, detail)
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')",
+                             (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) "
+                       "VALUES(?,?,?,?,?,?,?,'throttle')", (key, project_id, source["revision"], user["id"],
+                        "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/throttles/{throttle_id}")
+    def throttle_record(throttle_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT j.*,u.display_name AS author FROM jobs j JOIN users u ON u.id=j.submitted_by "
+                        "WHERE j.id=? AND j.kind='throttle'", (throttle_id,))
+        if not row:
+            raise HTTPException(404, "节流扫描记录不存在。")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/throttles/{throttle_id}/cancel")
+    async def cancel_throttle(throttle_id: str, request: Request):
+        throttle_record(throttle_id, request)
+        return await cancel(throttle_id, request)
+
+    @app.get("/api/throttles/{throttle_id}/download")
+    def download_throttle(throttle_id: str, request: Request):
+        record = throttle_record(throttle_id, request)
+        if record["result"] is None:
+            raise HTTPException(409, "此扫描尚无可导出的结果。")
+        return JSONResponse(record, headers={
+            "Content-Disposition": f'attachment; filename="lre-throttle-{record["id"]}.json"'})
+
+    @app.get("/api/projects/{project_id}/transients/setup")
+    def transient_configuration(project_id: str, source_job_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        row = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                        "AND status='succeeded' AND result IS NOT NULL", (source_job_id, project_id))
+        if not row:
+            raise HTTPException(422, "请选择本项目已完成的稳态设计记录。")
+        row["inputs"], row["result"] = json.loads(row["inputs"]), json.loads(row["result"])
+        from webapp.transient import transient_setup
+        return transient_setup(row)
+
+    @app.get("/api/projects/{project_id}/transients")
+    def transients(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.started,j.finished,"
+                         "j.progress,j.error,j.inputs,u.display_name AS author FROM jobs j "
+                         "JOIN users u ON u.id=j.submitted_by WHERE j.project_id=? AND j.kind='transient' "
+                         "ORDER BY j.created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["kind"] = "transient"
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/transients")
+    async def submit_transient(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+                raise ValueError("请选择已完成的来源计算记录。")
+            uuid.UUID(value["source_job_id"])
+        except (ValueError, AttributeError, RecursionError) as exc:
+            raise HTTPException(422, "瞬态请求 JSON 或来源记录标识无效。") from exc
+        from webapp.transient import normalize_request
+        key, now = str(uuid.uuid4()), time.time()
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                             "AND status='succeeded' AND result IS NOT NULL",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源记录必须是本项目已完成的稳态设计计算。")
+            source = dict(row)
+            source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                detail = str(exc)[:1600].encode("utf-8", "backslashreplace").decode("utf-8")
+                raise HTTPException(422, detail)
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')",
+                             (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) "
+                       "VALUES(?,?,?,?,?,?,?,'transient')", (key, project_id, source["revision"], user["id"],
+                        "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/transients/{transient_id}")
+    def transient_record(transient_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT j.*,u.display_name AS author FROM jobs j JOIN users u ON u.id=j.submitted_by "
+                        "WHERE j.id=? AND j.kind='transient'", (transient_id,))
+        if not row:
+            raise HTTPException(404, "瞬态分析记录不存在。")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/transients/{transient_id}/cancel")
+    async def cancel_transient(transient_id: str, request: Request):
+        transient_record(transient_id, request)
+        return await cancel(transient_id, request)
+
+    @app.get("/api/transients/{transient_id}/download")
+    def download_transient(transient_id: str, request: Request):
+        record = transient_record(transient_id, request)
+        if record["result"] is None:
+            raise HTTPException(409, "此扫描尚无可导出的结果。")
+        return JSONResponse(record, headers={
+            "Content-Disposition": f'attachment; filename="lre-transient-{record["id"]}.json"'})
+
+    @app.get("/api/projects/{project_id}/feed-studies/setup")
+    def feed_network_configuration(project_id: str, source_job_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        row = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                        "AND status='succeeded' AND result IS NOT NULL", (source_job_id, project_id))
+        if not row:
+            raise HTTPException(422, "请选择本项目已完成的稳态设计记录。")
+        row["inputs"], row["result"] = json.loads(row["inputs"]), json.loads(row["result"])
+        from webapp.feed_network import feed_setup
+        return feed_setup(row)
+
+    @app.get("/api/projects/{project_id}/feed-studies")
+    def feed_studies(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.started,j.finished,"
+                         "j.progress,j.error,j.inputs,u.display_name AS author FROM jobs j "
+                         "JOIN users u ON u.id=j.submitted_by WHERE j.project_id=? AND j.kind='feed_network' "
+                         "ORDER BY j.created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["kind"] = "feed_network"
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/feed-studies")
+    async def submit_feed_network(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+                raise ValueError("请选择已完成的来源计算记录。")
+            uuid.UUID(value["source_job_id"])
+        except (ValueError, AttributeError, RecursionError) as exc:
+            raise HTTPException(422, "供给网络动态请求 JSON 或来源记录标识无效。") from exc
+        from webapp.feed_network import normalize_request
+        key, now = str(uuid.uuid4()), time.time()
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                             "AND status='succeeded' AND result IS NOT NULL",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源记录必须是本项目已完成的稳态设计计算。")
+            source = dict(row)
+            source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                detail = str(exc)[:1600].encode("utf-8", "backslashreplace").decode("utf-8")
+                raise HTTPException(422, detail)
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')",
+                             (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) "
+                       "VALUES(?,?,?,?,?,?,?,'feed_network')", (key, project_id, source["revision"], user["id"],
+                        "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/feed-studies/{feed_network_id}")
+    def feed_network_record(feed_network_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT j.*,u.display_name AS author FROM jobs j JOIN users u ON u.id=j.submitted_by "
+                        "WHERE j.id=? AND j.kind='feed_network'", (feed_network_id,))
+        if not row:
+            raise HTTPException(404, "供给网络动态分析记录不存在。")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/feed-studies/{feed_network_id}/cancel")
+    async def cancel_feed_network(feed_network_id: str, request: Request):
+        feed_network_record(feed_network_id, request)
+        return await cancel(feed_network_id, request)
+
+    @app.get("/api/feed-studies/{feed_network_id}/download")
+    def download_feed_network(feed_network_id: str, request: Request):
+        record = feed_network_record(feed_network_id, request)
+        if record["result"] is None:
+            raise HTTPException(409, "此扫描尚无可导出的结果。")
+        return JSONResponse(record, headers={
+            "Content-Disposition": f'attachment; filename="lre-feed_network-{record["id"]}.json"'})
+
+    @app.get("/api/projects/{project_id}/chilldown-studies/setup")
+    def chilldown_configuration(project_id: str, source_job_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        row = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                        "AND status='succeeded' AND result IS NOT NULL", (source_job_id, project_id))
+        if not row:
+            raise HTTPException(422, "请选择本项目已完成的稳态设计记录。")
+        row["inputs"], row["result"] = json.loads(row["inputs"]), json.loads(row["result"])
+        from webapp.chilldown import chilldown_setup
+        return chilldown_setup(row)
+
+    @app.get("/api/projects/{project_id}/chilldown-studies")
+    def feed_studies(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.started,j.finished,"
+                         "j.progress,j.error,j.inputs,u.display_name AS author FROM jobs j "
+                         "JOIN users u ON u.id=j.submitted_by WHERE j.project_id=? AND j.kind='chilldown' "
+                         "ORDER BY j.created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["kind"] = "chilldown"
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/chilldown-studies")
+    async def submit_chilldown(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+                raise ValueError("请选择已完成的来源计算记录。")
+            uuid.UUID(value["source_job_id"])
+        except (ValueError, AttributeError, RecursionError) as exc:
+            raise HTTPException(422, "预冷与充填请求 JSON 或来源记录标识无效。") from exc
+        from webapp.chilldown import normalize_request
+        key, now = str(uuid.uuid4()), time.time()
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                             "AND status='succeeded' AND result IS NOT NULL",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源记录必须是本项目已完成的稳态设计计算。")
+            source = dict(row)
+            source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                detail = str(exc)[:1600].encode("utf-8", "backslashreplace").decode("utf-8")
+                raise HTTPException(422, detail)
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')",
+                             (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) "
+                       "VALUES(?,?,?,?,?,?,?,'chilldown')", (key, project_id, source["revision"], user["id"],
+                        "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/chilldown-studies/{chilldown_id}")
+    def chilldown_record(chilldown_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT j.*,u.display_name AS author FROM jobs j JOIN users u ON u.id=j.submitted_by "
+                        "WHERE j.id=? AND j.kind='chilldown'", (chilldown_id,))
+        if not row:
+            raise HTTPException(404, "预冷与充填分析记录不存在。")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/chilldown-studies/{chilldown_id}/cancel")
+    async def cancel_chilldown(chilldown_id: str, request: Request):
+        chilldown_record(chilldown_id, request)
+        return await cancel(chilldown_id, request)
+
+    @app.get("/api/chilldown-studies/{chilldown_id}/download")
+    def download_chilldown(chilldown_id: str, request: Request):
+        record = chilldown_record(chilldown_id, request)
+        if record["result"] is None:
+            raise HTTPException(409, "此扫描尚无可导出的结果。")
+        return JSONResponse(record, headers={
+            "Content-Disposition": f'attachment; filename="lre-chilldown-{record["id"]}.json"'})
+
+    @app.get("/api/projects/{project_id}/ignition-studies/setup")
+    def ignition_configuration(project_id: str, source_job_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        row = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                        "AND status='succeeded' AND result IS NOT NULL", (source_job_id, project_id))
+        if not row:
+            raise HTTPException(422, "请选择本项目已完成的稳态设计记录。")
+        row["inputs"], row["result"] = json.loads(row["inputs"]), json.loads(row["result"])
+        from webapp.ignition import ignition_setup
+        return ignition_setup(row)
+
+    @app.get("/api/projects/{project_id}/ignition-studies")
+    def ignition_studies(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.started,j.finished,"
+                         "j.progress,j.error,j.inputs,u.display_name AS author FROM jobs j "
+                         "JOIN users u ON u.id=j.submitted_by WHERE j.project_id=? AND j.kind='ignition' "
+                         "ORDER BY j.created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["kind"] = "ignition"
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/ignition-studies")
+    async def submit_ignition(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+                raise ValueError("请选择已完成的来源计算记录。")
+            uuid.UUID(value["source_job_id"])
+        except (ValueError, AttributeError, RecursionError) as exc:
+            raise HTTPException(422, "点火事件与建压请求 JSON 或来源记录标识无效。") from exc
+        from webapp.ignition import normalize_request
+        key, now = str(uuid.uuid4()), time.time()
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                             "AND status='succeeded' AND result IS NOT NULL",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源记录必须是本项目已完成的稳态设计计算。")
+            source = dict(row)
+            source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                detail = str(exc)[:1600].encode("utf-8", "backslashreplace").decode("utf-8")
+                raise HTTPException(422, detail)
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')",
+                             (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) "
+                       "VALUES(?,?,?,?,?,?,?,'ignition')", (key, project_id, source["revision"], user["id"],
+                        "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/ignition-studies/{ignition_id}")
+    def ignition_record(ignition_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT j.*,u.display_name AS author FROM jobs j JOIN users u ON u.id=j.submitted_by "
+                        "WHERE j.id=? AND j.kind='ignition'", (ignition_id,))
+        if not row:
+            raise HTTPException(404, "点火事件与建压分析记录不存在。")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/ignition-studies/{ignition_id}/cancel")
+    async def cancel_ignition(ignition_id: str, request: Request):
+        ignition_record(ignition_id, request)
+        return await cancel(ignition_id, request)
+
+    @app.get("/api/ignition-studies/{ignition_id}/download")
+    def download_ignition(ignition_id: str, request: Request):
+        record = ignition_record(ignition_id, request)
+        if record["result"] is None:
+            raise HTTPException(409, "此分析尚无可导出的结果。")
+        return JSONResponse(record, headers={
+            "Content-Disposition": f'attachment; filename="lre-ignition-{record["id"]}.json"'})
+
+    @app.get("/api/projects/{project_id}/shutdown-studies/setup")
+    def shutdown_configuration(project_id: str, source_job_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        row = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                        "AND status='succeeded' AND result IS NOT NULL", (source_job_id, project_id))
+        if not row:
+            raise HTTPException(422, "请选择本项目已完成的稳态设计记录。")
+        row["inputs"], row["result"] = json.loads(row["inputs"]), json.loads(row["result"])
+        from webapp.shutdown import shutdown_setup
+        return shutdown_setup(row)
+
+    @app.get("/api/projects/{project_id}/shutdown-studies")
+    def shutdown_studies(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT j.id,j.project_id,j.revision,j.submitted_by,j.status,j.created,j.started,j.finished,"
+                         "j.progress,j.error,j.inputs,u.display_name AS author FROM jobs j "
+                         "JOIN users u ON u.id=j.submitted_by WHERE j.project_id=? AND j.kind='shutdown' "
+                         "ORDER BY j.created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["kind"] = "shutdown"
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/shutdown-studies")
+    async def submit_shutdown(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+                raise ValueError("请选择已完成的来源计算记录。")
+            uuid.UUID(value["source_job_id"])
+        except (ValueError, AttributeError, RecursionError) as exc:
+            raise HTTPException(422, "关机与再启动请求 JSON 或来源记录标识无效。") from exc
+        from webapp.shutdown import normalize_request
+        key, now = str(uuid.uuid4()), time.time()
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' "
+                             "AND status='succeeded' AND result IS NOT NULL",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源记录必须是本项目已完成的稳态设计计算。")
+            source = dict(row)
+            source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                detail = str(exc)[:1600].encode("utf-8", "backslashreplace").decode("utf-8")
+                raise HTTPException(422, detail)
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')",
+                             (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) "
+                       "VALUES(?,?,?,?,?,?,?,'shutdown')", (key, project_id, source["revision"], user["id"],
+                        "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/shutdown-studies/{shutdown_id}")
+    def shutdown_record(shutdown_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT j.*,u.display_name AS author FROM jobs j JOIN users u ON u.id=j.submitted_by "
+                        "WHERE j.id=? AND j.kind='shutdown'", (shutdown_id,))
+        if not row:
+            raise HTTPException(404, "关机与再启动分析记录不存在。")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/shutdown-studies/{shutdown_id}/cancel")
+    async def cancel_shutdown(shutdown_id: str, request: Request):
+        shutdown_record(shutdown_id, request)
+        return await cancel(shutdown_id, request)
+
+    @app.get("/api/shutdown-studies/{shutdown_id}/download")
+    def download_shutdown(shutdown_id: str, request: Request):
+        record = shutdown_record(shutdown_id, request)
+        if record["result"] is None:
+            raise HTTPException(409, "此分析尚无可导出的结果。")
+        return JSONResponse(record, headers={
+            "Content-Disposition": f'attachment; filename="lre-shutdown-{record["id"]}.json"'})
+
     @app.get("/")
     def index():
         return FileResponse(ROOT / "webapp/static/index.html")
 
-    @app.get("/static/app.js")
-    def javascript():
-        # Windows registry associations can classify .js as text/plain.
-        return FileResponse(ROOT / "webapp/static/app.js", media_type="text/javascript")
-
-    @app.get("/static/style.css")
-    def stylesheet():
-        return FileResponse(ROOT / "webapp/static/style.css", media_type="text/css")
-
-    app.mount("/static", StaticFiles(directory=ROOT / "webapp/static"), name="static")
+    @app.get("/static/{filename}")
+    def static_asset(filename: str):
+        # Explicit media types also cover imported modules on Windows, where
+        # registry associations can incorrectly classify JavaScript as text/plain.
+        media_types = {"bootstrap.js": "text/javascript", "app.js": "text/javascript", "results.js": "text/javascript",
+                       "parameter-editor.js": "text/javascript",
+                       "thermo-applicability.js": "text/javascript", "thermo-applicability.css": "text/css",
+                       "cooling.js": "text/javascript", "cooling.css": "text/css",
+                       "convergence.js": "text/javascript", "convergence.css": "text/css",
+                       "steady-closure.js": "text/javascript", "steady-closure.css": "text/css",
+                       "component-analysis.js": "text/javascript", "component-analysis.css": "text/css",
+                       "cycle-model.js": "text/javascript", "cycle-schematic.js": "text/javascript", "cycle-schematic.css": "text/css",
+                       "flow-model.js": "text/javascript", "flow-analysis.js": "text/javascript", "flow-analysis.css": "text/css",
+                       "validation.js": "text/javascript", "validation.css": "text/css",
+                       "throttle.js": "text/javascript", "throttle.css": "text/css",
+                       "transient.js": "text/javascript", "transient.css": "text/css",
+                       "feed-network.js": "text/javascript", "feed-network.css": "text/css",
+                       "chilldown.js": "text/javascript", "chilldown.css": "text/css",
+                       "ignition.js": "text/javascript", "ignition.css": "text/css",
+                       "shutdown.js": "text/javascript", "shutdown.css": "text/css",
+                       "validation-charts.js": "text/javascript", "validation-charts.css": "text/css",
+                       "property-comparison.js": "text/javascript", "property-comparison.css": "text/css",
+                       "style.css": "text/css", "workbench.css": "text/css"}
+        if filename not in media_types:
+            raise HTTPException(404, "资源不存在。")
+        return FileResponse(ROOT / "webapp/static" / filename, media_type=media_types[filename])
     return app

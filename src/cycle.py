@@ -3,25 +3,12 @@ cycle.py
 
 FFSC 全流量液氧甲烷分级燃烧循环系统级模型 —— V7 / PySide6 桌面版后端
 
-V7 改动（对标 Raptor 3）：
-─────────────────────────────────────────────────────────
-1. 压力网络重新建模：LOX 泵和 CH4 泵的出口压力分别计算，
-   含喷注器压降、冷却通道压降、阀门管路压降。
-2. 配合 pump.py V7 物理化温升、cooling.py V7 压降。
-3. 默认参数全部对标 Raptor 3。
-
-本版保留两种求解模式：
-1. 目标预燃室混合比模式（推荐）：
-   - 输入富氧预燃室目标 O/F、富燃预燃室目标 O/F；
-   - 由目标 O/F 反求两股预燃室分流量；
-   - 求解变量改为 mdot_total、富氧预燃室压力比、富燃预燃室压力比；
-   - 残差仍为推力闭合、LOX 涡轮泵功率闭合、CH4 涡轮泵功率闭合。
-
-2. 自由分流模式（调试保留）：
-   - 求解变量为 mdot_total、燃料进入富氧预燃室流量、氧进入富燃预燃室流量；
-   - 适合快速观察数学闭合，但可能得到不合理的预燃室当量比。
-
-注意：预燃室温度、混合比/当量比范围作为后验可行性检查，不直接混入功率残差。
+本模型按显式供给拓扑、损失预算和热力学假设求解，默认示例不代表已验证的
+Raptor 3 实机。预燃室指定温度与指定混合比是两种不同的设计约束：
+1. 指定温度：外环在当前入口焓与压力下反求混合比，检查全部耦合层的收敛。
+2. 指定混合比：由 O/F 反求交叉分流，内层求总流量与两侧实际涡轮压比。
+两种目标模式的内层均闭合推力和两根轴的功率；温度上限另外校核。
+历史自由分流模式保留兼容，以总流量及两股交叉分流为未知量。
 """
 
 from __future__ import annotations
@@ -33,8 +20,9 @@ import math
 import warnings
 from typing import Callable, Optional, List
 
-from core import CycleResults, EngineInputs, FlowState, TopologyEdge, TopologyNode
-from cooling import CoolingChannel, estimate_regen_dp
+from core import CycleResults, EngineInputs, FlowState, TopologyEdge, TopologyNode, ValidationError
+from cooling import CoolingChannel
+from regen_coupling import close_regen_cycle, cooling_arguments
 from chamber import MainChamber
 from chamber_sizing import size_combustion_chamber
 from pump import Pump, fluid_density
@@ -42,7 +30,9 @@ from nozzle import Nozzle
 from preburner import Preburner
 from turbine import Turbine
 from injector import Injector
-from thermo import CANTERA_AVAILABLE, vapor_pressure
+from thermo_data import model_thermo_scope
+from thermo import CANTERA_AVAILABLE, COOLPROP_AVAILABLE, available_npsh_pressure, reactant_enthalpy, reactant_temperature_from_enthalpy
+from steady_network import solve_design, audit_network, pressure_contract
 
 
 STOICH_OF_CH4_O2 = 4.0  # CH4 + 2O2, mass O/F = 64/16 = 4
@@ -66,8 +56,8 @@ def _resolve_pump_speed(
       2. 否则按比转速反推    → N = Ns_target · H_per_stage^0.75 / sqrt(Q)
       3. Q 或 H 无效         → 回退 default_rpm（避免 NaN）
 
-    这是数字样机里 *唯一* 决定转速的入口；pump.py、turbine.py、
-    geometry.py 三处全部从这里取值，保证同轴一致。
+    Ns 的单位约定为 N[rpm]、Q[m³/s]、每级 H[m]；不是无量纲比转速。
+    同轴部件采用同一转速不等于已通过泵/涡轮特性图匹配；psi 不参与此公式。
     """
     if override_rpm and override_rpm > 0:
         return float(override_rpm)
@@ -89,6 +79,8 @@ class FFSCCycleModel:
     """全流量分级燃烧循环（FFSC）系统级模型。"""
 
     def __init__(self, inputs: EngineInputs):
+        if inputs.propellant_pair != "lox_methane":
+            raise ValidationError("FFSC 当前仅支持液氧/甲烷；液氧/煤油代理模型请使用 GG 循环。")
         self.inputs = inputs
         self._warnings: list[str] = []
 
@@ -106,6 +98,13 @@ class FFSCCycleModel:
 
     def _temp_target_mode(self) -> bool:
         return float(getattr(self.inputs, "use_target_preburner_temp", 0.0)) >= 0.5
+
+    def _feed_reference_densities(self):
+        hardware = getattr(self, "_feed_hardware", None)
+        if not hardware:
+            return None
+        return {"fuel": hardware["branches"]["fuel_to_opb"]["reference_density_kg_m3"],
+                "ox": hardware["branches"]["ox_to_opb"]["reference_density_kg_m3"]}
 
     def _flows_from_total(self, mdot_total: float) -> tuple[float, float]:
         mdot_fuel = mdot_total / (1.0 + self.inputs.of_ratio)
@@ -201,11 +200,11 @@ class FFSCCycleModel:
         F, O = self._flows_from_total(mdot_total)
         mr_ox = float(self.inputs.ox_preburner_mr_target)
         mr_fuel = float(self.inputs.fuel_preburner_mr_target)
-        denom = max(mr_ox - mr_fuel, 1e-12)
+        if not (0 < mr_fuel < self.inputs.of_ratio < mr_ox):
+            raise ValidationError("总 O/F 必须严格位于两预燃室目标 O/F 之间；不能裁剪分流冒充质量/MR 闭合。")
+        denom = mr_ox - mr_fuel
         x = (O - mr_fuel * F) / denom
         y = mr_fuel * (F - x)
-        x = self._sanitize_fuel_to_ox_preburner(x, mdot_total, warn=warn)
-        y = self._sanitize_ox_to_fuel_preburner(y, mdot_total, warn=warn)
         return x, y
 
     # =====================================================
@@ -232,6 +231,15 @@ class FFSCCycleModel:
                 2.0,
                 1.3 * self.inputs.fuel_preburner_pressure_ratio / (1.0 + fuel_exh_ratio),
             )
+            if COOLPROP_AVAILABLE:
+                # Both PBs draw oxidizer from the same pure-O2 pump. Keep the
+                # numerical seed within its declared property domain; this is
+                # not permission to extrapolate a converged pump requirement.
+                from fluid_properties import fluid_spec
+                supply_limit=fluid_spec("O2")["pmax_Pa"]-self.inputs.valve_line_dp_ratio*self.inputs.pc
+                factor=self.inputs.pc*(1+self.inputs.preburner_injector_dp_ratio)
+                pi_t_ox_init=min(pi_t_ox_init,.95*supply_limit/(factor*(1+ox_exh_ratio)))
+                pi_t_fuel_init=min(pi_t_fuel_init,.95*supply_limit/(factor*(1+fuel_exh_ratio)))
             return [
                 mdot_total,
                 self._sanitize_turbine_pressure_ratio(pi_t_ox_init),
@@ -281,7 +289,16 @@ class FFSCCycleModel:
     # 4. 单次前向计算
     # =====================================================
 
+    @model_thermo_scope
     def _evaluate_once(self, x0: float, x1: float, x2: float) -> CycleResults:
+        """Close current-density hydraulic losses inside each physical evaluation.
+
+        This local block has no cache across nonlinear trial evaluations. Its
+        failure propagates, rather than silently returning a guessed pressure.
+        """
+        return close_regen_cycle(self,self._evaluate_once_core,x0,x1,x2)
+
+    def _evaluate_once_core(self, x0: float, x1: float, x2: float) -> CycleResults:
         checkpoint()
         mdot_total = self._sanitize_mdot(x0)
         target_mode = self._target_mr_mode()
@@ -308,6 +325,12 @@ class FFSCCycleModel:
         mdot_fuel, mdot_ox = self._flows_from_total(mdot_total)
         mdot_ox_to_ox_preburner = mdot_ox - mdot_ox_to_fuel_preburner
         mdot_fuel_to_fuel_preburner = mdot_fuel - mdot_fuel_to_ox_preburner
+        trial = getattr(self, "_network_trial", None)
+        if trial:
+            mdot_fuel_to_ox_preburner = trial["flows"]["fuel_to_opb"]
+            mdot_fuel_to_fuel_preburner = trial["flows"]["fuel_to_fpb"]
+            mdot_ox_to_ox_preburner = trial["flows"]["ox_to_opb"]
+            mdot_ox_to_fuel_preburner = trial["flows"]["ox_to_fpb"]
 
         states: dict[str, FlowState] = {}
         components: dict[str, object] = {}
@@ -315,12 +338,14 @@ class FFSCCycleModel:
         # ── 增压输送系统：贮箱 → 增压泵 → 短管 → 主泵入口 ─────────────────
         #   贮箱(自生增压,~3 bar) → 增压泵抬到 ~10 bar → 短管(−0.5 bar) → 主泵入口 9.5 bar
         # 三个压力节点分开，避免把贮箱压力当成主泵入口/增压泵出口。
-        p_tank        = self.inputs.tank_pressure_pa            # 贮箱自生增压压力（真实值低）
+        p_tank        = self.inputs.tank_pressure_pa            # 用户给定贮箱压力边界
         p_boost_out   = self.inputs.inlet_pressure             # 增压泵出口 = 主泵供给压力
         feed_dp       = getattr(self.inputs, "feed_line_dp_pa", 0.5e5)
-        p_pump_inlet  = max(p_boost_out - feed_dp, 0.5e5)      # 主泵入口（≥ 0.5 bar 物理下界）
+        p_pump_inlet = p_boost_out - feed_dp
+        if p_pump_inlet <= 0:
+            raise ValidationError("供给短管压降达到增压泵出口压力，不能生成有效主泵入口。")
 
-        # 贮箱状态（真实低压）
+        # 贮箱出口状态（给定温度与压力边界）
         states["fuel_tank"] = FlowState(
             name="fuel_tank", pressure=p_tank,
             temperature=self.inputs.fuel_inlet_temp, mass_flow=mdot_fuel,
@@ -367,21 +392,51 @@ class FFSCCycleModel:
         p_boost_lox  = mdot_ox   * dp_boost / max(rho_lox_tank  * eta_boost, 1e-9)
         p_boost_fuel = mdot_fuel * dp_boost / max(rho_fuel_tank * eta_boost, 1e-9)
 
+        # Boundary states carry chemical-reference enthalpy. An adiabatic
+        # feed-line pressure loss conserves h (bulk kinetic energy neglected).
+        # Booster work is external to the main shafts, but IS in the energy ledger.
+        for side, species, fluid, mdot, temp, tank_key, boost_key, inlet_key in (
+            ("fuel", "CH4", "CH4", mdot_fuel, self.inputs.fuel_inlet_temp,
+             "fuel_tank", "fuel_boost_out", "fuel_pump_inlet"),
+            ("ox", "O2", "LOX", mdot_ox, self.inputs.ox_inlet_temp,
+             "lox_tank", "lox_boost_out", "lox_pump_inlet"),
+        ):
+            states[tank_key].enthalpy = reactant_enthalpy(species, temp, p_tank)
+            if p_boost_out < p_tank or p_pump_inlet <= 0:
+                raise ValidationError("增压泵出口不得低于贮箱，且扣除供给管损后压力必须为正。")
+            if p_boost_out > p_tank:
+                boosted, booster = Pump(f"{side}_boost_pump", fluid, mdot,
+                    p_tank, p_boost_out, temp, eta_boost, nr_rpm=6000.0, n_stages=1).evaluate()
+                states[boost_key] = boosted
+                components[booster.name] = booster
+            else:
+                from core import ComponentResult
+                states[boost_key].enthalpy = states[tank_key].enthalpy
+                components[f"{side}_boost_pump"] = ComponentResult(
+                    f"{side}_boost_pump", outputs={"power_W": 0.0})
+            inlet_h = states[boost_key].enthalpy
+            inlet_t = reactant_temperature_from_enthalpy(species, inlet_h, p_pump_inlet)
+            states[inlet_key].temperature = inlet_t
+            states[inlet_key].enthalpy = inlet_h
+            states[inlet_key].density = fluid_density(fluid, inlet_t, p_pump_inlet)
+        p_boost_lox = components["ox_boost_pump"].outputs["power_W"]
+        p_boost_fuel = components["fuel_boost_pump"].outputs["power_W"]
+
         # ── 增压泵吸入空化校核（FS-01）──────────────────────────────────
         # 增压泵从贮箱(3 bar)抽吸，是整条链里 NPSH 最低、最易空化的一级。
         # 在贮箱处算 NPSHa = (p_tank − p_vapor)/(ρ·g)，并按"增压泵典型慢转速"
         # 给一个吸入比转速量级，便于诊断（真实增压泵靠诱导轮+慢转速吸收低 NPSH）。
         _g0 = 9.80665
-        pv_lox_tank  = vapor_pressure("O2",  self.inputs.ox_inlet_temp)
-        pv_fuel_tank = vapor_pressure("CH4", self.inputs.fuel_inlet_temp)
-        npshA_boost_lox  = max(p_tank - pv_lox_tank,  1e3) / (rho_lox_tank  * _g0)
-        npshA_boost_fuel = max(p_tank - pv_fuel_tank, 1e3) / (rho_fuel_tank * _g0)
+        delta_lox=available_npsh_pressure("O2",self.inputs.ox_inlet_temp,p_tank)
+        delta_fuel=available_npsh_pressure("CH4",self.inputs.fuel_inlet_temp,p_tank)
+        npshA_boost_lox = delta_lox/(rho_lox_tank*_g0) if delta_lox is not None else None
+        npshA_boost_fuel = delta_fuel/(rho_fuel_tank*_g0) if delta_fuel is not None else None
         # 增压泵慢转速假定（低压前置泵典型 ~6000 rpm 量级），仅供 nss 量级判断
         n_boost = 6000.0
         Q_lox_tank  = mdot_ox   / max(rho_lox_tank,  1.0)
         Q_fuel_tank = mdot_fuel / max(rho_fuel_tank, 1.0)
-        nss_boost_lox_eu  = n_boost * math.sqrt(max(Q_lox_tank, 1e-9))  / max(npshA_boost_lox,  0.01) ** 0.75
-        nss_boost_fuel_eu = n_boost * math.sqrt(max(Q_fuel_tank, 1e-9)) / max(npshA_boost_fuel, 0.01) ** 0.75
+        nss_boost_lox_eu = n_boost*math.sqrt(Q_lox_tank)/npshA_boost_lox**.75 if npshA_boost_lox is not None and npshA_boost_lox>0 else None
+        nss_boost_fuel_eu = n_boost*math.sqrt(Q_fuel_tank)/npshA_boost_fuel**.75 if npshA_boost_fuel is not None and npshA_boost_fuel>0 else None
 
         # ── V8 压力网络（分两条独立支路）────────────────
         # 涡轮排气压力先确定（必须高于 pc 才能通过主喷注器进入主燃烧室）：
@@ -414,64 +469,45 @@ class FFSCCycleModel:
         pi_t_ox_val = p_pre_ox / max(p_ox_turbine_exhaust, 1.0)
         pi_t_fuel_val = p_pre_fuel / max(p_fuel_turbine_exhaust, 1.0)
 
-        # ── V8 关键修正：泵出口压力 *只* 按各自的主目的地预燃室计算 ──
-        #
-        # 物理依据：
-        # 在 FFSC 真实工程实现（Raptor / IPD 等）中，少量"交叉流量"
-        # （LOX→富燃PB，CH4→富氧PB）由独立的子级喷注或调节阀承接，
-        # **并不要求主泵在出口同时满足两条支路的最高压力**——
-        # 否则一旦两侧预燃室压力不等，泵就会被强行抬到等高的最大值，
-        # 造成 LOX 泵 / CH4 泵的压力网络强耦合（V7 实测：两泵齐齐冲到 ~180 MPa，
-        # 求解器陷入伪稳态、残差 ~2.3 不可收敛）。
-        #
-        # 正确做法是：
-        #   主泵出口压力 = 主目的预燃室入口压力 + 主路总压降
-        #   交叉小流量的额外压头由独立的 booster / orifice / 节流阀提供（不在主循环建模）
-        #
-        # 这样两条供给支路在压力网络上 **解耦**，求解器的雅可比也变成块对角，
-        # Newton-line-search 才有可能稳定收敛到 Raptor 量级（~70–80 MPa）。
-        #
-        # 预燃室喷注器压降引用各自预燃室压力（Schoenman 典型 ~14%），与 preburner.py
-        # 卡片同口径，避免旧版 0.17×Pc（仅占 p_pre 的 ~9%）与卡片 0.14×p_pre 打架。
-        # ── 再生冷却压降（V14，修 Major 1）──────────────────────────────
-        # 默认（cooling_dp_auto=0）用固定 cooling_dp_pa，保持泵压预算稳定；
-        # 置 1 时由通道水力学(Darcy)在主泵之前预估并反馈进燃料泵出口压力预算，
-        # 与冷却卡片同公式/同几何 → 自洽（消除"固定压降 vs 真实几何"矛盾）。
+        # Four branches share two supply taps. No unmodelled pressure-raising
+        # device is assumed: a valve can dissipate head, never generate it.
+        # Design sizing uses exact elimination of mass/MR/pressure equations
+        # with minimum-head complementarity. Pump work couples BOTH PB demands
+        # back into the nonlinear cycle solve (see docs/STEADY_CLOSURE_MODEL.md).
+        # 唯一准一维内核返回实际压降，供给/热侧内环共同闭合。
         _cool_auto_size = bool(getattr(self.inputs, "cooling_channel_auto_size", 1.0))
-        _cool_dp_auto   = bool(getattr(self.inputs, "cooling_dp_auto", 0.0))
-        if _cool_dp_auto:
-            _regen = estimate_regen_dp(
-                mdot_fuel=mdot_fuel,
-                t_proxy=self.inputs.fuel_inlet_temp + 15.0,
-                p_proxy=1.12 * p_pre_fuel,
-                mdot_total=mdot_total, pc=self.inputs.pc,
-                t_chamber=self.inputs.chamber_temp_guess,
-                gamma_c=self.inputs.chamber_gamma,
-                molar_mass_c=self.inputs.molar_mass,
-                contraction_ratio=getattr(self.inputs, "chamber_contraction_ratio", 2.5),
-                l_star_m=getattr(self.inputs, "chamber_l_star_m", 1.0),
-                n_channels=int(getattr(self.inputs, "cooling_n_channels", 300)),
-                width_m=getattr(self.inputs, "cooling_channel_width_m", 1.5e-3),
-                height_m=getattr(self.inputs, "cooling_channel_height_m", 5.0e-3),
-                auto_size=_cool_auto_size,
-                target_velocity=getattr(self.inputs, "cooling_target_velocity_ms", 100.0),
-                rel_roughness=getattr(self.inputs, "cooling_channel_rel_roughness", 0.003),
-                k_minor=getattr(self.inputs, "cooling_channel_k_minor", 3.0),
-            )
-            dp_cooling = min(_regen["dp_pa"], 0.5 * p_pre_fuel)   # 保护：不把泵压抬过头
-        else:
-            dp_cooling = self.inputs.cooling_dp_pa
+        _cool_dp_auto = bool(self.inputs.cooling_bartz_mode)
+        # A numerical seed only in quasi-1D mode; the same p/h circuit returns
+        # the actual drop and the inner coupling converges its pump requirement.
+        dp_cooling = self.inputs.cooling_dp_pa
+        hydraulic_trial = getattr(self, "_hydraulic_trial", None) or {}
+        if _cool_dp_auto and "cooling_dp" in hydraulic_trial:
+            dp_cooling = hydraulic_trial["cooling_dp"]
 
         dp_inj_ox   = self.inputs.preburner_injector_dp_ratio * p_pre_ox
         dp_inj_fuel = self.inputs.preburner_injector_dp_ratio * p_pre_fuel
-        p_lox_pump_out = p_pre_ox + dp_inj_ox + dp_valve
-        p_ch4_pump_out = p_pre_fuel + dp_inj_fuel + dp_cooling + dp_valve
+        branch_flows = dict(fuel_to_opb=mdot_fuel_to_ox_preburner,
+                            fuel_to_fpb=mdot_fuel_to_fuel_preburner,
+                            ox_to_opb=mdot_ox_to_ox_preburner,
+                            ox_to_fpb=mdot_ox_to_fuel_preburner)
+        network = solve_design(total_fuel=mdot_fuel, total_ox=mdot_ox,
+            mr_ox=self.inputs.ox_preburner_mr_target, mr_fuel=self.inputs.fuel_preburner_mr_target,
+            p_pre_ox=p_pre_ox, p_pre_fuel=p_pre_fuel,
+            injector_ratio=self.inputs.preburner_injector_dp_ratio, line_dp=dp_valve,
+            densities=hydraulic_trial.get("densities", self._feed_reference_densities()),
+            fixed_hardware=getattr(self, "_feed_hardware", None),
+            flows_override=branch_flows if trial or not target_mode else None,
+            allow_unclosed_flows=bool(trial))
+        if trial:
+            network["tap_pressures_Pa"] = dict(trial["tap_pressures_Pa"])
+        p_lox_pump_out = network["tap_pressures_Pa"]["ox"]
+        p_ch4_pump_out = network["tap_pressures_Pa"]["fuel"] + dp_cooling
 
         # ── V10：转速一次性解析，泵 / 涡轮 / geometry 三处共用 ──
         # 先用 fluid_density 算入口密度（pump 内部也会再算一遍，但这里
         # 必须先算才能根据 Ns_target 反推 N）。
-        rho_lox_inlet  = fluid_density("LOX", self.inputs.ox_inlet_temp,  p_pump_inlet)
-        rho_fuel_inlet = fluid_density("CH4", self.inputs.fuel_inlet_temp, p_pump_inlet)
+        rho_lox_inlet = states["lox_pump_inlet"].density
+        rho_fuel_inlet = states["fuel_pump_inlet"].density
         dp_lox  = p_lox_pump_out - p_pump_inlet
         dp_fuel = p_ch4_pump_out - p_pump_inlet
 
@@ -498,14 +534,12 @@ class FFSCCycleModel:
         # 而非储箱/增压泵出口压力；并减去 *真实饱和蒸汽压*
         # （CoolProp：O2@70K≈6.3 kPa，CH4@100K≈34 kPa；深过冷 → pv 很低，
         #  LOX@9.5bar 饱和温度 118.7 K，过冷度 ~48.7 K，热力学抑制裕度大）。
-        pv_lox  = vapor_pressure("O2",  self.inputs.ox_inlet_temp)
-        pv_fuel = vapor_pressure("CH4", self.inputs.fuel_inlet_temp)
-        npshA_lox  = max(p_pump_inlet - pv_lox,  1e3)
-        npshA_fuel = max(p_pump_inlet - pv_fuel, 1e3)
+        npshA_lox = available_npsh_pressure("O2",states["lox_pump_inlet"].temperature,p_pump_inlet)
+        npshA_fuel = available_npsh_pressure("CH4",states["fuel_pump_inlet"].temperature,p_pump_inlet)
 
         lox_pump = Pump("ox_pump", "LOX", mdot_ox,
                         p_pump_inlet, p_lox_pump_out,
-                        self.inputs.ox_inlet_temp, self.inputs.pump_efficiency_ox,
+                        states["lox_pump_inlet"].temperature, self.inputs.pump_efficiency_ox,
                         nr_rpm=n_lox_rpm,
                         n_stages=self.inputs.lox_pump_n_stages,
                         tip_speed_limit_ms=self.inputs.pump_tip_speed_limit_ms,
@@ -514,7 +548,7 @@ class FFSCCycleModel:
                         side="ox")
         fuel_pump = Pump("fuel_pump", "CH4", mdot_fuel,
                          p_pump_inlet, p_ch4_pump_out,
-                         self.inputs.fuel_inlet_temp, self.inputs.pump_efficiency_fuel,
+                         states["fuel_pump_inlet"].temperature, self.inputs.pump_efficiency_fuel,
                          nr_rpm=n_fuel_rpm,
                          n_stages=self.inputs.fuel_pump_n_stages,
                          tip_speed_limit_ms=self.inputs.pump_tip_speed_limit_ms,
@@ -532,6 +566,7 @@ class FFSCCycleModel:
         # V19 k(T) 口径统一：单点冷却的内衬导热与所选内壁材料联动（取 600 K 代表温度，
         # grcop84 走手册回归式、其它铜合金走通用缩放）；材料查不到才回退数值输入。
         # 旧版此处永远用 cooling_wall_conductivity=320 常数——换内壁材料不影响单点解。
+        _im_k = None
         try:
             from materials import MATERIALS as _MATS_K
             _im_k = _MATS_K.get(getattr(self.inputs, "chamber_inner_wall_material", "grcop84"))
@@ -541,6 +576,7 @@ class FFSCCycleModel:
             _liner_k = float(getattr(self.inputs, "cooling_wall_conductivity", 320.0))
         cooling = CoolingChannel(
             mdot_fuel=mdot_fuel,
+            inlet_enthalpy=fuel_pump_out.enthalpy,
             t_inlet=fuel_pump_out.temperature,
             p_inlet=fuel_pump_out.pressure,
             dp_pa=dp_cooling,
@@ -574,10 +610,48 @@ class FFSCCycleModel:
             cover_eps=(getattr(self.inputs, "cooling_cover_eps", 0.0)
                        or self.inputs.expansion_ratio),
             conv_half_angle_deg=getattr(self.inputs, "chamber_conv_half_angle_deg", 30.0),
+            **cooling_arguments(self, _im_k),
         )
         cooled_fuel_state, cooling_result = cooling.evaluate()
         states["fuel_after_cooling"] = cooled_fuel_state
         components[cooling_result.name] = cooling_result
+
+        # Reconstruct the same equations using actual tap states, preserving
+        # pressure/mass residuals and design hydraulic coefficients for export.
+        network = solve_design(total_fuel=mdot_fuel, total_ox=mdot_ox,
+            mr_ox=self.inputs.ox_preburner_mr_target, mr_fuel=self.inputs.fuel_preburner_mr_target,
+            p_pre_ox=p_pre_ox, p_pre_fuel=p_pre_fuel,
+            injector_ratio=self.inputs.preburner_injector_dp_ratio, line_dp=dp_valve,
+            densities={"fuel": fluid_density("CH4", cooled_fuel_state.temperature, cooled_fuel_state.pressure),
+                       "ox": lox_pump_out.density},
+            temperatures={"fuel": cooled_fuel_state.temperature, "ox": lox_pump_out.temperature},
+            fixed_hardware=getattr(self, "_feed_hardware", None),
+            flows_override=branch_flows if trial or not target_mode else None,
+            allow_unclosed_flows=bool(trial))
+        network["hydraulic_iteration_error_Pa"] = max(
+            abs((fuel_pump_out.pressure - cooled_fuel_state.pressure) - dp_cooling),
+            0.0 if trial else abs(network["tap_pressures_Pa"]["fuel"] - cooled_fuel_state.pressure),
+            0.0 if trial else abs(network["tap_pressures_Pa"]["ox"] - lox_pump_out.pressure))
+        if trial:
+            network["tap_pressures_Pa"] = dict(trial["tap_pressures_Pa"])
+        for branch in network["branches"]:
+            supply = states[branch["source"]]
+            branch["source_pressure_Pa"] = supply.pressure
+            if trial:
+                branch["valve_drop_Pa"] = trial["valve_drops_Pa"][branch["id"]]
+            species = "CH4" if branch["id"].startswith("fuel") else "O2"
+            temperature = reactant_temperature_from_enthalpy(species, supply.enthalpy,
+                                                            branch["destination_pressure_Pa"])
+            states["branch_" + branch["id"]] = FlowState(
+                name="branch_" + branch["id"], pressure=branch["destination_pressure_Pa"],
+                temperature=temperature, mass_flow=branch["mass_flow_kg_s"],
+                enthalpy=supply.enthalpy, composition=dict(supply.composition),
+                metadata={"process": "adiabatic_isenthalpic_supply_loss"})
+            branch["temperature_K"] = temperature
+            branch["temperature_location"] = "after_adiabatic_supply_loss"
+        network.update(audit_network(network, total_fuel=mdot_fuel, total_ox=mdot_ox,
+            mr_ox=self.inputs.ox_preburner_mr_target if target_mode else None,
+            mr_fuel=self.inputs.fuel_preburner_mr_target if target_mode else None))
 
         mr_ox_preburner, phi_ox_preburner = self._preburner_mr_phi(mdot_fuel_to_ox_preburner, mdot_ox_to_ox_preburner)
         mr_fuel_preburner, phi_fuel_preburner = self._preburner_mr_phi(mdot_fuel_to_fuel_preburner, mdot_ox_to_fuel_preburner)
@@ -588,6 +662,7 @@ class FFSCCycleModel:
             mdot_fuel=mdot_fuel_to_ox_preburner, mdot_ox=mdot_ox_to_ox_preburner,
             phi=phi_ox_preburner,
             fuel_temp=cooled_fuel_state.temperature, ox_temp=lox_pump_out.temperature,
+            fuel_enthalpy=cooled_fuel_state.enthalpy, ox_enthalpy=lox_pump_out.enthalpy,
             injector_dp_ratio=self.inputs.preburner_injector_dp_ratio,
         )
         fuel_preburner = Preburner(
@@ -595,6 +670,7 @@ class FFSCCycleModel:
             mdot_fuel=mdot_fuel_to_fuel_preburner, mdot_ox=mdot_ox_to_fuel_preburner,
             phi=phi_fuel_preburner,
             fuel_temp=cooled_fuel_state.temperature, ox_temp=lox_pump_out.temperature,
+            fuel_enthalpy=cooled_fuel_state.enthalpy, ox_enthalpy=lox_pump_out.enthalpy,
             injector_dp_ratio=self.inputs.preburner_injector_dp_ratio,
         )
 
@@ -660,7 +736,9 @@ class FFSCCycleModel:
             pressure=self.inputs.pc, mdot_total=mdot_total,
             gamma=self.inputs.chamber_gamma, molar_mass=self.inputs.molar_mass,
             chamber_temp_guess=self.inputs.chamber_temp_guess,
-            combustion_efficiency=self.inputs.combustion_efficiency,
+            combustion_efficiency=(self.inputs.combustion_efficiency
+                if self.inputs.combustion_loss_model == "legacy_temperature_rise" else 1.0),
+            heat_loss_W=0.0 if bartz_mode else cooling_result.outputs["heat_load_W"],
         )
         chamber_state, chamber_result = chamber.evaluate(ox_preburner_out, fuel_preburner_out)
         states["main_chamber"] = chamber_state
@@ -674,17 +752,25 @@ class FFSCCycleModel:
             tc=chamber_state.temperature, mdot=mdot_total,
             p_amb=self.inputs.ambient_pressure, chamber_state=chamber.gas_state,
         )
-        nozzle_result = nozzle.evaluate()
+        if bartz_mode:
+            from heated_nozzle import heated_nozzle
+            nozzle_result = heated_nozzle(chamber.gas_state,mdot_total,self.inputs.pc,
+                self.inputs.expansion_ratio,self.inputs.ambient_pressure,cooling_result.profile)
+        else:
+            nozzle_result = nozzle.evaluate()
         components[nozzle_result.name] = nozzle_result
+        if nozzle_result.outputs.get("h_exit_Jkg") is not None:
+            states["nozzle_exit"] = FlowState("nozzle_exit",
+                nozzle_result.outputs["p_exit_Pa"], nozzle_result.outputs["T_exit_K"], mdot_total,
+                enthalpy=nozzle_result.outputs["h_exit_Jkg"], composition=dict(chamber_state.composition),
+                metadata={"velocity_m_s": nozzle_result.outputs["Ve_ms"]})
 
         # ── 主燃烧室几何参数（从喉部面积反推）──────────────
         # 理论依据：
         #   NASA SP-125 (Huzel & Huang, "Design of Liquid Propellant Rocket Engines")
         #   Sutton & Biblarz, "Rocket Propulsion Elements", 9th Ed.
         #
-        # 1. 燃烧室形状：工程上统一采用圆柱形（cylindrical）。
-        #    圆柱段 + 收缩段（收半角 β≈30–45°）+ 喉部圆弧过渡。
-        #    Raptor 与主流高压发动机（SSME、Vulcain-2）均如此。
+        # 1. 本模型采用圆柱段 + 收缩段 + 喉部圆弧过渡的几何近似；非实机轮廓。
         #
         # 2. 收缩比 ε_c = A_cc / A_t：
         #    典型值 2.5–4.0，高压发动机偏低（减小散热损失）。
@@ -858,42 +944,25 @@ class FFSCCycleModel:
             cycle_warnings.append(f"⚠ 富燃预燃室 O/F={mr_fuel_preburner:.3f} 超出建议范围 0.05–0.30。")
         if t_comb_ox > self.inputs.ox_preburner_temp_limit:
             cycle_warnings.append(
-                f"⚠ 富氧预燃室燃烧温度 {t_comb_ox:.0f} K 超过涡轮材料限值 "
+                f"⚠ 富氧预燃室燃烧温度 {t_comb_ox:.0f} K 超过指定运行温度上限 "
                 f"{self.inputs.ox_preburner_temp_limit:.0f} K（O/F={mr_ox_preburner:.2f}, phi={phi_ox_preburner:.3f}）。"
             )
         if t_comb_fuel > self.inputs.fuel_preburner_temp_limit:
             cycle_warnings.append(
-                f"⚠ 富燃预燃室燃烧温度 {t_comb_fuel:.0f} K 超过涡轮材料限值 "
+                f"⚠ 富燃预燃室燃烧温度 {t_comb_fuel:.0f} K 超过指定运行温度上限 "
                 f"{self.inputs.fuel_preburner_temp_limit:.0f} K（O/F={mr_fuel_preburner:.3f}, phi={phi_fuel_preburner:.2f}）。"
             )
 
-        # ── 交叉流供给压力可行性后验校核（V14）──────────────────────────
-        # FFSC 必要不等式：交叉小流量必须能"流到"对侧预燃室喷注面上游
-        # （供给压力 ≥ p_pre + Δp_inj）。V8 把两条泵支路按主目的地解耦后，
-        # 该约束不再由构造保证，需显式校核；欠压时节流阀/孔板无法补头，
-        # 只能靠独立 kick-pump（功率未计入主轴平衡）或把取流点前移。
-        # 口径与主路压力预算对称：供给侧扣 dp_valve，需求侧 = p_pre + dp_inj。
-        crossflow_margin_fuel = (cooled_fuel_state.pressure - dp_valve) - (p_pre_ox + dp_inj_ox)
-        crossflow_margin_lox = (p_lox_pump_out - dp_valve) - (p_pre_fuel + dp_inj_fuel)
-        if crossflow_margin_fuel < 0.0:
-            _rho_cf = cooled_fuel_state.density if (cooled_fuel_state.density or 0.0) > 0.0 else 460.0
-            _kick_w_fuel = mdot_fuel_to_ox_preburner * (-crossflow_margin_fuel) / (_rho_cf * 0.70)
-            cycle_warnings.append(
-                f"⚠ 交叉流欠压：CH4→富氧预燃室 可用 {(cooled_fuel_state.pressure - dp_valve)/1e6:.2f} MPa "
-                f"< 喷注需求 {(p_pre_ox + dp_inj_ox)/1e6:.2f} MPa"
-                f"（亏 {-crossflow_margin_fuel/1e6:.2f} MPa @ {mdot_fuel_to_ox_preburner:.1f} kg/s）。"
-                f"需独立 kick-pump ≈{_kick_w_fuel/1e6:.3f} MW（未计入主轴平衡），"
-                f"或将取流点移到冷却套上游（CH4 泵出口 {p_ch4_pump_out/1e6:.2f} MPa）。"
-            )
-        if crossflow_margin_lox < 0.0:
-            _rho_cl = lox_pump_out.density if (lox_pump_out.density or 0.0) > 0.0 else 1200.0
-            _kick_w_lox = mdot_ox_to_fuel_preburner * (-crossflow_margin_lox) / (_rho_cl * 0.70)
-            cycle_warnings.append(
-                f"⚠ 交叉流欠压：LOX→富燃预燃室 可用 {(p_lox_pump_out - dp_valve)/1e6:.2f} MPa "
-                f"< 喷注需求 {(p_pre_fuel + dp_inj_fuel)/1e6:.2f} MPa"
-                f"（亏 {-crossflow_margin_lox/1e6:.2f} MPa @ {mdot_ox_to_fuel_preburner:.1f} kg/s）。"
-                f"需独立 kick-pump ≈{_kick_w_lox/1e6:.3f} MW（未计入主轴平衡）。"
-            )
+        # Available head before EXTRA valve throttling, using this evaluation's
+        # actual branch losses (including frozen K in offdesign).
+        branch_by_id = {row["id"]: row for row in network["branches"]}
+        def available_head(key):
+            row = branch_by_id[key]
+            return row["source_pressure_Pa"] - row["destination_pressure_Pa"] - row["line_drop_Pa"] - row["injector_drop_Pa"]
+        crossflow_margin_fuel = available_head("fuel_to_opb")
+        crossflow_margin_lox = available_head("ox_to_fpb")
+        if network["status"] != "pass":
+            cycle_warnings.append("四支路供给方程未闭合；请查看压力、质量与阻力残差。")
 
         topology_nodes, topology_edges = self._build_topology()
 
@@ -939,8 +1008,12 @@ class FFSCCycleModel:
             "fuel_pump_out_pressure_Pa": p_ch4_pump_out,
             "lox_pump_out_pressure_MPa": p_lox_pump_out / 1e6,
             "fuel_pump_out_pressure_MPa": p_ch4_pump_out / 1e6,
+            # Compatibility values are design budgets, NOT actual four-branch
+            # losses in fixed-resistance runs. The authoritative per-branch
+            # values are exported in steady_closure.feed_network.branches.
             "injector_dp_ox_MPa": dp_inj_ox / 1e6,
             "injector_dp_fuel_MPa": dp_inj_fuel / 1e6,
+            "pressure_loss_summary_role": "legacy_design_budget_only",
             "cooling_dp_MPa": dp_cooling / 1e6,
             "valve_line_dp_MPa": dp_valve / 1e6,
             # ── 增压输送系统（贮箱 → 增压泵 → 主泵）─────────────
@@ -977,8 +1050,7 @@ class FFSCCycleModel:
             "effective_o2_to_cc_kg_s": effective_o2_mdot,
             "effective_ch4_to_cc_kg_s": effective_ch4_mdot,
             "effective_injector_OF": effective_of_cc,
-            # 注：论文 O2_mf=0.91, CH4_mf=0.72 是 NASA CEA 的简化输出；
-            # 本程序 Cantera 给出完整物种组分，精度更高。
+            # 组分取自本次所选热化学模型；输出物种更多不能证明精度更高。
             "ox_turbine_power_MW": w_turb_ox / 1e6,
             "fuel_turbine_power_MW": w_turb_fuel / 1e6,
             "ox_pump_power_MW": w_pump_ox / 1e6,
@@ -1007,10 +1079,26 @@ class FFSCCycleModel:
             "fuel_turbine_exhaust_T_K": fuel_turbine_result.outputs["T_exhaust_K"],
         }
 
+        from steady_closure import audit_energy
+        network["pressure_contract"] = pressure_contract(network, states, self.inputs)
+        if CANTERA_AVAILABLE and COOLPROP_AVAILABLE:
+            for state in states.values():
+                if state.enthalpy is not None:
+                    from thermo import enthalpy_reference_id
+                    state.metadata["reference_id"] = enthalpy_reference_id()
+                    state.metadata["thermochemical_data"] = self.inputs.methane_thermo_dataset + ".yaml"
+        closure = dict(schema_version=1, scope="ffsc_lumped_fixed_resistance" if getattr(self, "_feed_hardware", None) else "ffsc_lumped_design",
+            assumptions=[
+                "模型流路假设：全部甲烷先冷却再分流；液氧在主泵后分流。并非 Raptor 实际管路的已验证数据。",
+                "设计点按两支路中较高需求确定共用取流压力，多余压头由非负调节阀压降消耗；不设置未计功补压泵。",
+                "最低供给压力闭合不等于具有抗扰动压力储备；主喷注器压降仍为指定预算。",
+                "再生吸热在燃气总焓上作等额集中扣项，包括喷管区；这是零维等效热回路，未验证沿程非绝热喷管。",
+                "固定效率、理想混合气及冻结喷管假设仍在；方程闭合不等于试验验证。"],
+            feed_network=network, energy_balance=audit_energy(states, components))
         return CycleResults(
             inputs=self.inputs, states=states, components=components,
             summary=summary, topology_nodes=topology_nodes,
-            topology_edges=topology_edges, warnings=cycle_warnings,
+            topology_edges=topology_edges, warnings=cycle_warnings, steady_closure=closure,
         )
 
     # =====================================================
@@ -1024,31 +1112,6 @@ class FFSCCycleModel:
         r2 = results.components["ox_preburner_turbine"].outputs["turbine_power_W"] - results.components["ox_pump"].outputs["power_W"]
         r3 = results.components["fuel_preburner_turbine"].outputs["turbine_power_W"] - results.components["fuel_pump"].outputs["power_W"]
         return [r1, r2, r3], results
-
-    @staticmethod
-    def _solve_linear_3x3(a, b):
-        m = [row[:] + [rhs] for row, rhs in zip(a, b)]
-        n = 3
-        for i in range(n):
-            checkpoint()
-            pivot = max(range(i, n), key=lambda k: abs(m[k][i]))
-            if abs(m[pivot][i]) < 1e-14:
-                raise RuntimeError("Jacobian 奇异")
-            if pivot != i:
-                m[i], m[pivot] = m[pivot], m[i]
-            piv = m[i][i]
-            for j in range(i, n + 1):
-                checkpoint()
-                m[i][j] /= piv
-            for k in range(n):
-                checkpoint()
-                if k == i:
-                    continue
-                fac = m[k][i]
-                for j in range(i, n + 1):
-                    checkpoint()
-                    m[k][j] -= fac * m[i][j]
-        return [m[i][n] for i in range(n)]
 
     def _sanitize_vector(self, x: list[float]) -> list[float]:
         x0 = self._sanitize_mdot(x[0])
@@ -1065,137 +1128,154 @@ class FFSCCycleModel:
             self._sanitize_ox_to_fuel_preburner(x[2], x0),
         ]
 
-    def _finite_difference_jacobian(self, x, r):
-        jac = [[0.0] * 3 for _ in range(3)]
-        for j in range(3):
-            checkpoint()
-            x_pert = x[:]
-            base = abs(x[j]) if abs(x[j]) > 1e-9 else 1.0
-            # V8 修正：原 1e-3 太小，πT 量级 ~2 时实际步长 ~2e-3，被数值噪声淹没。
-            # 改用 mdot 5e-4 相对 / πT 0.02 绝对 (~1% πT)，足以分辨真实斜率。
-            dx = (5e-4 * base) if j == 0 else 0.02
-            if self._target_mr_mode() and j > 0:  # 强制 πT 微扰 ≥ 0.02
-                dx = max(dx, 0.02)
-            x_pert[j] += dx
-            x_pert = self._sanitize_vector(x_pert)
-            r_pert, _ = self.residual_vector(*x_pert)
-            actual_dx = x_pert[j] - x[j]
-            actual_dx = actual_dx if abs(actual_dx) > 1e-12 else dx
-            for i in range(3):
-                checkpoint()
-                jac[i][j] = (r_pert[i] - r[i]) / actual_dx
-        return jac
+    @staticmethod
+    def _convergence_layer(enabled=False, status="disabled", residual=None,
+                           tolerance=None, unit="1", iterations=0,
+                           termination_reason="not_applicable", **extra):
+        return dict(enabled=enabled, status=status, residual=residual,
+                    tolerance=tolerance, unit=unit, iterations=iterations,
+                    termination_reason=termination_reason, **extra)
 
-    def _normalized_residual_norm(self, residuals):
-        scales = [max(abs(self.inputs.thrust), 1e-9), 10.0e6, 10.0e6]
-        return max(abs(residuals[i]) / scales[i] for i in range(3))
+    @classmethod
+    def _empty_convergence(cls):
+        return {
+            "schema_version": 1,
+            "layers": {name: cls._convergence_layer()
+                       for name in ("inner", "thermal", "preburner", "continuation")},
+            "inner_runs": [], "thermal_history": [], "preburner_history": [],
+            "continuation_history": [],
+        }
 
+    @staticmethod
+    def _merge_convergence_history(target, source):
+        """Keep every evaluated outer solve, without joining independent Newton runs."""
+        for source_run in source.get("inner_runs", []):
+            run = copy.deepcopy(source_run)
+            run["id"] = len(target["inner_runs"]) + 1
+            target["inner_runs"].append(run)
+        for key in ("thermal_history", "preburner_history", "continuation_history"):
+            target[key].extend(copy.deepcopy(source.get(key, [])))
+
+    @model_thermo_scope
     def solve_cycle(
         self,
-        tol_rel: float = 1e-4,
+        tol_rel: float = 1e-6,
         max_iter: int = 50,
         verbose: bool = False,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
         x_init: Optional[list[float]] = None,
     ):
-        # V8：支持 warm start（用于 continuation）
+        """Solve identical bounded equations with Newton or TRF globalization.
+
+        Scales stay fixed during one solve. The tighter default also resolves
+        shaft work below the independent 1e-5 energy-ledger acceptance policy.
+        Free-split variables are fractions, so rectangular solver bounds do not
+        silently clip mass-flow-dependent cross-flow limits inside a Jacobian.
+        """
+        from nonlinear_solver import solve_nonlinear
         checkpoint()
-        if x_init is None:
-            x = self._initial_guess_vector()
+        if not math.isfinite(tol_rel) or tol_rel <= 0 or max_iter < 0:
+            raise ValueError("非线性求解容差必须为有限正数，最大步数不能为负。")
+        x = list(self._initial_guess_vector() if x_init is None else x_init)
+        if len(x) != 3 or not all(math.isfinite(float(v)) for v in x):
+            raise ValueError("FFSC 初值必须含 3 个有限数。")
+        x = self._sanitize_vector([float(v) for v in x])
+        target_mode = self._target_mr_mode()
+        if target_mode:
+            z = x[:]
+            lower, upper = [1e-3, 1.02, 1.02], [math.inf, 10.0, 10.0]
+            variable_scales = [max(x[0], 1.0), 2.0, 2.0]
+            diff_steps = [max(abs(x[0]) * 5e-4, 1e-5), .02, .02]
+            def physical(v):
+                return list(v)
         else:
-            x = self._sanitize_vector([float(v) for v in x_init])
-        residuals, results = self.residual_vector(*x)
+            fuel, ox = self._flows_from_total(x[0])
+            z = [x[0], x[1] / fuel, x[2] / ox]
+            lower, upper = [1e-3, .005, .001], [math.inf, .80, .80]
+            variable_scales = [max(x[0], 1.0), .1, .1]
+            diff_steps = [max(abs(x[0]) * 5e-4, 1e-5), 2e-4, 2e-4]
+            def physical(v):
+                fuel, ox = self._flows_from_total(float(v[0]))
+                return [float(v[0]), float(v[1]) * fuel, float(v[2]) * ox]
 
-        # 停滞早退:跟踪 8 步前的残差,如果 norm 没下降 ≥ 10×,认定发散,提前终止。
-        # 用于 sweep 扫描中物理上闭合不了的极端工况(如 ox-PB O/F>80,涡轮焓
-        # 降不足以驱动泵),避免 Newton 撞 max_iter × 多轮 Picard 浪费 30 倍时间。
-        STAGNATION_WINDOW = 8
-        STAGNATION_RATIO  = 0.1   # 要求 norm 在 8 步内至少降到 10% 才算"有进展"
-        norm_history: list[float] = []
-
-        for it in range(max_iter):
-            checkpoint()
-            norm0 = self._normalized_residual_norm(residuals)
-            norm_history.append(norm0)
-            if progress_callback is not None:
-                try:
-                    progress_callback(it, max_iter, norm0)
-                except Exception:
-                    pass
-
-            if verbose:
-                if self._target_mr_mode():
-                    print(f"[Iter {it:02d}] mdot={x[0]:.2f} πT_ox={x[1]:.4f} πT_fuel={x[2]:.4f} norm={norm0:.3e}")
-                else:
-                    print(f"[Iter {it:02d}] mdot={x[0]:.2f} f→ox={x[1]:.3f} ox→fuel={x[2]:.3f} norm={norm0:.3e}")
-
-            # 停滞检测(在 STAGNATION_WINDOW 步后,且当前 norm 已远超容差时启用)
-            if len(norm_history) > STAGNATION_WINDOW and norm0 > tol_rel * 100:
-                norm_baseline = norm_history[-STAGNATION_WINDOW - 1]
-                if norm0 > STAGNATION_RATIO * norm_baseline:
-                    # 8 步内 norm 没掉到 10%,认定停滞 → 提前终止
-                    results.summary["solver_iterations"] = float(it)
-                    results.summary["solver_residual_norm"] = norm0
-                    results.summary["solver_warning"] = 1.0
-                    results.summary["solver_stalled"]  = 1.0
-                    return x, results
-
-            if norm0 < tol_rel:
-                results.summary["solver_iterations"] = float(it)
-                results.summary["solver_residual_norm"] = norm0
-                if progress_callback is not None:
-                    try:
-                        progress_callback(it, max_iter, norm0)
-                    except Exception:
-                        pass
-                return x, results
-
-            jac = self._finite_difference_jacobian(x, residuals)
-            try:
-                dx = self._solve_linear_3x3(jac, [-ri for ri in residuals])
-            except RuntimeError:
-                # 退化步：只做保守修正
-                dx = [
-                    -0.08 * x[0] * residuals[0] / max(abs(self.inputs.thrust), 1e-9),
-                    -0.05 * (residuals[1] / 10.0e6) * (x[1] if self._target_mr_mode() else 1.0),
-                    -0.05 * (residuals[2] / 10.0e6) * (x[2] if self._target_mr_mode() else 1.0),
-                ]
-
-            # V8：trust-region 单步幅度限制。
-            # Newton 在 πT 上容易因 Jacobian 局部不准产生大步长，撞 sanitizer
-            # 上下界（1.02 或 10.0）后无法恢复。给每个变量加单步最大相对/绝对
-            # 步长上限，强制每一步只走"一小段"，配合后面的 line-search 即可稳定。
-            if self._target_mr_mode():
-                # mdot 单步 ±15%，πT 单步 ±0.4（约 πT 量级的 20–30%）
-                max_step = [0.15 * abs(x[0]), 0.4, 0.4]
-            else:
-                max_step = [0.15 * abs(x[0]), 0.2 * abs(x[1]) + 1.0, 0.2 * abs(x[2]) + 1.0]
-            dx = [self._clamp(dx[i], -max_step[i], max_step[i]) for i in range(3)]
-
-            accepted = False
-            for alpha in [1.0, 0.5, 0.25, 0.1, 0.05, 0.02]:
-                checkpoint()
-                x_trial = self._sanitize_vector([x[i] + alpha * dx[i] for i in range(3)])
-                try:
-                    r_trial, res_trial = self.residual_vector(*x_trial)
-                except Exception:
-                    continue
-                if self._normalized_residual_norm(r_trial) < norm0:
-                    x, residuals, results = x_trial, r_trial, res_trial
-                    accepted = True
-                    break
-
-            if not accepted:
-                x_trial = self._sanitize_vector([x[i] + 0.01 * dx[i] for i in range(3)])
-                try:
-                    residuals, results = self.residual_vector(*x_trial)
-                    x = x_trial
-                except Exception:
-                    break
-
-        results.summary["solver_iterations"] = float(max_iter)
-        results.summary["solver_residual_norm"] = self._normalized_residual_norm(residuals)
-        results.summary["solver_warning"] = 1.0
+        # Division can put an exact physical split boundary one ulp outside
+        # its fraction bound. Project before the cached initial evaluation,
+        # matching the generic backend and keeping the function count exact.
+        z = [max(lo, min(hi, value)) for value, lo, hi in zip(z, lower, upper)]
+        initial_residuals, initial_result = self.residual_vector(*physical(z))
+        def pump_scale(name):
+            component = initial_result.components.get(name)
+            power = component.outputs.get("power_W", 0.0) if component is not None else 0.0
+            return max(abs(float(power)), 1e5) if math.isfinite(float(power)) else 1e5
+        scales = [max(abs(self.inputs.thrust), 100.0), pump_scale("ox_pump"), pump_scale("fuel_pump")]
+        # Reuse the initial evaluation without hiding a physical model call in
+        # the reported nfev. Only this exact first point may use the cache.
+        first_call = True
+        def function(v):
+            nonlocal first_call
+            if first_call and list(v) == z:
+                first_call = False
+                return initial_residuals, initial_result
+            first_call = False
+            return self.residual_vector(*physical(v))
+        backend = getattr(self.inputs, "nonlinear_solver", "newton")
+        answer = solve_nonlinear(
+            function, z, lower, upper, residual_scales=scales,
+            variable_scales=variable_scales, diff_steps=diff_steps,
+            tol=tol_rel, max_iter=max_iter, backend=backend,
+            names=["thrust", "ox_power", "fuel_power"],
+            progress_callback=(lambda point: progress_callback(
+                point["iteration"], max_iter, point["residual_norm"])) if progress_callback else None)
+        if answer.payload is None:
+            answer.payload = initial_result
+            answer.residuals = list(initial_residuals)
+            answer.reason = "invalid_state"
+            answer.points = [dict(iteration=0, residual_norm=None, accepted=False,
+                termination_reason="invalid_initial_state",
+                residuals={name: float(value) / scale if math.isfinite(float(value)) else None
+                           for name, value, scale in zip(
+                               ("thrust", "ox_power", "fuel_power"), initial_residuals, scales)})]
+        results = answer.payload
+        x = physical(answer.x)
+        norm = max(abs(float(r)) / scale for r, scale in zip(answer.residuals, scales))
+        if not all(math.isfinite(float(r)) for r in answer.residuals):
+            norm = float("inf")
+        context = getattr(self, "_convergence_context", {})
+        convergence = self._empty_convergence()
+        iterations = max(len(answer.points) - 1, 0)
+        run = dict(id=1, stage_ratio=context.get("stage_ratio", 1.0),
+                   thermal_iteration=context.get("thermal_iteration", 0),
+                   preburner_iteration=context.get("preburner_iteration", 0),
+                   continuation_attempt=context.get("continuation_attempt", 1),
+                   warm_start=context.get("warm_start", False), backend=backend,
+                   tolerance=tol_rel, termination_reason=answer.reason,
+                   points=answer.points, nfev=answer.nfev, njev=answer.njev,
+                   rejected_steps=answer.rejected_steps,
+                   evaluation_budget=getattr(answer, "evaluation_budget", None),
+                   error=answer.error, backend_status=answer.backend_status,
+                   residual_scales=list(answer.residual_scales),
+                   variable_scales=list(answer.variable_scales),
+                   physical_tolerances=[tol_rel * value for value in scales])
+        convergence["inner_runs"].append(run)
+        convergence["layers"]["inner"] = self._convergence_layer(
+            True, "pass" if answer.passed else "fail",
+            norm if math.isfinite(norm) else None, tol_rel, "1", iterations, answer.reason,
+            checks=[dict(name=name, residual=abs(float(value)) if math.isfinite(float(value)) else None,
+                         tolerance=tol_rel * scale, unit=unit)
+                    for name, value, scale, unit in zip(
+                        ("thrust", "ox_power", "fuel_power"), answer.residuals, scales, ("N", "W", "W"))])
+        results.summary.update(solver_iterations=float(iterations), solver_residual_norm=norm,
+                               solver_warning=float(not answer.passed),
+                               inner_solver_warning=float(not answer.passed),
+                               solver_stalled=float(answer.reason in (
+                                   "stalled", "line_search_failed", "step_tolerance", "step_stagnation",
+                                   "residual_stagnation", "stationary_nonzero_residual")),
+                               solver_function_evaluations=float(answer.nfev),
+                               solver_jacobian_evaluations=float(answer.njev),
+                               solver_rejected_steps=float(answer.rejected_steps))
+        results.convergence = convergence
+        if verbose:
+            print(f"[{backend}] residual={norm:.3e}, iterations={iterations}, nfev={answer.nfev}, {answer.reason}")
         return x, results
 
     def evaluate_forward(self):
@@ -1204,25 +1284,36 @@ class FFSCCycleModel:
         self._attach_cooling_marching(results)
         return results
 
-    def evaluate(self, progress_callback: Optional[Callable[[int, int, float], None]] = None):
+    @model_thermo_scope
+    def evaluate(self, progress_callback: Optional[Callable[[int, int, float], None]] = None,
+                 *, include_cooling_marching: bool = True, warm_state=None,
+                 preburner_mr_targets=None):
         """
         设计点求解入口（V11）。
 
         · 温度目标模式（use_target_preburner_temp=1）：外层一维反求 MR，使两侧
-          预燃室出口温度（= 涡轮入口温度）命中目标温度——"顶着材料极限设计"。
+          预燃室出口温度（本模型同涡轮入口温度）命中给定设计目标。
         · 否则：直接走 V8 continuation 核心求解（_evaluate_design_core）。
+        · include_cooling_marching 仅控制已保存沿程解的历史格式兼容视图，
+          不改变输入快照或循环中的再生冷却热量、压降与出口状态。
         """
         checkpoint()
         if self._temp_target_mode():
-            results = self._evaluate_temp_targeted(progress_callback)
+            results = self._evaluate_temp_targeted(progress_callback, warm_state=warm_state,
+                                                   preburner_mr_targets=preburner_mr_targets)
         else:
-            results = self._evaluate_design_core(progress_callback)
-        # V15：在收敛设计点上跑沿程 marching 后处理（不进 Newton 环，失败仅警告）
-        self._attach_cooling_marching(results)
+            results = self._evaluate_design_core(progress_callback, warm_state=warm_state)
+        from convergence import attach_convergence_status
+        attach_convergence_status(results)
+        from thermo_applicability import attach_thermodynamic_applicability
+        attach_thermodynamic_applicability(results)
+        # 沿程解已在循环内闭合；此处只复制到历史格式，不再计算热量或压降。
+        if include_cooling_marching:
+            self._attach_cooling_marching(results)
         return results
 
     def _attach_cooling_marching(self, results) -> None:
-        """收敛后运行再生冷却沿程 marching（T_wall(x)/q(x)/p_co(x) 剖面）。"""
+        """将循环内已保存的冷却剖面复制到历史格式的兼容视图。"""
         checkpoint()
         if float(getattr(self.inputs, "cooling_marching_enable", 1.0)) < 0.5:
             return
@@ -1232,7 +1323,7 @@ class FFSCCycleModel:
         run_marching_postpass(results, self.inputs)
 
     # =====================================================
-    # 5b. 温度目标外环（V11）：反求 MR 使涡轮入口温度 = 材料目标
+    # 5b. 温度目标外环：反求 MR 使涡轮入口温度达到给定设计目标
     # =====================================================
 
     def _mr_for_target_temp(
@@ -1242,349 +1333,614 @@ class FFSCCycleModel:
         T_fuel_in: float,
         T_ox_in: float,
         p_pre: float,
+        *, fuel_enthalpy=None, ox_enthalpy=None,
     ) -> float:
         """
         一维反求预燃室混合比 MR(=O/F)，使绝热火焰温度 = T_target。
 
-        预燃室火焰温度对 MR 单调（富氧侧随 O/F 增大而降，富燃侧随 O/F 增大而升），
-        且几乎只由 MR 与进口温度决定（强度量、低温段无离解 → 对压力近乎不敏感）。
-        故直接对 thermo.combustion_equilibrium 做二分，与预燃室内部同一函数、
-        同一进口条件 → 反求出的 MR 喂回循环必复现目标温度。
-
-        端点不跨越 T_target 时（目标超出 MR 区间可达温度跨度），截断到最近端点并告警。
+        在指定的富氧或富燃 MR 区间内构造有效温度括区，再对与预燃室相同的
+        thermo.combustion_equilibrium 做二分。入口焓与压力均参与热平衡；
+        入口条件随循环改变后，由外环继续验证目标误差。
+        有效域内无法构造目标温度括区时明确失败，不以端点截断代替目标解。
         """
         checkpoint()
         from thermo import combustion_equilibrium
+
+        if side not in ("ox", "fuel"):
+            raise ValueError("预燃室侧必须为 ox 或 fuel。")
+        if not all(math.isfinite(float(value)) and value > 0
+                   for value in (T_target, T_fuel_in, T_ox_in, p_pre)):
+            raise ValueError("预燃室温度反求要求有限正的目标温度、入口温度与压力。")
 
         def temp_at(mr: float) -> float:
             comb = combustion_equilibrium(
                 mdot_fuel=1.0, mdot_ox=max(mr, 1e-6),
                 T_fuel=T_fuel_in, T_ox=T_ox_in, pressure=p_pre,
+                fuel_enthalpy=fuel_enthalpy, ox_enthalpy=ox_enthalpy,
             )
-            return comb.temperature
+            temperature = float(comb.temperature)
+            if not math.isfinite(temperature) or temperature <= 0:
+                raise ValueError("预燃室温度反求遇到非有限或非正温度。")
+            return temperature
 
         if side == "ox":
             lo, hi = 15.0, 160.0     # 富氧：O/F 大→温度低
         else:
             lo, hi = 0.02, 0.80      # 富燃：O/F 大→温度高
-        T_lo, T_hi = temp_at(lo), temp_at(hi)
+        try:
+            T_lo, T_hi = temp_at(lo), temp_at(hi)
+        except (ValueError, RuntimeError, ArithmeticError):
+            # Out-of-domain HP trial points are excluded, never fabricated by
+            # clipping to a temperature floor. Find a genuine valid bracket.
+            samples = []
+            for i in range(33):
+                mr = lo + (hi - lo) * i / 32
+                try:
+                    samples.append((mr, temp_at(mr)))
+                except (ValueError, RuntimeError, ArithmeticError):
+                    continue
+            bracket = next(((a, b) for a, b in zip(samples, samples[1:])
+                            if (a[1] - T_target) * (b[1] - T_target) <= 0), None)
+            if bracket is None:
+                raise ValueError("预燃室温度反求：物性有效域内没有目标温度括区。")
+            (lo, T_lo), (hi, T_hi) = bracket
+        if abs(T_lo - T_target) <= 0.3:
+            return lo
+        if abs(T_hi - T_target) <= 0.3:
+            return hi
 
-        # 目标落在端点温度之外 → 截断 + 告警
+        # 目标落在端点温度之外 → 告警并失败
         if (T_target - T_lo) * (T_target - T_hi) > 0.0:
-            nearest = lo if abs(T_target - T_lo) < abs(T_target - T_hi) else hi
             msg = (
                 f"⚠ {side} 预燃室目标温度 {T_target:.0f} K 超出 MR∈[{lo:g},{hi:g}] "
                 f"可达温度 [{min(T_lo, T_hi):.0f},{max(T_lo, T_hi):.0f}] K，"
-                f"MR 截断到 {nearest:g}"
+                "无法构造目标温度解。"
             )
             warnings.warn(msg, stacklevel=2)
             self._warnings.append(msg)
-            return nearest
+            raise ValueError(msg)
 
         # 单调性无关的括号二分（用相对 T_target 的符号维持括号）
         for _ in range(40):
             checkpoint()
             mid = 0.5 * (lo + hi)
             T_mid = temp_at(mid)
+            # Return the point which was actually evaluated and passed. Updating
+            # the bracket first used to return a different, untested midpoint.
+            if abs(T_mid - T_target) <= 0.3:
+                return mid
             if (T_mid - T_target) * (T_lo - T_target) > 0.0:
                 lo, T_lo = mid, T_mid
             else:
                 hi, T_hi = mid, T_mid
-            if abs(hi - lo) < 1e-4 * max(abs(hi), 1.0) or abs(T_mid - T_target) < 0.3:
-                break
-        return 0.5 * (lo + hi)
+        raise RuntimeError("预燃室温度二分反求达到最大步数，未满足 0.3 K 容差。")
+
+    def _initialize_preburner_temperature_guess(self):
+        """Domain-valid numerical seed; never a replacement for final checks."""
+        x0=self._initial_guess_vector()
+        seed=self._evaluate_once(*x0)
+        fuel=seed.states["fuel_after_cooling"]
+        ox=seed.states["lox_after_pump"]
+        initialized={}
+        for side in ("ox","fuel"):
+            target=getattr(self.inputs,f"{side}_preburner_temp_target")
+            value=self._mr_for_target_temp(side,target,fuel.temperature,ox.temperature,
+                seed.summary[f"{side}_preburner_pressure_Pa"],
+                fuel_enthalpy=fuel.enthalpy,ox_enthalpy=ox.enthalpy)
+            setattr(self.inputs,f"{side}_preburner_mr_target",value)
+            initialized[side]=value
+        return {"method":"physical_forward_enthalpy_inversion",
+            "cycle_evaluations":1,"mixture_ratios":initialized,"accepted_as_final":False,
+            "warm_state":dict(x=list(x0),chamber_temp_guess=seed.summary["chamber_temperature_K"],
+                chamber_gamma=seed.summary["chamber_gamma"],molar_mass=seed.summary["chamber_molar_mass"])}
 
     def _evaluate_temp_targeted(
         self,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
+        *, warm_state=None, preburner_mr_targets=None,
     ):
-        """
-        温度目标外环：反复 [解循环 → 反求 MR 命中目标温度 → 阻尼更新 MR]，
-        直到两侧预燃室出口温度均落在目标 ±TEMP_TOL 内。
-
-        因 T_PB 对 mdot/πT 只弱依赖（进口温度随 mdot 微动），外环 2–3 轮即收敛。
-        MR 目标在本方法内临时改写，结束时还原，避免污染用户输入。
-        """
+        """Solve each MR before reporting it, retaining every nested iteration."""
         checkpoint()
         T_ox_tgt = float(self.inputs.ox_preburner_temp_target)
         T_fu_tgt = float(self.inputs.fuel_preburner_temp_target)
-
         saved_mr_ox = self.inputs.ox_preburner_mr_target
         saved_mr_fu = self.inputs.fuel_preburner_mr_target
-
-        MR_OUTER_MAX = 6
-        TEMP_TOL     = 3.0    # K
-        RELAX        = 0.7    # MR 阻尼，防止外环震荡
-
-        # 外环进度包装：把每轮内层 0–100 映射到 [outer/MAX, (outer+1)/MAX]，
-        # 避免温度模式下进度条反复归零（看起来像卡死）。
-        def _outer_progress(outer_idx: int):
-            if progress_callback is None:
-                return None
-            lo = outer_idx / MR_OUTER_MAX * 100.0
-            hi = (outer_idx + 1) / MR_OUTER_MAX * 100.0
-            def cb(it: int, max_it: int, norm: float):
-                frac = it / max(max_it, 1)
-                try:
-                    progress_callback(int(lo + (hi - lo) * frac), 100, norm)
-                except Exception:
-                    pass
-            return cb
-
+        saved_context = getattr(self, "_convergence_context", {})
+        MR_OUTER_MAX, TEMP_TOL, RELAX = 12, 3.0, 0.7
+        history = self._empty_convergence()
         results = None
-        outer = 0
+        reason = "max_iterations"
+        solved_mr_ox, solved_mr_fu = saved_mr_ox, saved_mr_fu
+        residual = None
+        ox_error = fuel_error = None
+        warm_state = copy.deepcopy(warm_state)
         try:
+            if preburner_mr_targets is not None:
+                mr_ox = float(preburner_mr_targets["ox"])
+                mr_fuel = float(preburner_mr_targets["fuel"])
+                if (not all(math.isfinite(v) for v in (mr_ox, mr_fuel))
+                    or not .01 <= mr_fuel <= 2.0 or not 5.0 <= mr_ox <= 200.0
+                    or not mr_fuel < self.inputs.of_ratio < mr_ox):
+                    raise ValueError("预燃室热启动混合比必须有限、在支持范围内并满足四支路正流量条件。")
+                self.inputs.ox_preburner_mr_target = mr_ox
+                self.inputs.fuel_preburner_mr_target = mr_fuel
+            elif bool(self.inputs.cooling_bartz_mode):
+                # Seed the temperature block from a domain-valid physical
+                # evaluation, before demanding shaft balance at an arbitrary
+                # guessed MR. A guessed low temperature may have no shaft root
+                # inside the pure-fluid pressure domain although the requested
+                # temperature state does. This changes initial guesses only.
+                history["temperature_initialization"]=self._initialize_preburner_temperature_guess()
+                if warm_state is None:
+                    warm_state=copy.deepcopy((history["temperature_initialization"] or {}).get("warm_state"))
             for outer in range(MR_OUTER_MAX):
                 checkpoint()
-                results = self._evaluate_design_core(_outer_progress(outer))
+                self._convergence_context = {"preburner_iteration": outer + 1}
+                # These are the MR values entering this solve, never the next
+                # damped proposal which has not yet been evaluated.
+                solved_mr_ox = self.inputs.ox_preburner_mr_target
+                solved_mr_fu = self.inputs.fuel_preburner_mr_target
+                callback = None
+                if progress_callback is not None:
+                    def callback(it, max_it, norm, outer_idx=outer):
+                        progress_callback(int((outer_idx + it / max(max_it, 1))
+                                              / MR_OUTER_MAX * 100), 100, norm)
+                results = self._evaluate_design_core(callback, warm_state=warm_state)
+                self._merge_convergence_history(history, results.convergence)
+                history["layers"] = copy.deepcopy(results.convergence["layers"])
+                history["solution"] = copy.deepcopy(results.convergence.get("solution"))
                 s = results.summary
-                T_ox_now = s.get("ox_preburner_T_combustion_K", 0.0)
-                T_fu_now = s.get("fuel_preburner_T_combustion_K", 0.0)
-                if (abs(T_ox_now - T_ox_tgt) < TEMP_TOL
-                        and abs(T_fu_now - T_fu_tgt) < TEMP_TOL):
+                ox_temp = s.get("ox_preburner_T_combustion_K")
+                fuel_temp = s.get("fuel_preburner_T_combustion_K")
+                valid = all(isinstance(v, (int, float)) and math.isfinite(v)
+                            and v > 0 for v in (ox_temp, fuel_temp, T_ox_tgt, T_fu_tgt))
+                ox_error = ox_temp - T_ox_tgt if valid else None
+                fuel_error = fuel_temp - T_fu_tgt if valid else None
+                residual = max(abs(ox_error), abs(fuel_error)) if valid else None
+                history["preburner_history"].append(dict(
+                    iteration=outer + 1, ox_error_K=ox_error, fuel_error_K=fuel_error,
+                    residual_K=residual, ox_mr=solved_mr_ox, fuel_mr=solved_mr_fu))
+                required_layers = (history["layers"][name]
+                                   for name in ("inner", "thermal", "continuation"))
+                if any(layer["enabled"] and layer["status"] != "pass"
+                       for layer in required_layers):
+                    reason = "dependent_solver_failed"
                     break
-
-                # 反求所需进口条件（与预燃室实际进口同源）
-                T_fuel_in = results.states["fuel_after_cooling"].temperature
-                T_ox_in   = results.states["lox_after_pump"].temperature
-                p_pre_ox  = s.get("ox_preburner_pressure_ratio", 1.5) * self.inputs.pc
-                p_pre_fu  = s.get("fuel_preburner_pressure_ratio", 2.0) * self.inputs.pc
-
-                new_mr_ox = self._mr_for_target_temp("ox",   T_ox_tgt, T_fuel_in, T_ox_in, p_pre_ox)
-                new_mr_fu = self._mr_for_target_temp("fuel", T_fu_tgt, T_fuel_in, T_ox_in, p_pre_fu)
-
-                # 阻尼更新 MR 目标（下一轮 _evaluate_design_core 会读取）
+                warm_state = copy.deepcopy(results.convergence.get("solution"))
+                if not valid:
+                    reason = "invalid_state"
+                    break
+                if residual <= TEMP_TOL:
+                    reason = "tolerance_met"
+                    break
+                if outer + 1 == MR_OUTER_MAX:
+                    break
+                try:
+                    T_fuel_in = results.states["fuel_after_cooling"].temperature
+                    T_ox_in = results.states["lox_after_pump"].temperature
+                    p_pre_ox = s["ox_preburner_pressure_ratio"] * self.inputs.pc
+                    p_pre_fu = s["fuel_preburner_pressure_ratio"] * self.inputs.pc
+                    new_mr_ox = self._mr_for_target_temp(
+                        "ox", T_ox_tgt, T_fuel_in, T_ox_in, p_pre_ox,
+                        fuel_enthalpy=results.states["fuel_after_cooling"].enthalpy,
+                        ox_enthalpy=results.states["lox_after_pump"].enthalpy)
+                    new_mr_fu = self._mr_for_target_temp(
+                        "fuel", T_fu_tgt, T_fuel_in, T_ox_in, p_pre_fu,
+                        fuel_enthalpy=results.states["fuel_after_cooling"].enthalpy,
+                        ox_enthalpy=results.states["lox_after_pump"].enthalpy)
+                except (ValueError, RuntimeError, ArithmeticError) as exc:
+                    reason = "temperature_inversion_failed"
+                    results.warnings.append(f"预燃室温度反求失败：{exc}")
+                    break
                 self.inputs.ox_preburner_mr_target = (
-                    RELAX * new_mr_ox + (1.0 - RELAX) * self.inputs.ox_preburner_mr_target
-                )
+                    RELAX * new_mr_ox + (1.0 - RELAX) * solved_mr_ox)
                 self.inputs.fuel_preburner_mr_target = (
-                    RELAX * new_mr_fu + (1.0 - RELAX) * self.inputs.fuel_preburner_mr_target
-                )
-
-            if results is not None:
-                s = results.summary
-                T_ox_now = s.get("ox_preburner_T_combustion_K", 0.0)
-                T_fu_now = s.get("fuel_preburner_T_combustion_K", 0.0)
-                s["preburner_temp_target_mode"]        = 1.0
-                s["solve_mode_text"]                   = "温度目标模式（反求 MR 顶材料极限）"
-                s["ox_preburner_temp_target_K"]        = T_ox_tgt
-                s["fuel_preburner_temp_target_K"]      = T_fu_tgt
-                s["ox_preburner_temp_error_K"]         = T_ox_now - T_ox_tgt
-                s["fuel_preburner_temp_error_K"]       = T_fu_now - T_fu_tgt
-                s["ox_preburner_mr_solved_for_temp"]   = self.inputs.ox_preburner_mr_target
-                s["fuel_preburner_mr_solved_for_temp"] = self.inputs.fuel_preburner_mr_target
-                s["preburner_temp_outer_iters"]        = float(outer + 1)
-                if (abs(T_ox_now - T_ox_tgt) > TEMP_TOL
-                        or abs(T_fu_now - T_fu_tgt) > TEMP_TOL):
-                    msg = (
-                        f"⚠ 温度目标外环未完全收敛（{outer + 1} 轮）："
-                        f"T_ox={T_ox_now:.0f}/{T_ox_tgt:.0f} K，"
-                        f"T_fuel={T_fu_now:.0f}/{T_fu_tgt:.0f} K"
-                    )
-                    if msg not in results.warnings:
-                        results.warnings.insert(0, msg)
+                    RELAX * new_mr_fu + (1.0 - RELAX) * solved_mr_fu)
         finally:
-            # 还原 MR 目标，避免污染用户输入；solved 值已存入 summary 供显示
-            self.inputs.ox_preburner_mr_target   = saved_mr_ox
+            self.inputs.ox_preburner_mr_target = saved_mr_ox
             self.inputs.fuel_preburner_mr_target = saved_mr_fu
+            self._convergence_context = saved_context
 
+        s = results.summary
+        s.update({
+            "preburner_temp_target_mode": 1.0,
+            "solve_mode_text": "指定预燃室温度（反求混合比）",
+            "ox_preburner_temp_target_K": T_ox_tgt,
+            "fuel_preburner_temp_target_K": T_fu_tgt,
+            "ox_preburner_temp_error_K": ox_error,
+            "fuel_preburner_temp_error_K": fuel_error,
+            "ox_preburner_mr_solved_for_temp": solved_mr_ox,
+            "fuel_preburner_mr_solved_for_temp": solved_mr_fu,
+            "preburner_temp_outer_iters": float(len(history["preburner_history"])),
+            "solver_iterations": float(sum(max(len(run["points"]) - 1, 0)
+                                           for run in history["inner_runs"])),
+            "solver_inner_solves": float(len(history["inner_runs"])),
+            "tc_outer_iterations_total": float(sum(row.get("picard_iteration", 1)
+                for row in history["thermal_history"])),
+            "solver_function_evaluations": float(sum(run.get("nfev", 0) for run in history["inner_runs"])
+                + (history.get("temperature_initialization") or {}).get("cycle_evaluations", 0)),
+            "solver_initialization_evaluations": float((history.get("temperature_initialization") or {}).get("cycle_evaluations", 0)),
+            "solver_jacobian_evaluations": float(sum(run.get("njev", 0) for run in history["inner_runs"])),
+            "solver_rejected_steps": float(sum(run.get("rejected_steps", 0) for run in history["inner_runs"])),
+        })
+        history["layers"]["preburner"] = self._convergence_layer(
+            True, "pass" if reason == "tolerance_met" else "fail",
+            residual, TEMP_TOL, "K", len(history["preburner_history"]), reason,
+            checks=[dict(name="ox_temperature", residual=abs(ox_error) if ox_error is not None else None,
+                         tolerance=TEMP_TOL, unit="K"),
+                    dict(name="fuel_temperature", residual=abs(fuel_error) if fuel_error is not None else None,
+                         tolerance=TEMP_TOL, unit="K")])
+        results.convergence = history
+        s["solver_warning"] = float(any(layer["enabled"] and layer["status"] != "pass"
+                                         for layer in history["layers"].values()))
+        if reason != "tolerance_met":
+            results.warnings.insert(0, f"预燃室温度外环未收敛：{reason}；当前结果仅供诊断。")
         return results
 
-    def _evaluate_design_core(self, progress_callback: Optional[Callable[[int, int, float], None]] = None):
-        """
-        V8 设计点求解 —— 采用 thrust/pc 同步缩放的 continuation。
+    def _evaluate_design_core(self, progress_callback: Optional[Callable[[int, int, float], None]] = None,
+                              *, warm_state=None):
+        """Adaptive continuation and safeguarded thermal fixed-point iteration.
 
-        Continuation 思路：把 Pc 和 thrust 同步缩成 50% → 75% → 100% 分三步解，
-        用上一步的解作为下一步的 warm start。高压级燃发动机（Pc=33 MPa）下，
-        冷启动 Newton 容易陷入伪稳态；continuation 是标准做法（参考 RPA/ESPSS）。
+        A warm state is explicitly passed by the current PB loop. It is never
+        cached on the model, so independent evaluate calls cannot share stale
+        guesses, and every temporary input is restored on all exit paths.
         """
         checkpoint()
         self._warnings = []
-        base_pc = self.inputs.pc
-        base_thrust = self.inputs.thrust
-        # 第二步修复:保存 chamber_temp_guess。Picard 外环过程中会被临时改写,
-        # 结束时还原,避免污染用户输入框里的初值。
-        original_tc_guess = self.inputs.chamber_temp_guess
-        # V6.1:同时把真实 γ/MW 也纳入 Picard 反馈。冷却 Bartz 的喉部面积
-        # A* ∝ √(R/γ-项),原来固定用 inputs.chamber_gamma/molar_mass(fallback
-        # 1.18/21),而喷管用 Cantera 实算值(~1.19/22.6),导致冷却卡喉部直径
-        # 比喷管/几何卡大 ~3.9%(250 vs 245.5 mm)。反馈后两者收敛到一致。
-        original_gamma   = self.inputs.chamber_gamma
-        original_mw      = self.inputs.molar_mass
+        base_pc, base_thrust = self.inputs.pc, self.inputs.thrust
+        original_properties = (self.inputs.chamber_temp_guess, self.inputs.chamber_gamma,
+                               self.inputs.molar_mass)
+        saved_context = getattr(self, "_convergence_context", {})
+        pb_iteration = saved_context.get("preburner_iteration", 0)
+        saved_thermal_epoch = getattr(self, "_thermal_feedback_epoch", None)
+        self._thermal_feedback_epoch = object()
+        TC_OUTER_MAX, TC_TOL, PROPERTY_TOL = 20, 5.0, 1e-4
+        MAX_ATTEMPTS, MIN_STEP = 20, 1.0 / 64
+        thermal_enabled = bool(self.inputs.cooling_bartz_mode)
+        convergence = self._empty_convergence()
+        if thermal_enabled:
+            convergence["layers"]["thermal"] = self._convergence_layer(
+                True, "fail", None, TC_TOL, "K", 0, "not_reached")
+        else:
+            convergence["layers"]["thermal"]["termination_reason"] = "fixed_heat_and_pressure_loss"
 
-        ratios = [0.5, 0.75, 1.0]
-        x_warm: Optional[list[float]] = None
-        results = None
-        x_solved: list[float] = []
+        def set_properties(values):
+            self.inputs.chamber_temp_guess, self.inputs.chamber_gamma, self.inputs.molar_mass = values
 
-        # ── 冷却 ↔ 主燃室 Tc Picard 外环参数 ─────────────────────────
-        # 现状:_evaluate_once 用 inputs.chamber_temp_guess 作冷却 Bartz 热流
-        # 的 T_aw 基准,而真实 chamber_state.temperature 是 Newton 收敛后才算出。
-        # 修法:最后一段 continuation 上加阻尼 Picard 外环,使二者自洽。
-        # 通常 2-3 轮收敛;阻尼 0.5 防震荡;Newton 用上一轮解热启动,内层收敛飞快。
-        TC_OUTER_MAX  = 5
-        TC_OUTER_TOL  = 5.0   # K
-        TC_RELAX      = 0.5
-        tc_outer_iters    = 0
-        tc_outer_residual = float("nan")
+        def properties():
+            return (self.inputs.chamber_temp_guess, self.inputs.chamber_gamma, self.inputs.molar_mass)
 
-        # ── 进度映射:连续感优化版 ─────────────────────────────────
-        # 思路:Newton 典型 2–3 步收敛,如果按 it/max_iter(=50) 算,每段只
-        # 填 2–6% 就跳到下一段,视觉上很跳。改成两条:
-        #   (a) **段内按残差对数映射**:用 -log10(norm)/4 当填充比例,每步
-        #       残差降一个数量级,进度就走 25%,而不是 2%。
-        #   (b) **Picard 轮权重不均分**:第 1 轮 Picard 真正干活(占 stage 3
-        #       的 60%),后续轮微调(25/10/3/2%),避免末几轮把空间留空。
-        n_stages_total = len(ratios)
-        # Stage 3 内部 Picard 各轮权重(求和=1.0,长度对齐 TC_OUTER_MAX=5)
-        _picard_weights = [0.60, 0.25, 0.10, 0.03, 0.02]
-
-        def _wrap_progress(stage_idx: int, picard_idx: int):
-            if progress_callback is None:
+        def scaled_seed(seed, ratio):
+            if seed is None:
                 return None
-            stage_lo = stage_idx * 100.0 / n_stages_total
-            stage_hi = (stage_idx + 1) * 100.0 / n_stages_total
-            if stage_idx == n_stages_total - 1:
-                # 最后一段:Picard 加权分配
-                idx = min(picard_idx, len(_picard_weights) - 1)
-                cum_lo = sum(_picard_weights[:idx])
-                cum_hi = sum(_picard_weights[:idx + 1])
-                lo = stage_lo + cum_lo * (stage_hi - stage_lo)
-                hi = stage_lo + cum_hi * (stage_hi - stage_lo)
-            else:
-                lo, hi = stage_lo, stage_hi
+            # Free-mode cross flows scale with total mass; pressure ratios do not.
+            return [seed[0] * ratio,
+                    seed[1] if self._target_mr_mode() else seed[1] * ratio,
+                    seed[2] if self._target_mr_mode() else seed[2] * ratio]
 
-            def cb(it: int, max_it: int, norm: float):
-                # 段内填充比例:基于残差对数。
-                # norm >= 1.0 → 0%, norm <= tol(1e-4) → 100%, 中间 log 线性。
-                import math
-                if norm <= 1.0e-4:
-                    frac = 1.0
-                elif norm >= 1.0:
-                    frac = 0.0
-                else:
-                    frac = -math.log10(max(norm, 1e-12)) / 4.0
-                    frac = max(0.0, min(1.0, frac))
-                mapped = lo + (hi - lo) * frac
-                progress_callback(int(mapped), 100, norm)
-            return cb
+        def valid_warm(value):
+            if not isinstance(value, dict):
+                return False
+            try:
+                vector = list(value["x"])
+                props = [value[name] for name in ("chamber_temp_guess", "chamber_gamma", "molar_mass")]
+                return (len(vector) == 3 and all(math.isfinite(float(v)) and float(v) > 0
+                        for v in vector + props) and float(props[1]) > 1)
+            except (KeyError, TypeError, ValueError):
+                return False
 
-        # 累计所有 solve_cycle 调用的 Newton 步数。solve_cycle 单次只报告
-        # 本轮 it(被后面 Picard/continuation 轮覆盖),如果直接显示就只看到
-        # 最后一轮(暖启动,~1 步)的值,严重低估实际工作量。
-        total_newton_iters = 0
-        n_inner_solves = 0
+        warm_attempt = valid_warm(warm_state)
+        warm_requested = warm_attempt
+        x_seed = list(warm_state["x"]) if warm_attempt else None
+        if warm_attempt:
+            set_properties(tuple(warm_state[name] for name in
+                                 ("chamber_temp_guess", "chamber_gamma", "molar_mass")))
+        ratio, step = (1.0 if warm_attempt else .5), .25
+        reached_ratio, evaluated_ratio, completed_stages = 0.0, 0.0, 0
+        accepted_x, accepted_properties = None, original_properties
+        results, x_solved = None, []
+        stage_reason = "not_reached"
+        attempt = 0
+
+        def run_stage(seed, current_ratio, attempt_number, is_warm):
+            """Return the last evaluated payload and whether this stage passed."""
+            nonlocal results, x_solved
+            last_stage = current_ratio == 1.0
+            max_thermal = TC_OUTER_MAX if last_stage and thermal_enabled else 1
+            relaxation = .5
+            accepted_thermal = None
+            next_seed = seed
+            for tc_iter in range(max_thermal):
+                checkpoint()
+                self._convergence_context = dict(
+                    stage_ratio=current_ratio, thermal_iteration=tc_iter + 1 if last_stage and thermal_enabled else 0,
+                    preburner_iteration=pb_iteration, continuation_attempt=attempt_number, warm_start=is_warm)
+                callback = None
+                if progress_callback is not None:
+                    def callback(it, max_it, norm):
+                        progress_callback(min(99, int(current_ratio * 90)), 100, norm)
+                try:
+                    x_solved, results = self.solve_cycle(progress_callback=callback, x_init=next_seed)
+                except ValidationError:
+                    # Invalid submitted inputs are not a continuation failure.
+                    # Preserve the actionable validation exception for callers.
+                    raise
+                except (ValueError, RuntimeError, ArithmeticError) as exc:
+                    # A failed initial evaluation has no payload; do not label an
+                    # earlier stage's state as the attempted target conditions.
+                    results = CycleResults(self.inputs, {
+                        "solver_residual_norm": math.inf, "solver_warning": 1.0,
+                        "inner_solver_warning": 1.0, "chamber_pressure_Pa": self.inputs.pc}, {}, {}, [str(exc)])
+                    x_solved = list(next_seed if next_seed is not None else self._initial_guess_vector())
+                    results.convergence = self._empty_convergence()
+                    results.convergence["layers"]["inner"] = self._convergence_layer(
+                        True, "fail", None, 1e-4, "1", 0, "evaluation_failed")
+                    results.convergence["inner_runs"] = [dict(
+                        id=1, **self._convergence_context,
+                        backend=getattr(self.inputs, "nonlinear_solver", "newton"),
+                        tolerance=1e-4, termination_reason="evaluation_failed", points=[],
+                        nfev=1, njev=0, rejected_steps=0, error=str(exc))]
+                self._merge_convergence_history(convergence, results.convergence)
+                convergence["layers"]["inner"] = copy.deepcopy(results.convergence["layers"]["inner"])
+                if convergence["layers"]["inner"]["status"] != "pass":
+                    # If an accelerated thermal proposal left the valid basin,
+                    # retry from the last accepted fixed-point state with damping.
+                    if accepted_thermal is not None and relaxation > .1 and tc_iter + 1 < max_thermal:
+                        relaxation = max(.1, relaxation * .5)
+                        q, output, previous_norm, previous_x = accepted_thermal
+                        convergence["thermal_history"].append(dict(
+                            iteration=tc_iter + 1, preburner_iteration=pb_iteration,
+                            continuation_attempt=attempt_number, residual_K=None,
+                            accepted=False, relaxation=relaxation,
+                            termination_reason="inner_failed_relaxation_reduced"))
+                        set_properties(tuple(a + relaxation * (b - a) for a, b in zip(q, output)))
+                        next_seed = previous_x[:]
+                        continue
+                    if last_stage and thermal_enabled:
+                        convergence["layers"]["thermal"].update(
+                            status="fail", termination_reason="inner_solver_failed")
+                    return False, "inner_solver_failed"
+                if not last_stage or not thermal_enabled:
+                    return True, "target_reached" if last_stage else "stage_converged"
+                summary = results.summary
+                output = (summary.get("chamber_temperature_K"), summary.get("chamber_gamma"),
+                          summary.get("chamber_molar_mass"))
+                guesses = properties()
+                valid = (all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+                             for v in (*output, *guesses)) and output[1] > 1.0)
+                tc_r = abs(output[0] - guesses[0]) if valid else None
+                gamma_r = abs(output[1] - guesses[1]) / abs(guesses[1]) if valid else None
+                mw_r = abs(output[2] - guesses[2]) / abs(guesses[2]) if valid else None
+                # The physical quasi-1D evaluator already closes current gas
+                # properties, spatial heat, geometry and hydraulic feedback.
+                # Repeating the old Picard loop would only relax unused initial
+                # guesses toward that solved state. Serialized "pass" flags are
+                # insufficient: require this solve's private production evidence.
+                from regen_coupling import (current_thermal_evidence, coupling_checks,
+                                            THERMAL_FEEDBACK_SOURCE)
+                coupled = current_thermal_evidence(self, results) if valid else None
+                if coupled is not None:
+                    temperature_residual = coupled["hot_side_temperature_residual_K"]
+                    convergence["layers"]["thermal"] = self._convergence_layer(
+                        True, "pass", temperature_residual, .001, "K", coupled["iterations"],
+                        "coupled_feedback_tolerance_met", source=THERMAL_FEEDBACK_SOURCE,
+                        checks=coupling_checks(coupled),
+                        initialization_difference=dict(temperature_K=tc_r,
+                            gamma_relative=gamma_r, molar_mass_relative=mw_r),
+                        description="本次循环内统一冷却/热气/供给六项残差共同验收；主室物性由当前焓与组成求得，初值差不再作为额外物理方程。")
+                    convergence["thermal_history"].extend(dict(
+                        row, preburner_iteration=pb_iteration,
+                        continuation_attempt=attempt_number, accepted=True,
+                        source=THERMAL_FEEDBACK_SOURCE, picard_iteration=0,
+                        residual_K=row["hot_side_temperature_residual_K"])
+                        for row in coupled["history"])
+                    summary.update(tc_outer_iterations=0., tc_outer_residual_K=temperature_residual,
+                        tc_outer_gamma_relative_residual=None,
+                        tc_outer_molar_mass_relative_residual=None,
+                        thermal_feedback_source=THERMAL_FEEDBACK_SOURCE,
+                        chamber_temp_guess_used_K=guesses[0])
+                    # Carry the actual thermodynamic solution into the next
+                    # PB/continuation warm start without another model call.
+                    set_properties(output)
+                    return True, "target_reached"
+                checks = [dict(name="temperature", residual=tc_r, tolerance=TC_TOL, unit="K"),
+                          dict(name="gamma", residual=gamma_r, tolerance=PROPERTY_TOL, unit="1"),
+                          dict(name="molar_mass", residual=mw_r, tolerance=PROPERTY_TOL, unit="1")]
+                feedback_norm = max(tc_r / TC_TOL, gamma_r / PROPERTY_TOL, mw_r / PROPERTY_TOL) if valid else math.inf
+                passed = valid and feedback_norm <= 1
+                reject = (not passed and accepted_thermal is not None and
+                          (not valid or feedback_norm > 1.25 * accepted_thermal[2]))
+                trace = dict(iteration=tc_iter + 1, preburner_iteration=pb_iteration,
+                             continuation_attempt=attempt_number, residual_K=tc_r,
+                             gamma_relative_residual=gamma_r, molar_mass_relative_residual=mw_r,
+                             temperature_input_K=guesses[0], temperature_output_K=output[0] if valid else None,
+                             gamma_input=guesses[1], gamma_output=output[1] if valid else None,
+                             molar_mass_input=guesses[2], molar_mass_output=output[2] if valid else None,
+                             accepted=bool(valid and not reject), relaxation=relaxation,
+                             normalized_feedback_residual=feedback_norm if math.isfinite(feedback_norm) else None)
+                convergence["thermal_history"].append(trace)
+                reason = "tolerance_met" if passed else "max_iterations" if valid else "invalid_state"
+                convergence["layers"]["thermal"] = self._convergence_layer(
+                    True, "pass" if passed else "fail", tc_r, TC_TOL, "K", tc_iter + 1, reason, checks=checks)
+                summary.update(tc_outer_iterations=float(tc_iter + 1), tc_outer_residual_K=tc_r,
+                               tc_outer_gamma_relative_residual=gamma_r,
+                               tc_outer_molar_mass_relative_residual=mw_r,
+                               chamber_temp_guess_used_K=guesses[0])
+                if passed:
+                    return True, "target_reached"
+                if tc_iter + 1 == max_thermal:
+                    return False, "thermal_solver_failed"
+                if reject:
+                    if relaxation <= .1:
+                        convergence["layers"]["thermal"]["termination_reason"] = "feedback_step_rejected"
+                        return False, "thermal_solver_failed"
+                    relaxation = max(.1, relaxation * .5)
+                    q, previous_output, previous_norm, previous_x = accepted_thermal
+                    trace["termination_reason"] = "feedback_growth_relaxation_reduced"
+                    set_properties(tuple(a + relaxation * (b - a) for a, b in zip(q, previous_output)))
+                    next_seed = previous_x[:]
+                    continue
+                if not valid:
+                    return False, "thermal_solver_failed"
+                if accepted_thermal is not None:
+                    previous_q, previous_output, previous_norm, _ = accepted_thermal
+                    current_feedback = [(output[0] - guesses[0]) / TC_TOL,
+                        (output[1] - guesses[1]) / abs(guesses[1]) / PROPERTY_TOL,
+                        (output[2] - guesses[2]) / abs(guesses[2]) / PROPERTY_TOL]
+                    previous_feedback = [(previous_output[0] - previous_q[0]) / TC_TOL,
+                        (previous_output[1] - previous_q[1]) / abs(previous_q[1]) / PROPERTY_TOL,
+                        (previous_output[2] - previous_q[2]) / abs(previous_q[2]) / PROPERTY_TOL]
+                    oscillating = (sum(a * b for a, b in zip(current_feedback, previous_feedback)) < 0
+                                   and feedback_norm >= .5 * previous_norm)
+                    if oscillating:
+                        relaxation = max(.1, relaxation * .5)
+                        trace["relaxation_action"] = "oscillation_damped"
+                    elif feedback_norm < .8 * previous_norm:
+                        relaxation = min(1.0, relaxation * 1.5)
+                        trace["relaxation_action"] = "contraction_accelerated"
+                accepted_thermal = (guesses, output, feedback_norm, x_solved[:])
+                trace["next_relaxation"] = relaxation
+                set_properties(tuple(a + relaxation * (b - a) for a, b in zip(guesses, output)))
+                next_seed = x_solved[:]
+            return False, "thermal_solver_failed"
 
         try:
-            stalled = False    # 任意一次 solve_cycle 停滞早退,后续 stage/Picard 都跳过
-            for stage, ratio in enumerate(ratios):
+            while attempt < MAX_ATTEMPTS:
                 checkpoint()
-                if stalled:
-                    break
-                self.inputs.pc = base_pc * ratio
-                self.inputs.thrust = base_thrust * ratio
-                is_last = (stage == len(ratios) - 1)
-
-                if not is_last:
-                    # 中间 continuation 阶段:单次求解,Tc 不反馈
-                    x_solved, results = self.solve_cycle(
-                        progress_callback=_wrap_progress(stage, 0),
-                        x_init=x_warm,
-                    )
-                    total_newton_iters += int(results.summary.get("solver_iterations", 0))
-                    n_inner_solves += 1
-                    if results.summary.get("solver_stalled", 0.0) > 0.5:
-                        stalled = True
+                attempt += 1
+                self.inputs.pc, self.inputs.thrust = base_pc * ratio, base_thrust * ratio
+                evaluated_ratio = ratio
+                start_properties = properties()
+                passed, reason = run_stage(x_seed, ratio, attempt, warm_attempt)
+                convergence["continuation_history"].append(dict(
+                    attempt=attempt, preburner_iteration=pb_iteration, stage_ratio=ratio,
+                    from_ratio=reached_ratio, step=ratio - reached_ratio,
+                    accepted=passed, warm_start=warm_attempt, termination_reason=reason,
+                    temperature_start_K=start_properties[0]))
+                if passed:
+                    reached_ratio, completed_stages = ratio, completed_stages + 1
+                    accepted_x, accepted_properties = x_solved[:], properties()
+                    if ratio == 1.0:
+                        stage_reason = "target_reached"
                         break
-                else:
-                    # 最后阶段:Picard 外环让 chamber_temp_guess 与真实 Tc 自洽
-                    for tc_iter in range(TC_OUTER_MAX):
-                        checkpoint()
-                        x_solved, results = self.solve_cycle(
-                            progress_callback=_wrap_progress(stage, tc_iter),
-                            x_init=x_warm,
-                        )
-                        total_newton_iters += int(results.summary.get("solver_iterations", 0))
-                        n_inner_solves += 1
-                        # Newton 停滞 → 物理上闭合不了,后续 Picard 无意义
-                        if results.summary.get("solver_stalled", 0.0) > 0.5:
-                            stalled = True
-                            break
-                        new_tc = results.summary.get(
-                            "chamber_temperature_K", self.inputs.chamber_temp_guess
-                        )
-                        tc_outer_residual = abs(new_tc - self.inputs.chamber_temp_guess)
-                        tc_outer_iters = tc_iter + 1
-                        # 在 summary 里记录本轮 Picard 用的 guess 和残差(诊断用)
-                        results.summary["tc_outer_iterations"]      = float(tc_outer_iters)
-                        results.summary["tc_outer_residual_K"]      = tc_outer_residual
-                        results.summary["chamber_temp_guess_used_K"] = self.inputs.chamber_temp_guess
-                        # 把真实 γ/MW 反馈给下一轮冷却(直接更新,二者稳定)
-                        new_gamma = results.summary.get("chamber_gamma")
-                        new_mw    = results.summary.get("chamber_molar_mass")
-                        if new_gamma and new_gamma > 1.0:
-                            self.inputs.chamber_gamma = float(new_gamma)
-                        if new_mw and new_mw > 0:
-                            self.inputs.molar_mass = float(new_mw)
-                        if tc_outer_residual < TC_OUTER_TOL:
-                            break
-                        # 阻尼 Picard 更新:next = (1-r)*old + r*new
-                        self.inputs.chamber_temp_guess = (
-                            (1.0 - TC_RELAX) * self.inputs.chamber_temp_guess
-                            + TC_RELAX * new_tc
-                        )
-                        x_warm = x_solved  # 热启动下一轮内层 Newton
-
-                next_ratio = ratios[stage + 1] / ratio if stage + 1 < len(ratios) else 1.0
-                x_warm = [x_solved[0] * next_ratio, x_solved[1], x_solved[2]]
-
-            # 用累计步数覆盖 summary 里最末轮的局部值,保留最末轮值作诊断
-            results.summary["solver_iterations_last"]    = results.summary.get("solver_iterations", 0)
-            results.summary["solver_iterations"]         = float(total_newton_iters)
-            results.summary["solver_inner_solves"]       = float(n_inner_solves)
+                    next_ratio = min(1.0, ratio + step)
+                    step = min(.5, step * 1.5)
+                    x_seed = scaled_seed(accepted_x, next_ratio / ratio)
+                    ratio = next_ratio
+                    continue
+                if warm_attempt:
+                    # A converged solution for the preceding MR is only a seed,
+                    # never evidence for this MR. Retry the cold continuation.
+                    warm_attempt = False
+                    ratio, step, reached_ratio = .5, .25, 0.0
+                    x_seed, accepted_x = None, None
+                    accepted_properties = original_properties
+                    set_properties(original_properties)
+                    continue
+                if reason == "thermal_solver_failed":
+                    stage_reason = reason
+                    break  # thermal damping already exhausted its own bounded recovery
+                failed_increment = ratio - reached_ratio
+                if failed_increment <= MIN_STEP + 1e-12:
+                    stage_reason = "minimum_step_reached"
+                    break
+                step = .5 * failed_increment
+                ratio = reached_ratio + step
+                set_properties(accepted_properties)
+                x_seed = scaled_seed(accepted_x, ratio / reached_ratio) if accepted_x is not None else None
+                stage_reason = "attempt_limit"
+            solution = dict(x=x_solved[:], chamber_temp_guess=properties()[0],
+                            chamber_gamma=properties()[1], molar_mass=properties()[2])
         finally:
-            self.inputs.pc = base_pc
-            self.inputs.thrust = base_thrust
-            # 还原 chamber_temp_guess。results.summary 里 chamber_temperature_K 是
-            # Picard 收敛后的真实 Tc,所以 GUI/导出/拓扑图不受还原影响。
-            self.inputs.chamber_temp_guess = original_tc_guess
-            self.inputs.chamber_gamma      = original_gamma
-            self.inputs.molar_mass         = original_mw
+            self.inputs.pc, self.inputs.thrust = base_pc, base_thrust
+            set_properties(original_properties)
+            self._convergence_context = saved_context
+            self._thermal_feedback_epoch = saved_thermal_epoch
 
-        s = results.summary
+        continuation_passed = stage_reason == "target_reached" and reached_ratio == 1.0
+        convergence["layers"]["continuation"] = self._convergence_layer(
+            True, "pass" if continuation_passed else "fail", 1.0 - reached_ratio, 0.0,
+            "1", completed_stages, stage_reason, reached_ratio=reached_ratio,
+            evaluated_ratio=evaluated_ratio, completed_stages=completed_stages,
+            attempts=attempt, rejected_attempts=attempt - completed_stages)
+        convergence["warm_start"] = dict(requested=warm_requested,
+            accepted=bool(warm_requested and convergence["continuation_history"][0]["accepted"]),
+            fallback=bool(warm_requested and not convergence["continuation_history"][0]["accepted"]))
+        convergence["solution"] = solution if continuation_passed else None
+        results.convergence = convergence
+        summary = results.summary
+        summary.update(solver_iterations_last=summary.get("solver_iterations", 0),
+            solver_iterations=float(sum(max(len(run["points"]) - 1, 0) for run in convergence["inner_runs"])),
+            solver_inner_solves=float(len(convergence["inner_runs"])),
+            solver_function_evaluations=float(sum(run.get("nfev", 0) for run in convergence["inner_runs"])),
+            solver_jacobian_evaluations=float(sum(run.get("njev", 0) for run in convergence["inner_runs"])),
+            solver_rejected_steps=float(sum(run.get("rejected_steps", 0) for run in convergence["inner_runs"])),
+            tc_outer_iterations_total=float(sum(row.get("picard_iteration", 1)
+                for row in convergence["thermal_history"])),
+            continuation_reached_ratio=reached_ratio,
+            evaluated_chamber_pressure_Pa=base_pc * evaluated_ratio, requested_chamber_pressure_Pa=base_pc,
+            evaluated_thrust_target_N=base_thrust * evaluated_ratio, requested_thrust_N=base_thrust)
         if self._target_mr_mode():
-            s["mdot_solved_kg_s"] = x_solved[0]
-            s["ox_turbine_pi_t_solved"] = x_solved[1]
-            s["fuel_turbine_pi_t_solved"] = x_solved[2]
-            s["mdot_fuel_to_ox_preburner_solved"] = s.get("mdot_fuel_to_ox_preburner_kg_s")
-            s["mdot_ox_to_fuel_preburner_solved"] = s.get("mdot_ox_to_fuel_preburner_kg_s")
-            s["ox_preburner_pressure_ratio_solved"] = s.get("ox_preburner_pressure_ratio", 0.0)
-            s["fuel_preburner_pressure_ratio_solved"] = s.get("fuel_preburner_pressure_ratio", 0.0)
-        if bool(s.get("solver_warning", 0.0)):
-            msg = (
-                "⚠ 求解器未完全收敛：当前结果只适合作为诊断，不应作为设计点。"
-                f" 残差范数={s.get('solver_residual_norm', 0.0):.3e}"
-            )
-            if msg not in results.warnings:
-                results.warnings.insert(0, msg)
+            summary.update(mdot_solved_kg_s=x_solved[0], ox_turbine_pi_t_solved=x_solved[1],
+                fuel_turbine_pi_t_solved=x_solved[2],
+                mdot_fuel_to_ox_preburner_solved=summary.get("mdot_fuel_to_ox_preburner_kg_s"),
+                mdot_ox_to_fuel_preburner_solved=summary.get("mdot_ox_to_fuel_preburner_kg_s"),
+                ox_preburner_pressure_ratio_solved=summary.get("ox_preburner_pressure_ratio", 0.0),
+                fuel_preburner_pressure_ratio_solved=summary.get("fuel_preburner_pressure_ratio", 0.0))
+        summary["solver_warning"] = float(any(layer["enabled"] and layer["status"] != "pass"
+                                               for layer in convergence["layers"].values()))
+        if summary["solver_warning"]:
+            results.warnings.insert(0, "稳态嵌套求解未完全收敛，当前结果仅供诊断；详见分层收敛状态。")
+        elif progress_callback is not None:
+            progress_callback(100, 100, summary["solver_residual_norm"])
         return results
 
     def throttle_sweep(
         self,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         record_callback: Optional[Callable[[dict], None]] = None,
+        *,
+        design_baseline: Optional[dict] = None,
+        include_cooling_marching: bool = True,
+        max_point_evaluations: int = 240,
     ) -> list[dict]:
         """
-        Quasi-steady throttle scan.
-        Scales thrust and pc together, re-solves each operating point with the
-        same cycle assumptions as the design point.
+        Quasi-steady target-thrust scan with fixed main-nozzle throat area.
+        Chamber pressure is iterated to close the throat constraint. An explicit
+        design_baseline reuses saved hardware without recalculating the nominal
+        point. The old postprocessing flag only controls a compatibility view;
+        physical cooling always participates in the cycle evaluation.
         """
         checkpoint()
+        if isinstance(max_point_evaluations, bool) or int(max_point_evaluations) != max_point_evaluations or max_point_evaluations < 1:
+            raise ValueError("每个节流点的循环评价预算必须为正整数。")
+        max_point_evaluations = int(max_point_evaluations)
         steps = max(2, int(getattr(self.inputs, "throttle_steps", 5)))
         throttle_min = self._clamp(float(getattr(self.inputs, "throttle_min", 0.4)), 0.05, 0.99)
         sweep: list[dict] = []
+        warm_seed = None
 
-        # ── V16（对抗校核 critical 修复）：节流 = 真·固定硬件 ─────────────
+        def seed_from_result(result):
+            """Reuse only a complete local physical solution, never failed trials."""
+            from convergence import numerical_convergence
+            closure = getattr(result, "steady_closure", {}) or {}
+            if (numerical_convergence(result)["status"] != "pass"
+                or (closure.get("feed_network") or {}).get("status") != "pass"
+                or (closure.get("energy_balance") or {}).get("status") != "pass"):
+                return None
+            state = copy.deepcopy((result.convergence or {}).get("solution"))
+            if not state:
+                return None
+            targets = None
+            if self._temp_target_mode():
+                targets = {"ox": result.summary["ox_preburner_mr_target"],
+                           "fuel": result.summary["fuel_preburner_mr_target"]}
+            return {"warm_state": state, "preburner_mr_targets": targets,
+                    "thrust_N": float(result.summary.get("thrust_N", result.inputs.thrust)),
+                    "pc_Pa": float(result.summary.get("chamber_pressure_Pa", result.inputs.pc))}
+
+        # Fixed selected geometry and feed resistance; component maps are absent,
+        # so this is not a complete fixed-engine operating-envelope model.
         # 旧版（含 V15.1）每个节流点把"推力"和"室压"双双当目标各乘 ratio，再由
         # evaluate() 反算喉部 At=ṁ·c*/Pc。节流时比冲下降 → ṁ 并不随 Pc 同比例缩小，
         # 导出的 At（喉部金属！）漂移 ~10%（40% 点喉部反而比 100% 点更大），等于
@@ -1594,26 +1950,62 @@ class FFSCCycleModel:
         # 深度。节流只用"推力"一个指令（节流% ≡ 推力%），再反解出令 At 保持 =
         # At_design 的室压 Pc（不动点 Pc←Pc·At_cur/At_design，因 At 对 Pc 单调，
         # 数轮即收敛）。于是 Pc% ≠ 推力%，二者之差即真实节流物理（过膨胀 / 比冲下降）。
-        At_design = None
-        frozen_h_m = None
-        try:
-            _design = FFSCCycleModel(copy.deepcopy(self.inputs)).evaluate()
-            At_design = float(_design.components["nozzle"].outputs.get("At_m2", 0.0)) or None
-            if (bool(getattr(self.inputs, "cooling_channel_auto_size", 1.0))
-                    and bool(getattr(self.inputs, "cooling_bartz_mode", True))):
-                frozen_h_m = float(
-                    _design.components["cooling_channel"].outputs.get("channel_height_mm", 0.0)
-                ) / 1000.0
-        except Exception:
+        # Web studies use an immutable source design. Never silently fall back
+        # to proportional pressure when that explicitly supplied baseline fails.
+        if design_baseline is not None:
+            At_design = float(design_baseline.get("throat_area_m2", 0))
+            if not math.isfinite(At_design) or At_design <= 0:
+                raise ValueError("固定喉部基准面积必须为有限正数。")
+            frozen_h_m = design_baseline.get("cooling_height_m")
+            from steady_network import validate_hardware
+            feed_hardware = validate_hardware(design_baseline.get("feed_hardware"))
+            if design_baseline.get("warm_state") is not None:
+                warm_seed = {"warm_state": copy.deepcopy(design_baseline["warm_state"]),
+                             "preburner_mr_targets": copy.deepcopy(design_baseline.get("preburner_mr_targets")),
+                             "thrust_N": float(design_baseline.get("warm_state_thrust_N",
+                                               design_baseline.get("thrust_N", self.inputs.thrust))),
+                             "pc_Pa": float(design_baseline.get("warm_state_pc_Pa",
+                                            design_baseline.get("pc_Pa", self.inputs.pc)))}
+                if not all(math.isfinite(warm_seed[key]) and warm_seed[key] > 0 for key in ("thrust_N", "pc_Pa")):
+                    raise ValueError("热启动来源推力与室压必须为有限正数。")
+            if frozen_h_m is not None:
+                frozen_h_m = float(frozen_h_m)
+                if not math.isfinite(frozen_h_m) or frozen_h_m <= 1e-4:
+                    raise ValueError("冷却通道冻结高度无效。")
+        else:
             At_design = None
             frozen_h_m = None
+            feed_hardware = None
+            try:
+                _design = FFSCCycleModel(copy.deepcopy(self.inputs)).evaluate(
+                    include_cooling_marching=include_cooling_marching)
+                from convergence import numerical_convergence
+                if (numerical_convergence(_design)["status"] != "pass"
+                    or _design.steady_closure["feed_network"]["status"] != "pass"
+                    or _design.steady_closure["energy_balance"]["status"] != "pass"):
+                    raise ValueError("设计点数值、四支路或能量闭合未通过，不能冻结为节流基准。")
+                feed_hardware = copy.deepcopy(_design.steady_closure["feed_network"]["hardware_snapshot"])
+                warm_seed = seed_from_result(_design)
+                At_design = float(_design.components["nozzle"].outputs.get("At_m2", 0.0)) or None
+                if (bool(getattr(self.inputs, "cooling_channel_auto_size", 1.0))
+                        and bool(getattr(self.inputs, "cooling_bartz_mode", True))):
+                    frozen_h_m = float(
+                        _design.components["cooling_channel"].outputs.get("channel_height_mm", 0.0)
+                    ) / 1000.0
+            except Exception as exc:
+                raise ValueError(f"无法建立经闭合校核的节流基准：{exc}") from exc
+
+        rated_seed = copy.deepcopy(warm_seed)
+
+        class _ThrottleEvaluationBudgetExceeded(BaseException):
+            """Escape all nested retries while retaining cancellation semantics."""
+
+        point_evaluations = 0
 
         def _solve_at(thrust_target: float, pc_val: float):
-            """以给定推力目标 + 室压求解一个工况点，冷却通道深度冻结到设计值。
+            """固定设计喉面积与冷却通道几何，求解一个目标推力/室压工况。
 
-            V19 性能修复：At 反解不动点每工况要跑最多 9 次 evaluate()，中间解全部
-            被丢弃——这里强制关 marching 后处理（V19 marching 站数 ~4×，每次白跑
-            数百站），收敛后在保留的最终解上补跑**一次** postpass（见循环末尾）。
+            每次循环评价均闭合唯一冷却内核；关闭旧兼容视图不省略物理计算。
             """
             pi = copy.deepcopy(self.inputs)
             pi.thrust = thrust_target
@@ -1622,12 +2014,42 @@ class FFSCCycleModel:
             if frozen_h_m is not None and frozen_h_m > 1e-4:
                 pi.cooling_channel_auto_size = 0.0
                 pi.cooling_channel_height_m = frozen_h_m
-            return pi, FFSCCycleModel(pi).evaluate()
+            model = FFSCCycleModel(pi)
+            model._fixed_cooling_throat_area = At_design
+            model._feed_hardware = copy.deepcopy(feed_hardware)
+            state = copy.deepcopy(warm_seed["warm_state"]) if warm_seed else None
+            targets = copy.deepcopy(warm_seed["preburner_mr_targets"]) if warm_seed else None
+            if state is not None:
+                scale = thrust_target / warm_seed["thrust_N"]
+                state["x"][0] *= scale
+                if not model._target_mr_mode():
+                    state["x"][1] *= scale
+                    state["x"][2] *= scale
+            original_evaluate = model._evaluate_once
+            def budgeted_evaluate(*args):
+                nonlocal point_evaluations
+                checkpoint()
+                if point_evaluations >= max_point_evaluations:
+                    raise _ThrottleEvaluationBudgetExceeded(
+                        f"本节流点达到 {max_point_evaluations} 次循环评价预算；保留失败，不继续重复延续或喉部迭代。")
+                point_evaluations += 1
+                return original_evaluate(*args)
+            model._evaluate_once = budgeted_evaluate
+            return pi, model.evaluate(include_cooling_marching=False, warm_state=state,
+                                      preburner_mr_targets=targets)
 
         for i in range(steps):
             checkpoint()
+            point_evaluations = 0
             ratio = throttle_min + (1.0 - throttle_min) * i / max(steps - 1, 1)
             thrust_target = self.inputs.thrust * ratio
+            # An ascending two-point scan can jump from 40% directly to 100%.
+            # A previous complete point is then a worse seed than the immutable
+            # rated source. Compare actual source thrusts, not requested labels.
+            candidates = [seed for seed in (rated_seed, warm_seed) if seed is not None]
+            if candidates:
+                warm_seed = copy.deepcopy(min(candidates,
+                    key=lambda seed: abs(math.log(thrust_target / seed["thrust_N"]))))
 
             if progress_callback is not None:
                 try:
@@ -1636,29 +2058,39 @@ class FFSCCycleModel:
                     pass
 
             try:
-                # 初值：旧的等比例 Pc 作为不动点起点
-                pc = self.inputs.pc * ratio
+                # Keep requested points ascending; use the preceding complete
+                # solution (rated source for the first point) as an explicit seed.
+                pc = (warm_seed["pc_Pa"] * thrust_target / warm_seed["thrust_N"]
+                      if warm_seed else self.inputs.pc * ratio)
                 point_inputs, point_results = _solve_at(thrust_target, pc)
+                current_seed = seed_from_result(point_results)
+                if current_seed is not None:
+                    warm_seed = current_seed
                 # ── 反解 Pc 使喉部 At 钉死在设计值（固定硬件）──
                 if At_design and At_design > 0.0:
                     for _ in range(8):
                         checkpoint()
+                        if current_seed is None:
+                            break  # A failed physical state cannot guide a throat correction.
                         At_cur = float(
                             point_results.components["nozzle"].outputs.get("At_m2", 0.0))
                         if At_cur <= 0.0 or abs(At_cur / At_design - 1.0) < 5e-4:
                             break
                         pc = pc * (At_cur / At_design)
                         point_inputs, point_results = _solve_at(thrust_target, pc)
-                # 最终解补跑一次 marching 后处理（用户开关开启时）——沿程壁温/压降
-                # 剖面与警告只算这一次，节流表/深节流壁温分析仍拿到完整数据
-                if bool(getattr(self.inputs, "cooling_marching_enable", 1.0)):
+                        current_seed = seed_from_result(point_results)
+                        if current_seed is not None:
+                            warm_seed = current_seed
+                # 只复制同一个已求解剖面到历史格式；不执行独立冷却后处理。
+                if include_cooling_marching and bool(getattr(self.inputs, "cooling_marching_enable", 1.0)):
                     try:
                         from cooling_marching import run_marching_postpass
                         run_marching_postpass(point_results, point_inputs)
                     except Exception:
                         pass
                 residual = float(point_results.summary.get("solver_residual_norm", 1.0))
-                converged = residual < 1e-3 and not bool(point_results.summary.get("solver_warning", 0.0))
+                from convergence import numerical_convergence
+                converged = numerical_convergence(point_results)["status"] == "pass"
                 sweep.append({
                     "throttle_ratio": ratio,
                     "thrust_target_N": thrust_target,
@@ -1666,8 +2098,10 @@ class FFSCCycleModel:
                     "converged": converged,
                     "results": point_results,
                     "error": "",
+                    "cycle_evaluations": point_evaluations,
+                    "cycle_evaluation_budget": max_point_evaluations,
                 })
-            except Exception as exc:
+            except (Exception, _ThrottleEvaluationBudgetExceeded) as exc:
                 sweep.append({
                     "throttle_ratio": ratio,
                     "thrust_target_N": thrust_target,
@@ -1675,6 +2109,8 @@ class FFSCCycleModel:
                     "converged": False,
                     "results": None,
                     "error": str(exc),
+                    "cycle_evaluations": point_evaluations,
+                    "cycle_evaluation_budget": max_point_evaluations,
                 })
 
             if record_callback is not None:

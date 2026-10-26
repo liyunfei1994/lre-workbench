@@ -476,11 +476,17 @@ class WorkbenchWindow(CfdIntegrationMixin, CaseSafetyMixin, legacy.MainWindow):
         """
         for combo in self.findChildren(QComboBox):
             view = combo.view()
-            if view.objectName() == "ComboPopup":
+            # Keep the wrapper alive as well as letting Qt own the native view.
+            # A malformed/retired wrapper must not receive QObject methods.
+            if not hasattr(self, "_combo_popup_views"):
+                self._combo_popup_views = {}
+            if isinstance(view, QListView) and isValid(view) and view.objectName() == "ComboPopup":
+                self._combo_popup_views[combo] = view
                 continue
             view = QListView(combo)
             view.setObjectName("ComboPopup")
             combo.setView(view)
+            self._combo_popup_views[combo] = view
             palette = view.palette()
             for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
                 palette.setColor(group, QPalette.Base, QColor("#ffffff"))
@@ -823,7 +829,6 @@ class WorkbenchWindow(CfdIntegrationMixin, CaseSafetyMixin, legacy.MainWindow):
         s = results.summary
         residual = float(s.get("solver_residual_norm", 1.0))
         count = len(results.warnings or [])
-        failed = bool(s.get("solver_warning", 0)) or residual >= 1e-3
         frame = QFrame()
         frame.setObjectName("StatusStrip")
         layout = QHBoxLayout(frame)
@@ -1064,7 +1069,7 @@ class WorkbenchWindow(CfdIntegrationMixin, CaseSafetyMixin, legacy.MainWindow):
         else:
             s = self.last_results.summary
             residual = float(s.get("solver_residual_norm", 1.0))
-            if s.get("solver_warning", 0) or residual >= 1e-3:
+            if assess_engineering(self.last_results)["numerical"]["status"] != "pass":
                 self._set_banner("本次未完全收敛，结果仅用于诊断。请查看日志与警告。" + mode, "error")
             else:
                 assessment = assess_engineering(self.last_results)
@@ -1348,6 +1353,9 @@ class WorkbenchWindow(CfdIntegrationMixin, CaseSafetyMixin, legacy.MainWindow):
             raise ValueError("未知参数：" + ", ".join(sorted(unknown)))
         values = asdict(EngineInputs())
         values.update(document["inputs"])
+        if document.get("format") == "ffsc.workbench.case":
+            from thermo_data import saved_input_identity
+            values.update(saved_input_identity(document["inputs"]))
         # Reject non-finite values even for fields not currently shown in the UI.
         for key, value in values.items():
             if isinstance(value, (int, float)) and not math.isfinite(value):

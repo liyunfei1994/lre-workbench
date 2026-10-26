@@ -1,5 +1,6 @@
 """Cancellation must preserve finished rows and never invent failed physics rows."""
 import os
+from dataclasses import asdict
 from pathlib import Path
 import sys
 import time
@@ -112,17 +113,19 @@ class CancellationTests(unittest.TestCase):
                 self.assertEqual(residual.call_count, 1)
 
     def test_throttle_models_preserve_one_completed_record_on_cancel(self):
+        from web_tests.test_throttle_analysis import solved_fixture
         for model_class in (FFSCCycleModel, GGCycleModel):
             with self.subTest(model=model_class.__name__):
                 inputs = EngineInputs()
                 inputs.cooling_marching_enable = 0
                 inputs.cooling_channel_auto_size = 0
+                inputs.cooling_bartz_mode = 0  # Analytic fixture is an explicit heat budget.
                 inputs.throttle_steps = 3
                 token, records = CancellationToken(), []
                 def on_record(record):
                     records.append(record)
                     token.cancel()
-                with patch.object(model_class, "evaluate", return_value=fake_result()):
+                with patch.object(model_class, "evaluate", return_value=solved_fixture(asdict(inputs))):
                     with cancellation_scope(token):
                         with self.assertRaises(TaskCancelled):
                             model_class(inputs).throttle_sweep(record_callback=on_record)

@@ -11,19 +11,20 @@ chamber_design.py — 推力室部件级详细设计的数据模型与计算引�
      N 分段常数（断点即分叉/合并站，对标 Raptor/RS-25 HARCC 变截面策略），
      w/h/t 分段线性。序列化为 JSON 存 EngineInputs.cooling_channel_table_json，
      随导出 JSON 一起持久化。
-  3. 边界条件快照（BoundarySnapshot）：从收敛循环解冻结推力室边界——这是
-     「双层循环显式握手」的下半环：系统级解出边界 → 部件级在冻结边界上快速
-     迭代（marching_preview，不进 Newton）→ 设计定型后回写（Δp/几何）重跑设计点。
+  3. 边界条件快照（BoundarySnapshot）：记录当前循环解和输入指纹。
+     冷却沿程直接读取 cooling_channel.profile；修改通道、换热或损失参数后，
+     必须重算完整循环，不能只回写压降或另行计算一套沿程结果。
   4. 可行性校核与记分卡（compute_scorecard）：区域 × 判据的裕度矩阵。
 
-依赖方向：本模块只被 cooling_marching（惰性 import resolve）与 GUI 调用；
-本模块对 cooling_marching 的调用（marching_preview）也走惰性 import，无循环依赖。
+依赖方向：本模块提供通道分布与保存结果读取接口，不调用独立冷却后处理求解器。
 """
 
 from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
+from collections.abc import Mapping
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -288,7 +289,7 @@ class BoundarySnapshot:
     # 冷却剂（CH4 全流量）
     coolant_in_T_K: float = 0.0
     coolant_in_p_Pa: float = 0.0
-    coolant_out_T_K: float = 0.0     # 单点模型出口（对照）
+    coolant_out_T_K: float = 0.0     # 本次循环采用的冷却出口
     coolant_out_p_Pa: float = 0.0
     # 主喷注器入口（两股涡轮排气）
     inj_ox_T_K: float = 0.0
@@ -313,6 +314,7 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
     """从 CycleResults 提取边界快照；数据不足返回 None。"""
     if results is None:
         return None
+    from convergence import numerical_convergence
     try:
         s = results.summary
         comps = results.components
@@ -328,7 +330,7 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
         from datetime import datetime
         snap = BoundarySnapshot(
             solved_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            converged=float(s.get("solver_residual_norm", 1.0)) < 1e-3,
+            converged=numerical_convergence(results)["status"] == "pass",
             pc_Pa=float(results.inputs.pc),
             T_c_K=float(s.get("chamber_temperature_K", 0.0) or 0.0),
             gamma=float(s.get("chamber_gamma", 1.19) or 1.19),
@@ -372,29 +374,22 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
 def snapshot_stale_fields(snap: BoundarySnapshot, current_inputs) -> List[str]:
     """快照过期检查：当前输入与快照指纹不一致的字段名（空 = 快照仍然有效）。
 
-    只比较**影响循环解/推力室边界**的字段——通道分布表/膜冷却/辐射发射率等
-    marching 后处理参数不会改变冻结边界本身，改了它们照样可以「冻结边界重算沿程」。
+    冷却几何、粗糙度、换热及边界输入均属于当前循环记录。任何输入改变后，
+    保存结果仍可只读查看，但不能宣称与修改后的设计状态一致。
     """
-    POST_ONLY = {
-        "cooling_channel_table_json", "film_cooling_fraction",
-        "film_effectiveness_initial", "film_decay_length_m",
-        "cooling_gas_emissivity", "cooling_wall_temp_limit_K",
-        "cooling_marching_enable", "cooling_cover_eps",
-        "cooling_htc_enhancement", "cooling_channel_rel_roughness",
-        "cooling_channel_k_minor",
-    }
     fp = snap.inputs_fingerprint or {}
     if not fp:
-        return []
+        return ["__missing_input_fingerprint__"]
     stale: List[str] = []
     try:
-        cur = asdict(current_inputs)
+        cur = dict(current_inputs) if isinstance(current_inputs, Mapping) else asdict(current_inputs)
     except Exception:
-        return []
-    for k, v_old in fp.items():
-        if k in POST_ONLY:
+        return ["__invalid_current_inputs__"]
+    for k in sorted(set(fp) | set(cur)):
+        if k not in fp or k not in cur:
+            stale.append(k)
             continue
-        v_new = cur.get(k, v_old)
+        v_old, v_new = fp[k], cur[k]
         try:
             same = (abs(float(v_new) - float(v_old)) <=
                     1e-9 * max(abs(float(v_old)), 1.0))
@@ -406,46 +401,32 @@ def snapshot_stale_fields(snap: BoundarySnapshot, current_inputs) -> List[str]:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 4. 冻结边界的 marching 预览（不进 Newton、不改动主结果）
+# 4. 当前循环冷却结果的只读展示接口
 # ════════════════════════════════════════════════════════════════════
 
-class _ResultsShell:
-    """run_marching_postpass 需要的最小 CycleResults 外壳（浅拷贝容器，
-    使 postpass 写入不污染真正的 last_results）。"""
-
-    def __init__(self, base):
-        self.inputs = base.inputs
-        self.summary = dict(base.summary)
-        self.states = base.states
-        self.components = dict(base.components)
-        self.warnings: List[str] = []
+def saved_cooling_result(base_results) -> Dict[str, Any]:
+    """Copy the profile actually used by the cycle; never rerun heat/hydraulics."""
+    comp = getattr(base_results, "components", {}).get("cooling_channel")
+    profile = getattr(comp, "profile", None) if comp is not None else None
+    if (not isinstance(profile, dict) or profile.get("model_id") != "regen_quasi1d_ph_v1"
+            or profile.get("version") != 1 or len(profile.get("nodes") or []) < 2
+            or not profile.get("cells")):
+        raise ValueError("当前记录没有统一冷却沿程解；请按当前输入重算完整循环，不能从预算或历史后处理生成替代曲线。")
+    return {"component": deepcopy(comp), "profile": deepcopy(profile),
+            "warnings": list(profile.get("validity", {}).get("warnings", [])),
+            "summary_delta": {}, "source": "saved_cycle_cooling_profile"}
 
 
 def marching_preview(base_results, inputs) -> Dict[str, Any]:
-    """在冻结边界（base_results 的收敛解）上用**新的推力室参数** inputs 重算
-    沿程 marching。返回 {"component", "profile", "warnings", "summary_delta"}；
-    不修改 base_results。
-
-    这是双层循环握手的部件级内环：改通道分布/膜冷却/材料 → 秒级看新剖面，
-    不用重解 Newton。注意：冷却剂入口态/热力参数仍取冻结解——若新设计的
-    Δp/吸热与单点模型差异大，应「回写循环重跑设计点」闭合。
-    """
-    from cooling_marching import run_marching_postpass
-    shell = _ResultsShell(base_results)
-    run_marching_postpass(shell, inputs)
-    comp = shell.components.get("cooling_marching")
-    profile = getattr(comp, "profile", None) if comp is not None else None
-    delta: Dict[str, float] = {}
-    if comp is not None:
-        base_cm = base_results.components.get("cooling_marching")
-        if base_cm is not None:
-            for k in ("Q_total_MW", "delta_P_MPa", "T_coolant_out_K",
-                      "T_wall_hot_max_K", "T_wall_cold_max_K", "V_coolant_max_ms"):
-                v_new = float(comp.outputs.get(k, 0.0) or 0.0)
-                v_old = float(base_cm.outputs.get(k, 0.0) or 0.0)
-                delta[k] = v_new - v_old
-    return {"component": comp, "profile": profile,
-            "warnings": shell.warnings, "summary_delta": delta}
+    """Compatibility entry point: read-only saved profile, never marching again."""
+    saved_inputs = getattr(base_results, "inputs", None)
+    try:
+        snap = BoundarySnapshot(inputs_fingerprint=asdict(saved_inputs))
+    except (TypeError, ValueError):
+        raise ValueError("当前记录缺少输入指纹；请重算完整循环。")
+    if snapshot_stale_fields(snap, inputs):
+        raise ValueError("参数已修改：必须重算完整循环；不能只重算冷却沿程或回写压降。")
+    return saved_cooling_result(base_results)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -455,7 +436,7 @@ def marching_preview(base_results, inputs) -> Dict[str, Any]:
 def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
     """区域 × 判据的裕度记分卡。
 
-    wf：thermal_structural.WallField（domain="full"，marching 剖面来源）。
+    wf：thermal_structural.WallField（domain="full"，保存的冷却剖面来源）。
     返回行列表：{zone, zone_label, criterion, value, limit, margin_text, status}。
     status ∈ ok / warn / fail / na。
     """
@@ -551,23 +532,19 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
                                rib_min >= RIB_MIN_HARD_MM * 1e-3)))
 
     # 全程判据（不分区）
-    if wf.p_coolant:
-        p_in = max(wf.p_coolant)
-        dp = p_in - min(wf.p_coolant)
+    cool = results.components.get("cooling_channel") if results is not None else None
+    profile = getattr(cool, "profile", {}) or {}
+    recorded = profile.get("summary", {})
+    nodes = profile.get("nodes") or []
+    dp = recorded.get("dp_total_Pa")
+    p_in = nodes[0].get("p_Pa") if nodes else None
+    if isinstance(dp, (int, float)) and math.isfinite(dp) and isinstance(p_in, (int, float)) and math.isfinite(p_in):
         rows.append(dict(
             zone="global", zone_label="全程", criterion="冷却回路压降 Δp",
             value=f"{dp/1e6:.1f} MPa（入口 {p_in/1e6:.0f} MPa）",
-            limit="≤ 0.45×入口压",
-            margin_text=f"{(0.45*p_in - dp)/1e6:+.1f} MPa",
-            status=_st(dp <= 0.45 * p_in, dp <= 0.60 * p_in)))
-    dp_cycle = float(s.get("cooling_dp_MPa", 0.0) or 0.0)
-    dp_march = float(s.get("cooling_marching_dp_MPa", 0.0) or 0.0)
-    if dp_cycle > 0:
-        mismatch = abs(dp_march - dp_cycle)
-        rows.append(dict(
-            zone="global", zone_label="全程", criterion="双层握手：Δp 口径一致性",
-            value=f"marching {dp_march:.1f} vs 循环预算 {dp_cycle:.1f} MPa",
-            limit="偏差 ≤ 30%",
-            margin_text=f"{mismatch:.1f} MPa（{100.0*mismatch/max(dp_cycle,1e-9):.0f}%）",
-            status=_st(mismatch <= 0.30 * dp_cycle, mismatch <= 0.60 * dp_cycle)))
+            limit="保存的入口端口压力 − 出口端口压力",
+            margin_text="不是 max(p)−min(p)；不以任意入口压比例判可行", status="na"))
+    else:
+        rows.append(dict(zone="global", zone_label="全程", criterion="冷却回路压降 Δp",
+                         value="未保存统一冷却端口压降", limit="需重算完整循环", margin_text="—", status="na"))
     return rows
