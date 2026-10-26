@@ -1,0 +1,56 @@
+/* Read-only physical closure evidence, scoped independently of solver diagnostics. */
+.steady-closure-workspace { display:flex; flex-direction:column; gap:14px; min-width:0; padding:16px; color:#304c60; container-type:inline-size; }
+.sc-heading { padding-bottom:12px; border-bottom:1px solid #dbe3ea; }
+.sc-kicker { font:600 10px/1.6 Consolas,monospace; letter-spacing:1.4px; color:#73899a; }
+.steady-closure-workspace .sc-heading h2 { margin:4px 0 7px; font-size:16px; }
+.sc-heading p,.sc-description,.sc-section-heading p,.sc-scope { margin:0; color:#6d7f8d; font-size:11px; line-height:1.8; }
+.sc-scope { color:#687e8c; }
+.sc-section-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin:0 0 12px; }
+.sc-section-heading h3 { margin:0 0 5px; font-size:13px; }
+.sc-network,.sc-energy,.sc-pressure-contract { min-width:0; border:1px solid #d7e1e9; background:#fff; padding:14px; }
+.sc-pressure-contract h4 { margin:16px 0 8px; font-size:12px; font-weight:600; }
+.sc-pressure-contract>.sc-description { margin-bottom:10px; }
+.sc-pressure-contract>.sc-notice { margin-top:10px; }
+.sc-pressure-status { display:flex; flex-wrap:wrap; gap:6px; }
+.sc-badge { display:inline-block; padding:3px 8px; border:1px solid #d6c8ab; background:#faf6ed; color:#846c43; white-space:nowrap; font:400 11px/1.5 "Microsoft YaHei",sans-serif; }
+.sc-pass { color:#35735e; border-color:#bdd7ca; background:#edf6f1; }
+.sc-fail { color:#a05045; border-color:#dfc0b9; background:#fcf2ef; }
+.sc-metrics { display:flex; flex-wrap:wrap; gap:14px 36px; padding:12px 0; }
+.sc-metrics>div { display:flex; flex-direction:column; gap:5px; }
+.sc-metrics span { font-size:11px; color:#738896; }
+.sc-metrics strong { color:#365b72; font:600 17px/1.5 Consolas,"Microsoft YaHei",monospace; }
+.sc-metrics small { color:#8194a1; font-size:11px; font-weight:400; }
+.sc-table-wrap { max-width:100%; overflow:auto; border:1px solid #dbe4eb; }
+.sc-table-wrap table { width:100%; border-collapse:collapse; background:#fff; font-size:11px; }
+.sc-table-wrap th,.sc-table-wrap td { text-align:right; white-space:nowrap; padding:9px 10px; border-bottom:1px solid #e6ebf0; font-variant-numeric:tabular-nums; }
+.sc-table-wrap th { color:#5b778b; background:#edf3f7; }
+.sc-table-wrap td { font-family:Consolas,"Microsoft YaHei",monospace; }
+.sc-temperature-location { display:block; margin-top:4px; color:#78909e; font-size:10px; font-weight:400; }
+.sc-table-wrap th:first-child,.sc-table-wrap td:first-child { text-align:left; }
+.sc-table-wrap tbody tr:nth-child(even) { background:#fafcfd; }
+.sc-table-wrap tbody tr:last-child td { border-bottom:0; }
+.sc-network>.sc-table-wrap th:nth-child(2),.sc-network>.sc-table-wrap th:nth-child(3),.sc-network>.sc-table-wrap td:nth-child(2),.sc-network>.sc-table-wrap td:nth-child(3) { text-align:left; }
+.sc-source-table { margin-top:12px; }
+.sc-source-table th,.sc-source-table td { text-align:left; white-space:normal; overflow-wrap:anywhere; }
+.sc-source-table td:first-child { width:30%; }
+.sc-pressure-contract .sc-source-table th:nth-child(2),.sc-pressure-contract .sc-source-table td:nth-child(2),
+.sc-pressure-contract .sc-source-table th:nth-child(3),.sc-pressure-contract .sc-source-table td:nth-child(3) { white-space:nowrap; overflow-wrap:normal; }
+.sc-pressure-contract .sc-source-table td:first-child { width:26%; }
+.sc-energy>.sc-description { margin-top:10px; }
+.sc-diagnostics { border-top:1px solid #dfe7ed; margin-top:10px; padding-top:4px; }
+.sc-diagnostics summary,.sc-assumptions summary { cursor:pointer; color:#54758d; font-size:11px; padding:8px 0; line-height:1.7; }
+.sc-diagnostics .sc-description { margin:0 0 12px; }
+.steady-closure-workspace summary:focus-visible { outline:2px solid #4d83a8; outline-offset:3px; }
+.sc-basis { margin:0; display:grid; gap:7px; font-size:11px; line-height:1.8; }
+.sc-basis>div { display:grid; grid-template-columns:86px minmax(0,1fr); gap:8px; }
+.sc-basis dt { color:#78909e; }
+.sc-basis dd { margin:0; color:#486576; overflow-wrap:anywhere; }
+.sc-notice,.sc-empty { margin:0; padding:12px 14px; border-left:3px solid #b49c70; background:#fcf8f0; color:#816c49; font-size:11px; line-height:1.8; }
+.sc-empty { border-color:#a5b9c8; background:#f3f6f9; color:#6f8392; }
+.sc-energy .sc-notice { margin-top:12px; }
+.sc-notice strong { font-weight:500; }
+.sc-notice ul,.sc-assumptions ul { margin:6px 0 0; padding-left:20px; font-size:11px; line-height:1.9; }
+.sc-assumptions { padding:0 12px 6px; border:1px solid #dfe7ed; background:#f8fafc; }
+.sc-assumptions ul { color:#697f8e; }
+@container (max-width:650px) { .sc-network,.sc-energy,.sc-pressure-contract { padding:10px; } .sc-basis>div { grid-template-columns:1fr; gap:0; } .sc-metrics { gap:12px 22px; } }
+@media print { .sc-table-wrap { overflow:visible; } .sc-diagnostics { break-inside:avoid; } }

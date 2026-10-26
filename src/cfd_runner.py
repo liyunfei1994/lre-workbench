@@ -338,9 +338,25 @@ class CfdProcessRunner(QObject):
         process.kill()
 
     def _tree_stop_done(self, helper, process):
+        # Timeout, error and finished can all arrive for the same helper.
+        if getattr(helper, "_tree_stop_handled", False):
+            return
+        helper._tree_stop_handled = True
         helper._deadline.stop()
-        if helper.state() != QProcess.NotRunning:
+        timed_out = helper.state() != QProcess.NotRunning
+        if timed_out:
             helper.kill()
+        if timed_out or helper.exitCode() != 0 or helper.error() == QProcess.FailedToStart:
+            encoding = "utf-8"
+            if os.name == "nt":
+                import ctypes
+                encoding = f"cp{ctypes.WinDLL('kernel32').GetOEMCP()}"
+            diagnostic = bytes(helper.readAllStandardError()).decode(encoding, errors="replace").strip()
+            reason = "等待超时" if timed_out else f"退出码 {helper.exitCode()}"
+            if diagnostic:
+                reason += "; " + diagnostic[:2048]
+            self._diagnostic("warning", "Windows 进程树停止未获确认（" + reason +
+                             "）；仅尝试终止本次启动的适配器主进程，子进程可能仍在运行。")
         if process.state() != QProcess.NotRunning:
             process.kill()
         handle = getattr(helper, "_owned_root_handle", None)

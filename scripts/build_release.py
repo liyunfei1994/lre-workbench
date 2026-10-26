@@ -16,13 +16,14 @@ from version import APP_FOLDER_NAME, APP_VERSION
 def build_release(destination: Path):
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_files = []
-    for directory in ["src", "assets", "scripts", "tests", ".github"]:
+    for directory in ["src", "assets", "scripts", "tests", "webapp", "web_tests", ".github"]:
         source_files.extend(path for path in (ROOT / directory).rglob("*")
                             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc")
     source_files.extend(ROOT / name for name in ["run_app.py", "requirements.txt", "requirements-science.txt",
                         "constraints.txt", ".python-version", ".gitignore", ".gitattributes",
                         "start_windows.bat", "start_windows.vbs", "setup_windows.bat", "diagnose_windows.bat",
-                        "README.md", "CHANGELOG.md", "CONTRIBUTING.md"])
+                        "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "requirements-web.txt",
+                        "start_web_windows.bat", "setup_web_windows.bat", "stop_web_windows.bat"])
     source_files.extend((ROOT / "docs").glob("*.md"))
     manifest = {"app_version": APP_VERSION, "created_at": datetime.now(timezone.utc).isoformat(),
                 "sha256": {}, "commit": None, "working_tree_changed": None}

@@ -1,0 +1,163 @@
+// Presentation rules never migrate stored EngineInputs. Only an explicit mode
+// change writes the two legacy flags, keeping drafts, imports and undo lossless.
+const escape = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+export const PREBURNER_MODE_KEY = "preburner_design_mode";
+
+export function savedInputDocument(value) {
+  // Recognized desktop files and previous web exports have snapshot identity.
+  // A bare object or an arbitrary {inputs: ...} parameter patch does not.
+  return Boolean(value && typeof value === "object" && value.inputs &&
+    ((["ffsc.workbench.case", "lre.workbench.inputs"].includes(value.format) && value.schema_version === 1) ||
+      (!value.format && typeof value.project_name === "string" && Number.isInteger(value.base_revision) &&
+        value.base_revision > 0 && typeof value.unsaved === "boolean")));
+}
+
+export function mergeInputDefaults(defaults, inputs, savedSnapshot = false) {
+  const result = {...defaults, ...inputs};
+  if (savedSnapshot && Object.hasOwn(defaults, "methane_thermo_dataset") && !Object.hasOwn(inputs, "methane_thermo_dataset")) result.methane_thermo_dataset = "gri30";
+  if(Object.hasOwn(defaults,"wall_thermal_dataset_id") && !Object.hasOwn(inputs,"wall_thermal_dataset_id") &&
+      (savedSnapshot || Object.hasOwn(inputs,"chamber_inner_wall_material"))) {
+    const supported={grcop84:"grcop84_ellis2000_extruded_high_fe_v1",cuzr:"cuzr_qi2024_heat_treated_v1"};
+    result.wall_thermal_dataset_id=supported[inputs.chamber_inner_wall_material || defaults.chamber_inner_wall_material] || "";
+  }
+  return result;
+}
+const ROLE_LABELS = {
+  design_input:"设计输入", boundary:"边界条件", model_assumption:"模型假设",
+  constraint:"约束", initial_guess:"迭代初值", component_sizing:"部件选型",
+  solver_setting:"求解设置", legacy:"历史兼容", result:"计算结果",
+};
+
+export function preburnerMode(inputs) {
+  if (Number(inputs.use_target_preburner_temp ?? 1) >= .5) return "temperature";
+  if (Number(inputs.use_target_preburner_mr ?? 1) >= .5) return "mixture_ratio";
+  return "legacy_free_split";
+}
+
+export function selectPreburnerMode(inputs, mode) {
+  if (!["temperature", "mixture_ratio"].includes(mode)) throw new Error("请选择指定预燃室温度或指定预燃室混合比。");
+  return {...inputs, use_target_preburner_temp:mode === "temperature" ? 1 : 0,
+    use_target_preburner_mr:1};
+}
+
+export function parameterCompatible(item, inputs) {
+  return (!item.cycles || item.cycles.includes(inputs.cycle_type)) &&
+    (!item.propellants || item.propellants.includes(inputs.propellant_pair || "lox_methane"));
+}
+
+function conditionMatches(condition, inputs) {
+  const actual = inputs[condition.key];
+  if (condition.op === "eq") return actual === condition.value;
+  if (condition.op === "gt") return typeof actual === "number" && actual > condition.value;
+  if (condition.op === "lte") return typeof actual === "number" && actual <= condition.value;
+  return false;
+}
+
+export function parameterVisible(field, inputs) {
+  if (field.hidden || !parameterCompatible(field, inputs)) return false;
+  const rules = field.visibility;
+  if (!rules) return true;
+  if (rules.preburner_modes && !rules.preburner_modes.includes(preburnerMode(inputs))) return false;
+  if (rules.all && !rules.all.every(condition => conditionMatches(condition, inputs))) return false;
+  if (rules.any && !rules.any.some(condition => conditionMatches(condition, inputs))) return false;
+  return true;
+}
+
+export function parameterPresentation(field, inputs) {
+  const mode = preburnerMode(inputs), override = field.roles_by_mode?.[mode];
+  const role = typeof override === "string" ? override : override?.role || field.role;
+  const label = field.labels_by_mode?.[mode] || field.label;
+  const roleLabel = (typeof override === "object" && override?.role_label) ||
+    (override ? ROLE_LABELS[role] : field.role_label) || ROLE_LABELS[role] || "";
+  return {...field, role, role_label:roleLabel, label,
+    help:field.help_by_mode?.[mode] || field.help || field.tooltip || ""};
+}
+
+export function parameterValue(field, inputs) {
+  if (field.key === PREBURNER_MODE_KEY && field.virtual) return preburnerMode(inputs);
+  const value = inputs[field.key];
+  return value == null ? "" : typeof value === "number" ? Number((value * (field.factor || 1)).toPrecision(12)) : value;
+}
+
+export function parameterLayoutDependency(key, groups) {
+  return [PREBURNER_MODE_KEY, "cycle_type", "propellant_pair", "wall_thermal_dataset_id", "wall_manufacturing_state"].includes(key) || groups.some(group => group.fields.some(field =>
+    [...(field.visibility?.all || []), ...(field.visibility?.any || [])].some(condition => condition.key === key)));
+}
+
+function renderWallDatasetInfo(field, inputs) {
+  if(field.key!=="wall_thermal_dataset_id" || !Array.isArray(field.dataset_catalog))return "";
+  const dataset=field.dataset_catalog.find(item=>item.dataset_id===inputs.wall_thermal_dataset_id);
+  if(!dataset)return '<p class="field-help">当前数据集未识别；不会自动换成另一种材料。</p>';
+  const state=inputs.wall_manufacturing_state || "unspecified";
+  const manufacturing=dataset.manufacturing_state || {},expected=manufacturing.state_id;
+  const match=state==="unspecified" ? "方案制造状态未确认" : state===expected ? "方案制造状态与数据匹配" : "方案制造状态与数据不匹配";
+  const conductivity=dataset.conductivity_property || {};
+  const range=conductivity.range_K;
+  const rangeText=Array.isArray(range) && range.length===2 && range.every(Number.isFinite) ? `${range[0]}–${range[1]} K` : "未登记";
+  const source=dataset.sources?.[0] || {};
+  const sourceLabel=source.title || dataset.source_title || "未登记";
+  const url=source.url || dataset.source_url || "";
+  const sourceHtml=/^https:\/\//i.test(url) ? `<a href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(sourceLabel)}</a>` : escape(sourceLabel);
+  return `<p class="field-help wall-dataset-summary">导热率数据温区：${escape(rangeText)}。${escape(match)}。稳态计算使用 k(T)。</p><details class="wall-dataset-evidence"><summary>数据来源与制造状态</summary><p class="fine">${escape(manufacturing.label || "制造状态未登记")}</p><p class="fine">${sourceHtml}</p><p class="fine">数据版本：${escape(dataset.dataset_id)}。比热与密度的登记状态见计算记录；登记并不代表已启用壁体储热瞬态。数据温区不是材料允许使用温度。</p></details>`;
+}
+
+export function parameterSearchText(field, inputs, groupTitle = "") {
+  const view = parameterPresentation(field, inputs);
+  return [view.label, view.full_label, view.key, view.unit, view.role_label, view.help,
+    view.provenance?.label, view.provenance?.detail, groupTitle].join(" ").toLocaleLowerCase();
+}
+
+export function renderParameterField(field, inputs) {
+  const view = parameterPresentation(field, inputs), value = parameterValue(view, inputs);
+  const virtualMode = view.virtual && view.key === PREBURNER_MODE_KEY;
+  const legacy = virtualMode && value === "legacy_free_split";
+  const helpId = `parameter-help-${view.key}`;
+  const help = view.help ? `<span class="field-help" id="${escape(helpId)}">${escape(view.help)}</span>` : "";
+  const evidence = view.provenance?.label ? `<span class="field-provenance" title="${escape(view.provenance.detail || view.provenance.label)}">依据：${escape(view.provenance.label)}</span>` : "";
+  const options = view.choices || [];
+  const control = view.choices ? `<select data-input="${escape(view.key)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>` +
+    (legacy ? '<option value="legacy_free_split" selected disabled>历史模式：自由分流（保留）</option>' :
+      options.some(choice => String(value) === String(choice.value)) ? "" : `<option value="" disabled selected>${escape(value==="" && view.empty_choice_label ? view.empty_choice_label : `无效值：${value}`)}</option>`) +
+    options.map(choice => `<option value="${escape(choice.value)}"${String(value) === String(choice.value) ? " selected" : ""}>${escape(choice.label)}</option>`).join("") + "</select>" :
+    view.multiline ? `<textarea rows="5" data-input="${escape(view.key)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>${escape(value)}</textarea>` :
+    `<input type="${typeof view.default === "number" ? "number" : "text"}"${typeof view.default === "number" ? ' step="any" required' : ""} data-input="${escape(view.key)}" value="${escape(value)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>`;
+  return `<label data-field="${escape(view.key)}" data-role="${escape(view.role || "")}" title="${escape(view.full_label || view.label)}"><span class="parameter-label">${escape(view.label)}${view.unit ? ` <span class="unit">[${escape(view.unit)}]</span>` : ""}</span>${view.role_label ? `<span class="parameter-role">${escape(view.role_label)}</span>` : ""}${control}${help}${evidence}${legacy ? '<span class="parameter-legacy-note" role="note">当前方案保留旧版自由分流模式与参数。选择指定温度或指定混合比后才转换；加载时不会自动转换。</span>' : ""}</label>${renderWallDatasetInfo(view,inputs)}`;
+}
+
+export function parameterGroups(groups, inputs) {
+  return groups.filter(group => parameterCompatible(group, inputs)).map(group => ({...group,
+    fields:group.fields.filter(field => parameterVisible(field, inputs)),
+  })).filter(group => group.fields.length);
+}
+
+export function renderParameterGroups(groups, inputs, expanded = new Set()) {
+  return groups.map(group => {
+    const standard = [], seeds = [], numeric = [];
+    for (const field of group.fields) {
+      (parameterPresentation(field, inputs).role === "initial_guess" ? seeds : field.advanced ? numeric : standard).push(field);
+    }
+    const advanced = seeds.length ? `<details class="parameter-initials" data-initials="${escape(group.id)}"${expanded.has(group.id) ? " open" : ""}><summary>高级设置 · 迭代初值（${seeds.length}）</summary><p class="fine">初值用于启动求解。相同物理解分支充分收敛后，结果应在容差范围内一致。</p>${seeds.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
+    const numericKey = group.id + "-numerics";
+    const numericOnly=numeric.every(field=>field.role==="solver_setting");
+    const advancedTitle=group.advanced_title || (numericOnly ? "数值分辨率" : "补充设置");
+    const advancedHelp=group.advanced_help || (numericOnly ? "分辨率影响离散误差；应比较网格加密结果，不能用作性能调参。" : "这些输入参与模型配置；完整方案与计算记录保留实际取值。");
+    const numerics = numeric.length ? `<details class="parameter-initials" data-initials="${escape(numericKey)}"${expanded.has(numericKey) ? " open" : ""}><summary>高级设置 · ${escape(advancedTitle)}（${numeric.length}）</summary><p class="fine">${escape(advancedHelp)}</p>${numeric.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
+    const contexts=Array.isArray(group.configuration_context) ? group.configuration_context : group.configuration_context ? [group.configuration_context] : [];
+    const contextText=contexts.map(context=>`<p class="fine wall-configuration-context">${escape(context.label)}：${escape(context.labels?.[inputs[context.key]] || inputs[context.key] || "未指定")}。${escape(context.note)}</p>`).join("");
+    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.description ? `<p class="fine">${escape(group.description)}</p>` : ""}${standard.map(field => renderParameterField(field, inputs)).join("")}${contextText}${advanced}${numerics}</fieldset>`;
+  }).join("");
+}
+
+export function renderParameterEvidence(evidence, fields = []) {
+  if (!Array.isArray(evidence) || !evidence.length) return "";
+  const names = {published:"厂商公开值",engineering_assumption:"工程假设",numerical_initial_guess:"数值初值"};
+  const rows = evidence.map(item => {
+    const field = fields.find(candidate => candidate.key === item.name);
+    const value = typeof item.value_si === "number" && Number.isFinite(item.value_si) ?
+      (item.value_si * (field?.factor || 1)).toLocaleString("zh-CN",{maximumSignificantDigits:10}) : "—";
+    const source = /^https:\/\//i.test(item.source_url || "") ? `<a href="${escape(item.source_url)}" target="_blank" rel="noopener noreferrer">原始来源</a>` : "";
+    const dates = [item.source_date ? `发布 ${item.source_date}` : "", item.checked_on ? `核对 ${item.checked_on}` : ""].filter(Boolean).join(" · ");
+    return `<tr><td>${escape(field?.label || item.name)}</td><td>${escape(value)}${field?.unit ? ` ${escape(field.unit)}` : ""}</td><td>${escape(names[item.classification] || "待核实")}${source ? `<br>${source}` : ""}${dates ? `<small class="field-provenance">${escape(dates)}</small>` : ""}</td><td>${escape(item.note || "")}</td></tr>`;
+  }).join("");
+  return `<details class="reference-evidence"><summary>默认示例参数依据（${evidence.length}）</summary><p class="fine">以下依据对应可加载的示例；当前方案经过修改的值以保存的输入为准。</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>示例值</th><th>性质与来源</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+}

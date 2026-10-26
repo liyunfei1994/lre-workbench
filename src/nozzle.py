@@ -172,6 +172,9 @@ class Nozzle:
                 Ae_real  = At_real * self.expansion_ratio
                 thrust_sl  = self.mdot * isp_sl  * G0
                 thrust_vac = self.mdot * isp_vac * G0
+                exit_state = nozzle_exit_state(self.chamber_state, pe_real)
+                cf_momentum_real = ve / cstar_eq
+                cf_pressure_real = (pe_real - self.p_amb) * self.expansion_ratio / self.pc
 
                 return ComponentResult(
                     name="nozzle",
@@ -186,15 +189,20 @@ class Nozzle:
                         "Cf"              : cf_sl,
                         "Cf_vac"          : cf_vac,
                         "Cf_sl"           : cf_sl,
-                        "Cf_momentum"     : cf_momentum,
-                        "Cf_pressure"     : cf_pressure,
+                        "Cf_momentum"     : cf_momentum_real,
+                        "Cf_pressure"     : cf_pressure_real,
                         "At_m2"           : At_real,
                         "Ae_m2"           : Ae_real,
-                        "mach_exit"       : mach_exit,
+                        "mach_exit"       : ve / sqrt(exit_state.gamma * R_UNIVERSAL / exit_state.molar_mass * exit_state.temperature),
                         "p_exit_Pa"       : pe_real,
                         "p_amb_Pa"        : self.p_amb,
                         "expansion_ratio" : self.expansion_ratio,
                         "T_exit_K"        : Te,
+                        "T_throat_K"      : perf.get("T_throat"),
+                        "p_throat_Pa"     : perf.get("p_throat"),
+                        "h_exit_Jkg"      : exit_state.enthalpy,
+                        "h_chamber_Jkg"   : self.chamber_state.enthalpy,
+                        "energy_residual_W": self.mdot * (exit_state.enthalpy + ve * ve / 2 - self.chamber_state.enthalpy),
                         "flow_model"      : 0.0,           # 0=冻结流, 1=平衡流
                     },
                     notes=[

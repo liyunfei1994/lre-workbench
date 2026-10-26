@@ -1,0 +1,101 @@
+/* Scoped engineering validation workbench. No inline styles are required. */
+.validation-workspace { --validation-blue:#176b9c; --validation-amber:#ad7436; display:flex; flex-direction:column; gap:12px; min-width:0; color:#253745; }
+.validation-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.validation-heading h2 { margin:4px 0; font-size:20px; }
+.validation-heading p { font-size:12px; color:#62717d; }
+.validation-kicker { font:600 10px/1.5 Consolas,monospace; letter-spacing:1.4px; color:#667989; }
+.validation-capabilities { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border:1px solid #cbd3db; background:#fff; }
+.validation-capability { padding:11px 12px; border-right:1px solid #d8dfe5; min-width:0; border-top:3px solid #b6bec7; }
+.validation-capability:last-child { border-right:0; }
+.validation-capability.is-available { border-top-color:#427b71; }
+.validation-capability.is-unavailable { border-top-color:#b77940; }
+.validation-capability span { display:block; font-size:11px; color:#526574; }
+.validation-capability b { display:block; margin:4px 0; font:600 14px/1.6 Consolas,"Microsoft YaHei",monospace; }
+.validation-capability small { display:block; font-size:10px; color:#71808b; overflow-wrap:anywhere; }
+.validation-source { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 14px; padding:9px 12px; background:#e3e9ee; border:1px solid #c8d2db; font-size:11px; }
+.validation-source span { font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.validation-tabs { display:flex; border-bottom:1px solid #b9c7d2; gap:2px; background:#e4eaf0; }
+.validation-tabs button { background:transparent; border:0; border-bottom:3px solid transparent; border-radius:0; padding:10px 16px; font-size:12px; color:#506474; }
+.validation-tabs button.is-active { background:#fff; border-bottom-color:var(--validation-blue); color:#145b83; font-weight:600; }
+.validation-layout { display:grid; grid-template-columns:minmax(240px,340px) minmax(0,1fr); gap:12px; align-items:start; }
+.validation-settings,.validation-output { background:#fff; border:1px solid #cbd3db; padding:14px; min-width:0; }
+.validation-settings h3 { font-size:13px; padding-bottom:9px; border-bottom:1px solid #dce3e9; }
+.validation-settings fieldset { border:0; padding:0; margin:0; min-width:0; }
+.validation-settings fieldset:disabled { opacity:.65; }
+.validation-workspace label { font-size:11px; margin:8px 0; }
+.validation-workspace input,.validation-workspace select,.validation-workspace textarea { font-size:12px; padding:7px 8px; border:1px solid #c4cfd9; border-radius:2px; background:#fff; }
+.validation-workspace input,.validation-workspace textarea { font-variant-numeric:tabular-nums; }
+.validation-workspace textarea { font-family:Consolas,"Microsoft YaHei",monospace; min-height:90px; }
+.validation-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 10px; }
+.validation-form-grid label { min-width:0; }
+.validation-checkbox { display:flex!important; gap:8px; align-items:flex-start; font-size:11px!important; line-height:1.7!important; }
+.validation-checkbox input { width:auto; flex:none; margin:4px 0 0; }
+.validation-actions { border-top:1px solid #dce3e9; padding-top:12px; margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.validation-actions .primary { flex:1; min-height:34px; }
+.validation-help { font-size:10px; color:#687b8a; line-height:1.8; }
+.validation-message { padding:10px 11px; border:1px solid #ccd8e2; border-left:3px solid #7393ac; font-size:11px; line-height:1.85; background:#f0f5f8; overflow-wrap:anywhere; }
+.validation-settings .validation-message { margin-top:10px; }
+.validation-message-warning { background:#fbf4e8; border-color:#dbc69f; border-left-color:#b88338; color:#755725; }
+.validation-message-error { background:#fff0ed; border-color:#ddb1a7; border-left-color:#b55a46; color:#9b4535; }
+.validation-output { display:flex; flex-direction:column; gap:12px; }
+.validation-record-toolbar { display:flex; gap:7px; align-items:end; flex-wrap:wrap; }
+.validation-record-toolbar label { flex:1; min-width:150px; margin:0; }
+.validation-record-toolbar button { white-space:nowrap; padding:7px 9px; }
+.validation-run-status,.validation-result-summary { display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:11px; line-height:1.8; }
+.validation-run-status { padding:8px 0; border-top:1px solid #e1e7ec; border-bottom:1px solid #e1e7ec; }
+.validation-run-status span { overflow-wrap:anywhere; }
+.validation-result-summary span { color:#637584; }
+.validation-badge { display:inline-block; white-space:nowrap; padding:2px 7px; font-size:10px; line-height:1.8; border:1px solid #cbd6df; background:#edf2f5; color:#536a7b!important; }
+.validation-pass { border-color:#b5d0c5; background:#edf6f0; color:#376d54!important; }
+.validation-fail,.validation-error { border-color:#dfb5ae; background:#fcefeb; color:#9f4a3c!important; }
+.validation-unavailable { border-color:#decba9; background:#fbf3e6; color:#866235!important; }
+.validation-running,.validation-queued { border-color:#b8d1e2; background:#edf5fa; color:#256e9b!important; }
+.validation-metric { display:flex!important; align-items:center; gap:10px; margin:0!important; }
+.validation-metric select { max-width:260px; width:auto; flex:1; margin:0; }
+.validation-table-wrap { min-width:0; overflow:auto; border:1px solid #d1dbe3; }
+.validation-table-wrap table { width:100%; border-collapse:collapse; font-size:11px; }
+.validation-table-wrap th { text-align:left; white-space:nowrap; background:#eaf0f4; font-weight:600; color:#486171; }
+.validation-table-wrap th,.validation-table-wrap td { padding:8px 9px; border-bottom:1px solid #e0e7ed; vertical-align:top; font-variant-numeric:tabular-nums; }
+.validation-table-wrap tr:last-child td { border-bottom:0; }
+.validation-table-wrap tr:nth-child(even) td { background:#fafcfd; }
+.validation-table-wrap td small { display:block; font-size:10px; max-width:210px; margin-top:4px; overflow-wrap:anywhere; color:#9a5846; }
+.validation-table-wrap label { margin:0; }
+.validation-table-wrap input { min-width:72px; margin:0; }
+.validation-table-wrap .validation-diagnostics { min-width:115px; }
+.validation-empty { color:#7d8a95; text-align:center; padding:24px!important; }
+.validation-diagnostics { padding:7px 9px!important; border:1px solid #dbe3ea!important; border-radius:0!important; background:#f7fafc!important; margin:0!important; }
+.validation-diagnostics summary { font-size:10px!important; color:#63798b!important; font-weight:400!important; }
+.validation-diagnostics pre { font:10px/1.7 Consolas,"Microsoft YaHei",monospace!important; max-height:280px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; margin:9px 0 0; }
+.validation-notes { font-size:11px; line-height:1.8; color:#7b653e; padding-left:17px; margin:4px 0; }
+@media(min-width:1900px) { .validation-layout { grid-template-columns:minmax(320px,390px) minmax(0,1fr); } }
+@media(max-width:1300px) { .validation-layout { grid-template-columns:1fr; } .validation-form-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media(max-width:760px) { .validation-capabilities { grid-template-columns:repeat(2,minmax(0,1fr)); } .validation-capability:nth-child(2) { border-right:0; } .validation-tabs { overflow:auto; } .validation-tabs button { white-space:nowrap; padding:9px 10px; } .validation-form-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .validation-heading { align-items:start; } .validation-settings,.validation-output { padding:10px; } }
+
+/* Scanning keeps the controls compact and gives the four plots the full width. */
+.validation-layout.validation-thermo-layout { grid-template-columns:minmax(0,1fr); }
+.validation-thermo-layout .validation-settings h3 { margin:0 0 6px; }
+.validation-scan-fields { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:0 12px; }
+.validation-scan-fields label { min-width:0; }
+.validation-property-inputs { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:0 12px; align-items:start; }
+.validation-property-inputs label { min-width:0; }
+.validation-property-inputs label:has(textarea) { grid-column:span 5; }
+.validation-property-inputs textarea { min-height:68px; }
+.validation-scan-summary { display:flex; flex-wrap:wrap; gap:5px 18px; padding:9px 0; font-size:11px; color:#567080; }
+.validation-scan-summary b { color:#24485f; }
+.validation-scope-help { margin:0!important; padding:0!important; border:0!important; background:transparent!important; }
+.validation-scope-help summary { font-size:11px!important; color:#667987!important; font-weight:400!important; }
+.validation-scope-help p { font-size:11px; line-height:1.7; color:#667987; margin:5px 0; }
+.validation-thermo-layout .validation-actions { justify-content:flex-end; margin-top:8px; padding-top:8px; }
+.validation-thermo-layout .validation-actions .primary { flex:none; min-width:170px; }
+.validation-chart-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+.validation-chart-toolbar h3 { font-size:14px; margin:0 0 4px; }
+.validation-chart-toolbar p { font-size:11px; color:#687b89; margin:0; }
+.validation-chart-toolbar>div:last-child { display:flex; gap:7px; }
+.validation-data-details { padding:10px!important; background:#fff!important; border:1px solid #d1dbe3!important; border-radius:0!important; margin:0!important; }
+.validation-data-details>summary { font-size:12px!important; color:#324d61!important; }
+.validation-data-details .validation-metric { margin:10px 0!important; }
+.validation-thermo-layout .validation-output { gap:12px; }
+@media(max-width:1200px) { .validation-scan-fields { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media(max-width:1200px) { .validation-property-inputs { grid-template-columns:repeat(3,minmax(0,1fr)); } .validation-property-inputs label:has(textarea) { grid-column:span 2; } }
+@media(max-width:640px) { .validation-property-inputs { grid-template-columns:repeat(2,minmax(0,1fr)); } .validation-property-inputs label:has(textarea) { grid-column:span 2; } }
+@media(max-width:640px) { .validation-scan-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } }

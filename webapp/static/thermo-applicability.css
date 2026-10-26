@@ -1,0 +1,32 @@
+.thermo-applicability { color:#304c60; display:flex; flex-direction:column; gap:14px; min-width:0; padding:16px; }
+.ta-heading { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px; border-bottom:1px solid #dbe3ea; padding-bottom:12px; }
+.ta-kicker { color:#73899a; font:600 10px/1.6 Consolas,monospace; letter-spacing:1.4px; }
+.thermo-applicability .ta-heading h2 { font-size:16px; margin:4px 0 7px; }
+.ta-heading p,.ta-models p,.ta-reference p,.ta-next,.ta-loss { margin:0; font-size:11px; line-height:1.8; color:#6d7f8d; }
+.ta-badge { display:inline-block; font:400 11px/1.5 "Microsoft YaHei",sans-serif; padding:3px 8px; border:1px solid #cfdae3; color:#60798a; background:#f4f7fa; white-space:nowrap; }
+.ta-review { border-color:#d8c8a6; color:#856d42; background:#fbf6ec; }
+.ta-notice { margin:0; padding:12px 14px; border-left:3px solid #b49c70; background:#fcf8f0; color:#816c49; font-size:11px; line-height:1.8; }
+.ta-table-wrap { max-width:100%; overflow:auto; border:1px solid #dbe4eb; }
+.ta-table-wrap table { width:100%; border-collapse:collapse; background:#fff; font-size:11px; }
+.ta-table-wrap th,.ta-table-wrap td { text-align:right; white-space:nowrap; padding:9px 10px; border-bottom:1px solid #e6ebf0; font-variant-numeric:tabular-nums; }
+.ta-table-wrap th { color:#5b778b; background:#edf3f7; }
+.ta-table-wrap td { font-family:Consolas,"Microsoft YaHei",monospace; }
+.ta-table-wrap th:first-child,.ta-table-wrap td:first-child { text-align:left; }
+.ta-table-wrap tbody tr:nth-child(even) { background:#fafcfd; }
+.ta-table-wrap .ta-extrapolated,.ta-table-wrap tbody tr.ta-extrapolated:nth-child(even) { background:#fcf4e8; color:#896637; }
+.ta-models { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.ta-models article { border:1px solid #d7e1e9; background:#fff; padding:12px; min-width:0; }
+.ta-models h3 { margin:0 0 8px; color:#6d8190; font-size:11px; font-weight:400; }
+.ta-models b { display:block; font-size:12px; margin-bottom:8px; overflow-wrap:anywhere; }
+.ta-details { border-top:1px solid #dfe7ed; padding-top:4px; }
+.ta-details summary { cursor:pointer; color:#54758d; font-size:11px; padding:8px 0; line-height:1.7; }
+.ta-details summary:focus-visible { outline:2px solid #4d83a8; outline-offset:3px; }
+.ta-reference dl { display:grid; gap:7px; margin:10px 0; font-size:11px; line-height:1.8; }
+.ta-reference dl>div { display:grid; grid-template-columns:76px minmax(0,1fr); gap:8px; }
+.ta-reference dt { color:#78909e; }
+.ta-reference dd { margin:0; overflow-wrap:anywhere; }
+.ta-notes { margin:0; padding-left:20px; color:#6d7f8d; font-size:11px; line-height:1.9; }
+.ta-next { padding-top:10px; border-top:1px solid #dfe7ed; }
+.ta-pure .ta-notice { margin-bottom:10px; }
+.ta-pure-reason { display:block; white-space:normal; min-width:180px; max-width:300px; margin-top:5px; font:11px/1.6 "Microsoft YaHei",sans-serif; }
+@media(max-width:900px) { .ta-models { grid-template-columns:1fr; } }

@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 
 from materials import material_evidence
+from convergence import numerical_convergence
 
 
 def _finite(value):
@@ -19,22 +20,73 @@ def _finite(value):
         return None
 
 
-def numerical_convergence(results) -> dict:
-    summary = results.summary
-    residual = _finite(summary.get("solver_residual_norm"))
-    warning = bool(summary.get("solver_warning", 0.0))
-    status = "unknown" if residual is None else ("pass" if residual < 1e-3 and not warning else "fail")
-    return {"status": status, "label": {"pass": "数值收敛", "fail": "未收敛", "unknown": "缺少收敛信息"}[status],
-            "residual": residual, "tolerance": 1e-3, "solver_warning": warning,
-            "iterations": _finite(summary.get("solver_iterations"))}
+def _cooling_profile_evidence(component, inputs):
+    """Read complete common-mesh evidence; never use an old postpass/single point."""
+    missing = (None, None, "缺少主循环完整沿程冷却证据；预算模式或旧记录须重新计算，不能用单点温度代替沿程峰值。")
+    profile = getattr(component, "profile", None)
+    if not bool(getattr(inputs, "cooling_bartz_mode", False)) or not isinstance(profile, dict):
+        return missing
+    if profile.get("version") != 1 or profile.get("model_id") != "regen_quasi1d_ph_v1":
+        return missing
+    nodes, cells = profile.get("nodes"), profile.get("cells")
+    geometry = profile.get("geometry") or {}
+    if not isinstance(geometry, dict):
+        return missing
+    geometric_cells, geometric_nodes = geometry.get("cells"), geometry.get("nodes")
+    if not all(isinstance(value, list) and value for value in
+               (nodes, cells, geometric_cells, geometric_nodes)):
+        return missing
+    if (not all(isinstance(value, dict) for value in nodes + cells + geometric_cells + geometric_nodes)
+            or len(nodes) != len(cells) + 1 or len(geometric_nodes) != len(geometric_cells) + 1
+            or len(cells) != len(geometric_cells) + 2
+            or cells[0].get("kind") != "inlet_manifold" or cells[-1].get("kind") != "outlet_manifold"
+            or nodes[0].get("kind") != "inlet_port" or nodes[-1].get("kind") != "outlet_port"
+            or any(cell.get("kind") != "channel" for cell in cells[1:-1])):
+        return missing
+    # The complete cooled coverage must be present, including both manifold
+    # endpoints. Positive/recovering static pressure need not be monotonic.
+    for actual, expected in zip(nodes[1:-1], geometric_nodes):
+        for key in ("s_m", "x_m"):
+            first, second = _finite(actual.get(key)), _finite(expected.get(key))
+            if first is None or second is None or abs(first - second) > 1e-9:
+                return missing
+    validity = profile.get("validity") or {}
+    if not isinstance(validity, dict):
+        return missing
+    if validity.get("status") not in ("pass", "review", "fail"):
+        return missing
+    hydraulic_failed = validity.get("status") == "fail"
+    for node in nodes:
+        values = [_finite(node.get(key)) for key in ("p_Pa", "T_K", "rho_kgm3", "Mach")]
+        if any(value is None for value in values) or node.get("range_status") != "within_declared_ranges":
+            return missing
+        hydraulic_failed |= any(value <= 0 for value in values[:3]) or not 0 <= values[3] < 1
+    for index, cell in enumerate(cells):
+        losses = [_finite(cell.get(key)) for key in ("dp_friction_Pa", "dp_momentum_Pa", "dp_local_Pa")]
+        if any(value is None for value in losses):
+            return missing
+        momentum_residual = _finite(nodes[index + 1]["p_Pa"]) - _finite(nodes[index]["p_Pa"]) + sum(losses)
+        hydraulic_failed |= abs(momentum_residual) > .5 or losses[0] < 0 or losses[2] < 0
+    if hydraulic_failed:
+        return 1.0, None, "主循环沿程记录存在无效状态或水力方程残差；不据此判定壁温通过。"
+    temperatures = [_finite(cell.get("T_wall_hot_K")) for cell in cells[1:-1]]
+    wall_residuals = [_finite(cell.get("wall_residual_K")) for cell in cells[1:-1]]
+    wall = (max(temperatures) if all(value is not None and value > 0 for value in temperatures)
+            and all(value is not None and abs(value) <= 1e-5 for value in wall_residuals) else None)
+    return 0.0, wall, ("读取主循环唯一冷却剖面的全部覆盖单元，重算压力／动量残差并取热面壁温最大值；"
+                       "与用户热设计限值比较，不代表结构强度、疲劳寿命或硬件换热关联式已验证。")
 
 
-def assess_engineering(results, power_tolerance_percent: float = 1.0) -> dict:
+def assess_engineering(results, power_tolerance_percent: float = 1.0, *, scope: str = "engineering") -> dict:
     """Return JSON-compatible checks of pressure, shaft power and temperature.
 
     The power tolerance is a displayed screening criterion, not the solver's
     stopping tolerance. Missing/nonfinite quantities are never treated as pass.
+    Both scopes include the common cooling profile's hydraulic and wall-temperature
+    limits. Only the desktop engineering scope includes material evidence.
     """
+    if scope not in ("engineering", "system"):
+        raise ValueError("scope must be engineering or system")
     power_tolerance_percent = _finite(power_tolerance_percent)
     if power_tolerance_percent is None or power_tolerance_percent < 0:
         raise ValueError("power_tolerance_percent must be finite and nonnegative")
@@ -58,19 +110,48 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0) -> dict:
         checks.append({"key": key, "label": label, "status": status, "value": value,
                        "limit": limit, "unit": unit, "criterion": sense, "detail": detail})
 
-    def component_output(name, key):
-        component = components.get(name)
-        return getattr(component, "outputs", {}).get(key) if component is not None else None
-
     def state_pressure(name):
         state = states.get(name)
         return _finite(getattr(state, "pressure", None))
 
     if cycle_type == "ffsc":
+        from steady_network import audit_network
+        from steady_closure import audit_energy
+        closure = getattr(results, "steady_closure", {}) or {}
+        feed_pressure_tolerance_pa = 0.0
+        if closure.get("schema_version") == 1:
+            network = audit_network(closure.get("feed_network", {}),
+                total_fuel=summary.get("mdot_fuel_kg_s"), total_ox=summary.get("mdot_ox_kg_s"),
+                mr_ox=summary.get("ox_preburner_mr_target") if summary.get("solve_mode") == 2 else None,
+                mr_fuel=summary.get("fuel_preburner_mr_target") if summary.get("solve_mode") == 2 else None)
+            energy = audit_energy(states, components)
+            # Use the independently recomputed network tolerance, never a saved
+            # badge/tolerance. Preserve raw signed margins; sub-Pa closure error
+            # is not an engineering pressure reserve or a real supply deficit.
+            if network["status"] == "pass":
+                feed_pressure_tolerance_pa = network["pressure_tolerance_Pa"]
+            check("feed_network_closure", "四支路供给方程闭合", 0.0 if network["status"] == "pass" else 1.0,
+                  0.0, "", "maximum", "由记录支路重新核算质量、压力、阻力与非负阀压降；闭合不代表具有压力储备。")
+            heat_terms = [_finite(getattr(components.get(name), "outputs", {}).get("heat_loss_W"))
+                          for name in ("main_chamber", "nozzle")]
+            heat_allocation = (
+                f"本记录主室控制体扣热 {heat_terms[0]/1e6:g} MW、喷管控制体扣热 {heat_terms[1]/1e6:g} MW。"
+                if all(value is not None for value in heat_terms) else "本记录缺少完整的主室／喷管扣热分工数据。")
+            check("energy_ledger_closure", "声明边界内的能量账闭合",
+                  0.0 if energy["status"] == "pass" else None if energy["status"] == "unavailable" else 1.0,
+                  0.0, "", "maximum", "从同基准端口状态及各控制体实际扣热重算能量账；" + heat_allocation
+                  + "再生冷却吸热属于内部传热；能量闭合不替代换热模型适用性验证。")
+        else:
+            check("feed_network_closure", "四支路供给方程闭合", None, 0.0, "", "maximum", "旧记录缺少完整方程证据，需重算。")
+            check("energy_ledger_closure", "声明边界内的能量账闭合", None, 0.0, "", "maximum", "旧记录缺少同基准能量账，需重算。")
         for key, label in (("crossflow_fuel_to_oxpb_margin_MPa", "CH₄ → 富氧预燃室供给压力裕度"),
                            ("crossflow_lox_to_fuelpb_margin_MPa", "LOX → 富燃预燃室供给压力裕度")):
-            check(key, label, summary.get(key), 0.0, "MPa", "minimum",
-                  "供给压力扣除阀路损失后必须达到预燃室压力与喷注压降；独立补压泵不在主轴功率平衡内。")
+            tolerance_detail = (f" 独立网络审计通过，允许 {feed_pressure_tolerance_pa:g} Pa 数值闭合误差；"
+                                "保留原始有符号值，接近零不代表具有抗扰压力储备。"
+                                if feed_pressure_tolerance_pa else "")
+            check(key, label, summary.get(key), -feed_pressure_tolerance_pa / 1e6, "MPa", "minimum",
+                  "供给压力扣除基础管损后相对喷注需求的压头；新模型将多余压头耗散于调节阀，不含额外补压设备。"
+                  + tolerance_detail)
         for side, label in (("ox", "富氧"), ("fuel", "富燃")):
             pressure = _finite(summary.get(f"{side}_turbine_exhaust_pressure_Pa"))
             chamber = _finite(summary.get("chamber_pressure_Pa", getattr(inputs, "pc", None)))
@@ -83,7 +164,7 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0) -> dict:
         chamber = _finite(summary.get("chamber_pressure_Pa", getattr(inputs, "pc", None)))
         valve = _finite(summary.get("valve_line_dp_MPa"))
         for side, state, label in (("ox", "lox_after_pump", "LOX 主室供给压力裕度"),
-                                   ("fuel", "fuel_after_cooling", "CH₄ 主室供给压力裕度")):
+                                   ("fuel", "fuel_after_cooling", "燃料主室供给压力裕度")):
             supply = state_pressure(state)
             injector = _finite(summary.get(f"injector_dp_{side}_MPa"))
             margin = (supply / 1e6 - chamber / 1e6 - valve - injector
@@ -117,26 +198,16 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0) -> dict:
                      ('fuel_preburner_T_combustion_K', 'fuel_preburner_temp_limit', '富燃预燃室出口温度')])
     for result_key, input_key, label in temperatures:
         check(result_key, label, summary.get(result_key), getattr(inputs, input_key, None), "K", "maximum",
+              "与当前工况设定的出口温度上限比较。" if scope == "system" else
               "与当前工况设定的材料温度上限比较。")
 
-    marching = components.get("cooling_marching")
-    if marching is not None:
-        hydraulic = _finite(component_output("cooling_marching", "hydraulic_infeasible"))
-        if hydraulic is None:
-            hydraulic = _finite(summary.get("cooling_marching_infeasible"))
-        check("cooling_hydraulics", "冷却通道水力可行性", hydraulic, 0.0, "", "maximum",
-              "通道水力不可行时沿程壁温结果无效。")
-        wall = component_output("cooling_marching", "T_wall_hot_max_K") if hydraulic == 0 else None
-        check("wall_temperature", "沿程热面壁温峰值", wall,
-              getattr(inputs, "cooling_wall_temp_limit_K", None), "K", "maximum",
-              "沿程冷却后处理；水力校核不通过或缺少数据时不判定壁温通过。")
-    else:
-        check("wall_temperature", "喉部单点热面壁温", component_output("cooling_channel", "T_wall_hot_K"),
-              getattr(inputs, "cooling_wall_temp_limit_K", None), "K", "maximum",
-              "只有循环单点估算；尚未检查全程壁温峰值。")
+    hydraulic, wall, cooling_detail = _cooling_profile_evidence(components.get("cooling_channel"), inputs)
+    check("cooling_hydraulics", "冷却通道水力可行性", hydraulic, 0.0, "", "maximum", cooling_detail)
+    check("wall_temperature", "沿程热面壁温峰值", wall,
+          getattr(inputs, "cooling_wall_temp_limit_K", None), "K", "maximum", cooling_detail)
 
     material_records = {}
-    for name in vars(inputs):
+    for name in (vars(inputs) if scope == "engineering" else ()):
         if name.endswith("_material"):
             key = getattr(inputs, name)
             if not isinstance(key, str) or not key:
@@ -155,10 +226,17 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0) -> dict:
         status = "unknown"
     label = {"fail": "工程约束未通过", "unknown": "工程约束待确认", "review": "材料数据待核实",
              "pass": "已检查的工程约束通过"}[status]
-    return {"schema_version": 1, "cycle_type": cycle_type, "numerical": numerical,
+    limitations = ["本校核只覆盖模型已有的供给压力、轴功率与温度约束，不代表整机设计认证。",
+                   "材料数据为简化工程数据；富氧相容性需要具体压力、温度、表面状态下的试验依据。",
+                   "未完成结构疲劳、燃烧稳定性、完整瞬态、寿命及试验验证。"]
+    if scope == "system":
+        label = {"fail": "系统约束未通过", "unknown": "系统约束待确认",
+                 "pass": "已检查的系统约束通过"}[status]
+        limitations = ["本校核覆盖稳态设计点的供给压力、轴功率、预燃室／燃气发生器出口温度，以及统一冷却剖面的水力与沿程壁温限值。",
+                       "沿程壁温属于系统热设计约束，与数值收敛独立判定；预算模式或缺少完整剖面时标记待确认。此项不是材料强度、结构或疲劳验证。",
+                       "系统约束通过不代表部件设计或重复使用能力已验证；启动、关机、再启动瞬态、疲劳寿命和试验验证需后续完成。"]
+    return {"schema_version": 1, "scope": scope, "cycle_type": cycle_type, "numerical": numerical,
             "status": status, "label": label, "checks": checks, "failure_count": failures,
             "unknown_count": unknown, "materials": material_records,
-            "limitations": ["本校核只覆盖模型已有的供给压力、轴功率与温度约束，不代表整机设计认证。",
-                            "材料数据为简化工程数据；富氧相容性需要具体压力、温度、表面状态下的试验依据。",
-                            "未完成结构疲劳、燃烧稳定性、完整瞬态、寿命及试验验证。"],
+            "limitations": limitations,
             "model_warnings": list(results.warnings)}

@@ -11,10 +11,10 @@ thermo.py
     两种运行模式（自动检测，无需手动切换）：
 
     ┌────────────────────────────────────────────────┐
-    │  Cantera 可用 → 高保真模式                     │
-    │    · 基于 GRI-Mech 3.0 的化学平衡              │
-    │    · 真实 cp(T,p,Y)、γ(T,p,Y)                 │
-    │    · 等熵膨胀基于真实状态方程                   │
+    │  Cantera 可用 → 化学平衡模式                   │
+    │    · 按显式选择的物种数据计算化学平衡         │
+    │    · 温度/组成相关 cp、γ，受物种数据温区限制    │
+    │    · 当前燃气 EOS 为理想气体混合物             │
     ├────────────────────────────────────────────────┤
     │  Cantera 不可用 → 经验 fallback 模式           │
     │    · 分段多项式拟合温度                         │
@@ -35,27 +35,45 @@ from __future__ import annotations
 from task_control import checkpoint
 
 import warnings
+import math
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
+from propellants import for_fuel, normalize_fuel_species, validate_surrogate_state
+from thermo_data import METHANE_DATASETS, active_methane_dataset
+from fluid_properties import (state_tp as fluid_state_tp, state_ph as fluid_state_ph,
+                              ideal_reference_enthalpy, saturation_pressure, fluid_spec)
 
 # ─── Cantera 可用性检测 ────────────────────────────────────
 try:
     import cantera as ct
-    _GAS: Optional[ct.Solution] = None
+    _GAS_LOCAL = threading.local()
 
-    def _get_gas() -> ct.Solution:
-        """获取模块级 Cantera Solution 对象（懒初始化，避免重复解析机制文件）"""
+    def _get_gas(fuel_species: str = "CH4", methane_dataset=None) -> ct.Solution:
+        """Lazily cache each declared data set per thread, never switch mid-flow."""
         checkpoint()
-        global _GAS
-        if _GAS is None:
+        fuel_species = normalize_fuel_species(fuel_species)
+        if fuel_species == "CH4":
+            dataset = methane_dataset if methane_dataset is not None else active_methane_dataset()
+            if dataset not in METHANE_DATASETS:
+                raise ValueError(f"不支持的甲烷热化学数据集：{dataset!r}")
+            definition = METHANE_DATASETS[dataset]
+            filename, phase = definition["file"], definition["phase"]
+        else:
+            model = for_fuel(fuel_species)
+            filename, phase = model.mechanism, model.phase
+        if not hasattr(_GAS_LOCAL, "gases"):
+            _GAS_LOCAL.gases = {}
+        key = (filename, phase)
+        if key not in _GAS_LOCAL.gases:
             # Cantera's native Windows file lookup can lose non-ASCII path
             # characters. Read its unchanged bundled mechanism through Python's
             # Unicode-aware path handling and pass the exact YAML contents.
-            mechanism_file = Path(ct.__file__).resolve().parent / "data" / "gri30.yaml"
-            _GAS = ct.Solution(yaml=mechanism_file.read_text(encoding="utf-8"))
+            mechanism_file = Path(ct.__file__).resolve().parent / "data" / filename
+            _GAS_LOCAL.gases[key] = ct.Solution(yaml=mechanism_file.read_text(encoding="utf-8"), name=phase)
             checkpoint()
-        return _GAS
+        return _GAS_LOCAL.gases[key]
 
     CANTERA_AVAILABLE = True
 except ImportError:
@@ -63,12 +81,13 @@ except ImportError:
 
 
 # ─── 机制名称（可配置） ─────────────────────────────────────
-MECHANISM = "gri30.yaml"
+MECHANISM = "gri30.yaml"  # historical default only; actual identity is recorded per state
 """
-GRI-Mech 3.0：53 物种、325 反应
-优点：Cantera 自带、CH₄/O₂ 覆盖完整
-局限：高压（>10 MPa）下验证有限，但平衡计算受影响小
-后续升级建议：FFCM-1 或 AramcoMech
+GRI-Mech 3.0：53 物种、325 反应。当前调用化学平衡而非有限速率反应。
+适用性取决于物种集合、热力学多项式和 EOS；不能由机制名称推断精度。
+历史 GRI30 主要 CHO 物种通常止于 3500 K；gri30_highT 全物种共同
+温区为 300–5000 K。两者均逐态检查并披露外推，不认证反应动力学。
+高压理想气体混合物近似尚未获得本平台独立验证。
 """
 
 
@@ -78,7 +97,7 @@ GRI-Mech 3.0：53 物种、325 反应
 # 会漏掉汽化潜热（O2 ~213 kJ/kg, CH4 ~510 kJ/kg）及液-气 cp 差，从而高估
 # 入口焓 → HP 平衡解出的预燃室温度系统性偏高约 +130–160 K，沿涡轮排气
 # 传到主燃烧室还会再叠加 ~70–90 K Tc 偏高。
-# CoolProp 提供 NIST 级别的真实流体物性，用来给入口焓打个修正项即可。
+# CoolProp 提供真实流体状态方程计算；数值不是实测值，适用性须按工质检查。
 try:
     from CoolProp.CoolProp import PropsSI as _CP_PropsSI
     COOLPROP_AVAILABLE = True
@@ -87,10 +106,10 @@ except ImportError:
     _CP_PropsSI = None
 
 # 物种 → CoolProp 流体名映射
-_COOLPROP_FLUID: Dict[str, str] = {"O2": "Oxygen", "CH4": "Methane"}
+_COOLPROP_FLUID: Dict[str, str] = {"O2": "Oxygen", "o2": "Oxygen", "CH4": "Methane", "c12h26": "n-Dodecane"}
 
 # CoolProp 不可用时的备用修正 (J/kg)：基于 LOX@90K/30MPa, LCH4@110K/30MPa
-# 实测的 (h_real − h_NASA_extrap)，作为常数兜底。低于阈值才生效，高于即气相。
+# 历史经验焓修正常数，未附实验来源；仅保留兼容，不用于网页科学计算。
 _FALLBACK_DH_CORRECTION_JKG: Dict[str, float] = {"O2": -197.0e3, "CH4": -470.0e3}
 _FALLBACK_T_THRESHOLD_K:     Dict[str, float] = {"O2": 130.0,    "CH4": 150.0}
 
@@ -103,93 +122,104 @@ def vapor_pressure(species: str, T_K: float) -> float:
     """
     饱和蒸汽压 p_sat(T) [Pa]，用于泵 NPSHa 计算。
 
-    · CoolProp 可用：返回 NIST 级真实饱和压（O2@70K≈6.3 kPa, CH4@100K≈34 kPa）。
-    · 超过临界温度或查询失败：退回固定兜底常数（深过冷推进剂蒸汽压本就很低，
-      取常压沸点量级即可，对 NPSHa 影响极小）。
+    · CoolProp 可用：按所选纯流体关联式计算饱和压，不是实测值。
+    · 超过临界温度或查询失败：明确拒绝；此时不能用固定占位值计算 NPSH。
 
     NPSHa = (p_pump_inlet − p_vapor) / (ρ·g)，必须在 *泵入口* 处评估（已扣管路损失）。
     """
     checkpoint()
-    fluid_key = "O2" if species in ("O2", "LOX", "Oxygen") else (
-        "CH4" if species in ("CH4", "Methane") else species
-    )
-    if COOLPROP_AVAILABLE and fluid_key in _COOLPROP_FLUID:
-        try:
-            return float(_CP_PropsSI("P", "T", T_K, "Q", 0, _COOLPROP_FLUID[fluid_key]))
-        except Exception:
-            pass
-    return _FALLBACK_PVAP_PA.get(fluid_key, 1.0e3)
+    return saturation_pressure(species, T_K)
+
+
+def enthalpy_reference_id(fuel_species="CH4") -> str:
+    """Versioned identity of the chemical/pure-fluid enthalpy alignment."""
+    if normalize_fuel_species(fuel_species) == "c12h26":
+        return "cantera_ndodecane_coolprop_600K_ideal_reference_v2"
+    return f"cantera_{active_methane_dataset()}_coolprop_298p15K_ideal_reference_v2"
+
+
+def available_npsh_pressure(species, temperature, pressure):
+    """Static-pressure NPSH contribution; None where saturation is undefined.
+
+    No velocity head or elevation difference is supplied by this lumped port.
+    A negative value is retained, not clipped into an apparently valid margin.
+    This does not establish a pump's required NPSH or cavitation capability.
+    """
+    checked = fluid_state_tp(species, temperature, pressure)
+    if checked["T_K"] >= checked["limits"]["Tcritical_K"]:
+        return None
+    return pressure - saturation_pressure(species, temperature)
+
+
+def _chemical_reference_offset(species, gas):
+    T_ref, p_ref = (600.0, 1000.0) if gas.name == "nDodecane_IG" else (298.15, 101325.0)
+    saved = gas.state.copy()
+    try:
+        gas.TPX = T_ref, p_ref, {species: 1.0}
+        return gas.enthalpy_mass - ideal_reference_enthalpy(species, T_ref, p_ref)
+    finally:
+        gas.state = saved
 
 
 def _real_fluid_enthalpy(
     species: str, T_K: float, p_Pa: float, gas: "ct.Solution"
 ) -> float:
+    """Pure-fluid EOS enthalpy aligned to the selected gas chemical reference.
+
+    h(T,p) = h_species^ideal(T_ref) + h_HEOS(T,p) - h_HEOS^ideal(T_ref).
+    Methane/oxygen use 298.15 K / 101325 Pa; the kerosene surrogate uses
+    600 K / 1000 Pa. HEOS reference residual enthalpy is explicitly removed:
+    h_HEOS^ideal = h_HEOS - h_HEOS,residual. The finite-pressure reference
+    does not silently introduce an enthalpy offset.
+    This does not change the combustion-mixture EOS to a real-gas model.
+    All queries remain subject to fluid EOS ranges and phase applicability;
+    a returned value alone is not experimental validation. No liquid-state
+    NASA extrapolation is needed to evaluate this enthalpy difference.
     """
-    返回入口推进剂的"真实流体焓" [J/kg]，**参考态对齐到 Cantera NASA 基准**。
-
-    用法
-    ────
-        h = _real_fluid_enthalpy("O2", 90.0, 30e6, gas)
-    等价替代:
-        gas.TPX = 90.0, 30e6, "O2:1"; h = gas.enthalpy_mass
-    但自动包含液相 / 超临界稠密相的真实焓修正。
-
-    原理
-    ────
-    令参考态 (T_ref, p_ref) = (298.15 K, 1 atm)，该工况下 NASA 多项式
-    与 CoolProp 都给出准确气相焓，两者参考零点差可在差分中消除：
-
-        Δh_real = h_CP(T,p)   − h_CP(T_ref,p_ref)        ← CoolProp 真实路径
-        Δh_NASA = h_NASA(T,p) − h_NASA(T_ref,p_ref)      ← Cantera 气相外推
-        correction = Δh_real − Δh_NASA                   ← 应叠加到 NASA 焓上
-        h_real(T,p) ≈ h_NASA(T,p) + correction
-
-    关键修正（V12，修复 TH-01/TH-03）：CoolProp 真实焓 departure 在 NASA 适用区
-    （低压/高温气相）会自然趋零，故**对所有 T 都安全计算**，不再用硬温度阈值早退。
-    这同时修复了两件事：
-      ① 再生冷却后的超临界稠密甲烷（~226 K, 74 MPa）原先因 T>150K 被当气相、
-         漏掉约 -285 kJ/kg 真实焓差，使富燃预燃室温度系统性高估 ~+65 K；
-      ② 旧阈值在 130K/150K 处造成的 ~155 kJ/kg 焓阶跃（破坏 Newton-Jacobian 光滑性）。
-    硬温度阈值现仅用于 CoolProp 不可用时的"固定常数兜底"——该常数只在稠密相标定，
-    高温气相区不可外推，故气相区返回纯 NASA 焓。
-    """
-    # 先把 gas 置于入口态，读出 NASA 多项式焓（无修正）
     checkpoint()
-    gas.TPX = T_K, p_Pa, f"{species}:1"
-    h_nasa_in = gas.enthalpy_mass
+    if not COOLPROP_AVAILABLE:
+        raise RuntimeError("统一化学基准的纯推进剂焓需要 CoolProp；不使用常数焓修正回退。")
+    actual_species = ("o2" if gas.name == "nDodecane_IG" else "O2") if species in ("O2", "o2", "LOX", "Oxygen") else normalize_fuel_species(species)
+    checked = fluid_state_tp(actual_species, T_K, p_Pa)
+    return checked["h_Jkg"] + _chemical_reference_offset(actual_species, gas)
 
-    # ── 高保真路径：CoolProp 真实流体 departure（对所有 T 计算，连续无阶跃）──────
-    # departure = (h_CP(T,p) − h_CP(ref)) − (h_NASA(T,p) − h_NASA(ref))
-    # 稠密相（液/超临界）为显著负值；低压高温气相自然趋零。
-    if COOLPROP_AVAILABLE and species in _COOLPROP_FLUID:
-        try:
-            fluid = _COOLPROP_FLUID[species]
-            T_ref, p_ref = 298.15, 101_325.0
 
-            h_cp_in  = _CP_PropsSI("H", "T", T_K,   "P", p_Pa,  fluid)
-            h_cp_ref = _CP_PropsSI("H", "T", T_ref, "P", p_ref, fluid)
+def reactant_enthalpy(species: str, temperature: float, pressure: float, fuel_species: str = "CH4") -> float:
+    """Pure-reactant J/kg, on the selected mechanism's chemical enthalpy reference."""
+    if not CANTERA_AVAILABLE:
+        raise RuntimeError("反应物化学基准焓查询需要 Cantera。")
+    if species in ("LOX", "Oxygen", "o2", "O2"):
+        species = "o2" if normalize_fuel_species(fuel_species) == "c12h26" else "O2"
+    return _real_fluid_enthalpy(species, temperature, pressure, _get_gas(fuel_species))
 
-            gas.TPX = T_ref, p_ref, f"{species}:1"
-            h_nasa_ref = gas.enthalpy_mass
 
-            # 还原 gas 到入口态，免得调用方依赖 gas 的"上次状态"
-            gas.TPX = T_K, p_Pa, f"{species}:1"
+def reactant_temperature_from_enthalpy(
+    species: str, enthalpy_Jkg: float, pressure: float, fuel_species: str = "CH4",
+) -> float:
+    """Invert the SAME chemical-reference real-fluid enthalpy used at reactant ports.
 
-            correction = (h_cp_in - h_cp_ref) - (h_nasa_in - h_nasa_ref)
-            return h_nasa_in + correction
-        except Exception as ex:
-            # CoolProp 出错时记录一次并回落到固定修正
-            warnings.warn(
-                f"CoolProp 计算 {species}@({T_K}K,{p_Pa/1e6:.1f}MPa) 失败:{ex}; "
-                f"回落到固定修正 {_FALLBACK_DH_CORRECTION_JKG.get(species,0)/1e3:.0f} kJ/kg。",
-                RuntimeWarning,
-            )
-
-    # ── 回退路径（CoolProp 不可用）：固定修正常数，仅在稠密相阈值以下生效 ──────
-    # 常数只在稠密相标定，高温气相不可外推，故此处保留温度阈值门控。
-    if T_K <= _FALLBACK_T_THRESHOLD_K.get(species, 1.0e9):
-        return h_nasa_in + _FALLBACK_DH_CORRECTION_JKG.get(species, 0.0)
-    return h_nasa_in
+    Use this for adiabatic throttles (constant h) and coolant heating (h+Q/mdot).
+    It requires both libraries; no cp*T or temperature-clipping substitute is used.
+    """
+    checkpoint()
+    if not (CANTERA_AVAILABLE and COOLPROP_AVAILABLE):
+        raise RuntimeError("统一基准的真实流体焓反算需要 Cantera 和 CoolProp。")
+    fuel_species = normalize_fuel_species(fuel_species)
+    if species in ("LOX", "Oxygen", "o2", "O2"):
+        species = "o2" if fuel_species == "c12h26" else "O2"
+    if not (math.isfinite(enthalpy_Jkg) and math.isfinite(pressure) and pressure > 0):
+        raise ValueError("焓反算要求有限焓和正压力。")
+    gas = _get_gas(fuel_species)
+    offset = _chemical_reference_offset(species, gas)
+    try:
+        temperature = fluid_state_ph(species, pressure, enthalpy_Jkg - offset)["T_K"]
+        # T/P alone cannot represent a two-phase H/P state. Do not erase quality.
+        recovered = reactant_enthalpy(species, temperature, pressure, fuel_species)
+        if abs(recovered - enthalpy_Jkg) > max(0.05, abs(enthalpy_Jkg) * 1e-8):
+            raise ValueError("焓反算落入当前单相端口模型无法表示的状态。")
+        return temperature
+    except Exception as exc:
+        raise ValueError(f"{species} 在 {pressure:g} Pa 的单相焓反算失败。") from exc
 
 
 # =========================================================
@@ -202,7 +232,7 @@ class GasState:
     气体热力学状态（预燃室 / 主燃烧室 / 喷管出口均用此描述）
 
     所有字段以 SI 单位为准。
-    composition 中仅保留质量分数 > 1e-10 的物种，以减少序列化开销。
+    composition 保留全部非零物种，避免重建状态时丢失元素及焓。
     """
     temperature: float              # [K]
     pressure: float                 # [Pa]
@@ -213,6 +243,44 @@ class GasState:
     entropy: float = 0.0            # 质量比熵 [J/(kg·K)]，Cantera 模式可用
     composition: Dict[str, float] = field(default_factory=dict)
     source: str = "empirical"       # "cantera" 或 "empirical"
+    mechanism: str = "gri30.yaml"
+    phase: str = "gri30"
+    thermo_extrapolation: Dict[str, float] = field(default_factory=dict)
+    thermo_range: dict = field(default_factory=dict)
+    gas_model: str = "unknown"
+
+
+class ThermoRangeWarning(RuntimeWarning):
+    """A calculation used species polynomials outside their declared ranges."""
+
+
+class SurrogateThermoRangeWarning(ThermoRangeWarning):
+    """Stable warning category for the explicitly disclosed surrogate extrapolation."""
+
+
+def _fuel_from_compositions(*compositions: Dict[str, float]) -> str:
+    # Reitz species retain their case. GRI uses uppercase names, so chemistry
+    # identity also survives legacy FlowState copies that carry composition only.
+    return "c12h26" if any(name in ("c12h26", "o2", "co2", "h2o", "co", "h2", "ch4")
+                           and fraction > 0 for composition in compositions
+                           for name, fraction in composition.items()) else "CH4"
+
+
+def _gas_for_state(state: GasState) -> "ct.Solution":
+    if state.mechanism == "nDodecane_Reitz.yaml" and state.phase == "nDodecane_IG":
+        return _get_gas("c12h26")
+    for dataset, definition in METHANE_DATASETS.items():
+        if state.mechanism == definition["file"] and state.phase == definition["phase"]:
+            return _get_gas("CH4", methane_dataset=dataset)
+    raise ValueError(f"未支持的气相机制身份：{state.mechanism}/{state.phase}")
+
+
+def gas_data_filename(gas):
+    """Get identity from the cached instance; phase names alone are ambiguous."""
+    for (filename, _phase), instance in getattr(_GAS_LOCAL, "gases", {}).items():
+        if instance is gas:
+            return filename
+    return "nDodecane_Reitz.yaml" if gas.name == "nDodecane_IG" else gas.source
 
 
 # =========================================================
@@ -225,9 +293,12 @@ def combustion_equilibrium(
     T_fuel: float,
     T_ox: float,
     pressure: float,
+    fuel_species: str = "CH4",
+    *, fuel_enthalpy: float | None = None, ox_enthalpy: float | None = None,
+    heat_loss_W: float = 0.0, energy_diagnostics: dict | None = None,
 ) -> GasState:
     """
-    计算 LOX/CH₄ 预燃室绝热定压（HP）化学平衡。
+    计算给定端口焓及可选外部热汇后的定压（HP）化学平衡。
 
     参数
     ────
@@ -242,9 +313,20 @@ def combustion_equilibrium(
     GasState  : 平衡状态
     """
     checkpoint()
+    if (not all(math.isfinite(v) and v >= 0 for v in (mdot_fuel, mdot_ox, heat_loss_W))
+            or mdot_fuel + mdot_ox <= 0):
+        raise ValueError("燃烧平衡要求非负有限流量/热汇及正总流量。")
+    fuel_species = normalize_fuel_species(fuel_species)
     if CANTERA_AVAILABLE:
-        return _cantera_combustion(mdot_fuel, mdot_ox, T_fuel, T_ox, pressure)
+        return _cantera_combustion(mdot_fuel, mdot_ox, T_fuel, T_ox, pressure,
+                                  fuel_species=fuel_species,
+                                  fuel_enthalpy=fuel_enthalpy, ox_enthalpy=ox_enthalpy,
+                                  heat_loss_W=heat_loss_W, energy_diagnostics=energy_diagnostics)
     else:
+        if fuel_enthalpy is not None or ox_enthalpy is not None or heat_loss_W or energy_diagnostics is not None:
+            raise RuntimeError("显式端口焓、热汇及能量诊断的燃烧平衡需要 Cantera。")
+        if fuel_species != "CH4":
+            raise RuntimeError("煤油替代模型需要 Cantera；不提供甲烷经验燃烧回退。")
         return _empirical_combustion(mdot_fuel, mdot_ox, T_fuel, T_ox, pressure)
 
 
@@ -260,6 +342,10 @@ def chamber_equilibrium(
     molar_mass_fallback: float = 22.0,
     temp_guess: float = 3600.0,
     efficiency: float = 1.0,
+    *, ox_exhaust_enthalpy: float | None = None,
+    fuel_exhaust_enthalpy: float | None = None,
+    heat_loss_W: float = 0.0,
+    energy_diagnostics: dict | None = None,
 ) -> GasState:
     """
     计算主燃烧室两股排气混合后的化学平衡。
@@ -272,11 +358,11 @@ def chamber_equilibrium(
     gamma_fallback : Cantera 不可用时的 γ 估计值
     molar_mass_fallback : Cantera 不可用时的 MW 估计值
     temp_guess     : Cantera 不可用时的温度猜测值
-    efficiency     : 燃烧效率 η_comb ∈ (0,1]。把理想平衡温度按"燃烧温升效率"
-                     折减为真实主流温度：T_real = T_mix + η·(T_ideal − T_mix)，
+    efficiency     : 兼容温升折减系数 ∈ (0,1]。按经验关系
+                     T_model = T_mix + k·(T_equilibrium − T_mix)，
                      T_mix 为两股排气的质量加权掺混温度（燃烧前参考）。
-                     1.0 = 理想完全燃烧（旧行为）。仅作用于温度，组分/压力不变，
-                     故下游 c*/Isp（由本态重建）与热流自动一致跟随，无双重计数。
+                     1.0 = 不附加经验温升折减。折减时组分/压力不变，
+                     焓差显式列为经验热汇；不是燃尽率或 c* 效率。
 
     返回
     ────
@@ -288,8 +374,14 @@ def chamber_equilibrium(
             ox_exhaust_T, ox_exhaust_mdot, ox_exhaust_composition,
             fuel_exhaust_T, fuel_exhaust_mdot, fuel_exhaust_composition,
             pressure, efficiency=efficiency,
+            ox_enthalpy=ox_exhaust_enthalpy, fuel_enthalpy=fuel_exhaust_enthalpy,
+            heat_loss_W=heat_loss_W, energy_diagnostics=energy_diagnostics,
         )
     else:
+        if heat_loss_W or ox_exhaust_enthalpy is not None or fuel_exhaust_enthalpy is not None:
+            raise RuntimeError("显式端口焓及热端抽热的主燃烧室平衡需要 Cantera。")
+        if _fuel_from_compositions(ox_exhaust_composition, fuel_exhaust_composition) != "CH4":
+            raise RuntimeError("煤油气相混合需要 Cantera；不提供甲烷经验回退。")
         return _empirical_chamber(
             ox_exhaust_T, ox_exhaust_mdot,
             fuel_exhaust_T, fuel_exhaust_mdot,
@@ -305,38 +397,46 @@ def gg_chamber_equilibrium(
     T_ox: float,
     pressure: float,
     efficiency: float = 1.0,
+    fuel_species: str = "CH4",
+    *, fuel_enthalpy: float | None = None, ox_enthalpy: float | None = None,
+    heat_loss_W: float = 0.0, energy_diagnostics: dict | None = None,
 ) -> GasState:
     """
-    燃气发生器循环主燃烧室：**液-液** LOX/CH₄ HP 化学平衡（V20 新增）。
+    GG 主室推进剂 HP 平衡；生产调用应传入实际泵/冷却出口的共同基准焓，
+    避免用同一入口温度在主室压力下重建另一状态的焓。预算模式的外部
+    heat_loss_W 在 HP 目标中扣一次；空间扣热模式传零，热汇由热侧模型处理。
 
-    与 chamber_equilibrium（FFSC 气-气掺混）的区别
-    ─────────────────────────────────────────────
-    FFSC 主燃室入口是两股热排气，组分/焓走气相 NASA 多项式没有问题；
-    GG 主燃室入口是 **低温液体推进剂**（LOX ~85 K，CH4 ~120–130 K），
-    必须走与预燃室同源的 combustion_equilibrium() —— 其 Cantera 路径
-    内置 CoolProp 真实流体焓修正（漏掉汽化潜热会把 Tc 系统性抬高 ~100 K+）。
-
-    efficiency < 1 时按燃烧温升效率折减温度（与 _cantera_chamber 同口径）：
-        T_real = T_mix + η·(T_ideal − T_mix)
-    T_mix 取两股入口的质量加权温度（燃烧前参考）；仅降温、组分/压力不变。
+    efficiency < 1 仅为兼容温升折减，组分冻结后调整温度，焓差单独记账；
+    不是标准燃烧效率、c* 效率或经试验验证的损失模型。
     """
     checkpoint()
+    if not math.isfinite(efficiency) or not 0 < efficiency <= 1:
+        raise ValueError("历史温升折减系数须在 (0, 1] 内。")
     state = combustion_equilibrium(
         mdot_fuel=mdot_fuel, mdot_ox=mdot_ox,
         T_fuel=T_fuel, T_ox=T_ox, pressure=pressure,
+        fuel_species=fuel_species,
+        fuel_enthalpy=fuel_enthalpy, ox_enthalpy=ox_enthalpy,
+        heat_loss_W=heat_loss_W, energy_diagnostics=energy_diagnostics,
     )
     if efficiency >= 1.0:
         return state
 
-    mdot_total = max(mdot_fuel + mdot_ox, 1e-9)
+    mdot_total = mdot_fuel + mdot_ox
     T_mix = (mdot_fuel * T_fuel + mdot_ox * T_ox) / mdot_total
+    if state.temperature < T_mix:
+        raise ValueError("抽热后的主室温度低于入口混合温度，不能把历史温升折减变成加热。")
     T_real = T_mix + efficiency * (state.temperature - T_mix)
 
     if CANTERA_AVAILABLE and state.source == "cantera":
         # 组分冻结在平衡解，把温度折减到 T_real 后由状态方程自洽重算 cp/γ/h/s
-        gas = _get_gas()
+        gas = _gas_for_state(state)
         Y = _dict_to_Y(gas, state.composition)
         gas.TPY = T_real, pressure, Y
+        if energy_diagnostics is not None:
+            loss = mdot_total*(state.enthalpy-gas.enthalpy_mass)
+            energy_diagnostics.update(h_chamber_Jkg=gas.enthalpy_mass, combustion_loss_W=loss,
+                energy_residual_W=mdot_total*(gas.enthalpy_mass-energy_diagnostics["h_in_Jkg"])+heat_loss_W+loss)
         return _gas_to_state(gas, pressure)
 
     # 经验回退：只改温度（cp/γ 经验值本就近似）
@@ -372,6 +472,8 @@ def turbine_expansion(
         composition              {species: Y}
     """
     checkpoint()
+    if (combustion_state.mechanism == "nDodecane_Reitz.yaml" or _fuel_from_compositions(combustion_state.composition) == "c12h26") and not (CANTERA_AVAILABLE and combustion_state.source == "cantera"):
+        raise RuntimeError("煤油涡轮膨胀需要对应 Cantera 气相状态，不提供经验回退。")
     if CANTERA_AVAILABLE and combustion_state.source == "cantera":
         return _cantera_turbine(combustion_state, exhaust_pressure, eta_turbine)
     else:
@@ -393,6 +495,8 @@ def nozzle_exit_state(
     仅 Cantera 模式可用，经验模式返回 None。
     """
     checkpoint()
+    if (chamber_state.mechanism == "nDodecane_Reitz.yaml" or _fuel_from_compositions(chamber_state.composition) == "c12h26") and not (CANTERA_AVAILABLE and chamber_state.source == "cantera"):
+        raise RuntimeError("煤油喷管膨胀需要对应 Cantera 气相状态，不提供经验回退。")
     if CANTERA_AVAILABLE and chamber_state.source == "cantera":
         return _cantera_nozzle_expansion(chamber_state, exit_pressure)
     return None
@@ -411,12 +515,14 @@ def nozzle_performance(
     主引擎默认用 equilibrium=False(冻结流):
       · 出口压力 p_e 由 ρV(p_e)=ṁ/A_t/ε 自洽确定,不再借用理想 γ 估计;
       · 冻结流速度快(~10ms),可放在 Newton 关键路径;
-      · 物理上更接近真实喷管(有限速率反应会冻结),且更保守。
-    交叉验证 / 理论上界用 equilibrium=True(平衡流,与 NASA CEA 同口径)。
+      · 从主室组成冻结是一种极限假设，不自动代表真实冻结位置。
+    对照可选择连续平衡或喉部冻结；实际适用性需反应时间尺度证据。
 
     仅 Cantera 模式可用,经验模式返回 None(由调用方走理想气体 fallback)。
     """
     checkpoint()
+    if (chamber_state.mechanism == "nDodecane_Reitz.yaml" or _fuel_from_compositions(chamber_state.composition) == "c12h26") and not (CANTERA_AVAILABLE and chamber_state.source == "cantera"):
+        raise RuntimeError("煤油喷管性能需要对应 Cantera 气相状态，不提供经验回退。")
     if CANTERA_AVAILABLE and chamber_state.source == "cantera":
         return _cantera_nozzle_expand(
             chamber_state, p_chamber, eps,
@@ -433,43 +539,51 @@ def nozzle_performance(
 def _cantera_combustion(
     mdot_fuel: float, mdot_ox: float,
     T_fuel: float, T_ox: float, pressure: float,
+    fuel_species: str = "CH4",
+    *, fuel_enthalpy: float | None = None, ox_enthalpy: float | None = None,
+    heat_loss_W: float = 0.0, energy_diagnostics: dict | None = None,
 ) -> GasState:
     """
     Cantera HP 化学平衡。
 
     步骤
     ────
-    1. 用 _real_fluid_enthalpy() 算 CH₄ 和 O₂ 在各自入口温度下的真实焓
-       （CoolProp 可用时含液相/超临界稠密相焓修正，否则用固定修正常数）
-    2. 按质量加权得到混合入口焓
+    1. 优先使用实际端口的共同基准焓；未传入时使用检查过的 HEOS 焓。
+    2. 按质量加权得到混合入口焓，并扣除明确给定的外部热汇。
     3. 设置组分 → 设定 HP → 平衡
 
-    与历史版本的差异
-    ──────────────────
-    旧版直接用 gas.TPX + gas.enthalpy_mass 读 NASA 多项式焓，把 LOX@90K
-    当成"气相 O2 外推到 90K"，遗漏汽化潜热 ~213 kJ/kg；LCH4 同理漏掉
-    ~510 kJ/kg。HP 平衡的入口焓因此偏高，预燃室 T 系统性偏高 130–160 K。
-    本版用 CoolProp 真实流体物性修正这一项，T_PB 应回落到合理量级。
+    冷推进剂不通过低温气相多项式外推代替液态入口焓。HEOS 与化学焓
+    使用统一参考态，但这本身不验证高压燃气的理想混合物假设。
     """
     checkpoint()
-    gas = _get_gas()
+    gas = _get_gas(fuel_species)
+    ox_species = "o2" if fuel_species == "c12h26" else "O2"
     mdot_total = mdot_fuel + mdot_ox
 
     # ── 入口焓（已含 LOX/LCH4 真实流体焓修正） ─────────────
-    h_fuel = _real_fluid_enthalpy("CH4", T_fuel, pressure, gas)
-    h_ox   = _real_fluid_enthalpy("O2",  T_ox,   pressure, gas)
+    h_fuel = (_real_fluid_enthalpy(fuel_species, T_fuel, pressure, gas)
+              if fuel_enthalpy is None else float(fuel_enthalpy))
+    h_ox = (_real_fluid_enthalpy(ox_species, T_ox, pressure, gas)
+            if ox_enthalpy is None else float(ox_enthalpy))
 
-    Y_fuel_frac = mdot_fuel / max(mdot_total, 1e-9)
+    if not math.isfinite(h_fuel) or not math.isfinite(h_ox):
+        raise ValueError("燃烧入口端口焓必须为有限值。")
+    Y_fuel_frac = mdot_fuel / mdot_total
     Y_ox_frac   = 1.0 - Y_fuel_frac
     h_inlet = Y_fuel_frac * h_fuel + Y_ox_frac * h_ox
 
     # ── HP 平衡(快路径 + 二分回退) ──────────────────────────────
     _equilibrate_HP(
-        gas, h_target=h_inlet, pressure=pressure,
-        Y_init=f"CH4:{Y_fuel_frac}, O2:{Y_ox_frac}",
+        gas, h_target=h_inlet-heat_loss_W/mdot_total, pressure=pressure,
+        Y_init=f"{fuel_species}:{Y_fuel_frac}, {ox_species}:{Y_ox_frac}",
         context=f"PB(mdot_f={mdot_fuel:.3g},mdot_o={mdot_ox:.3g})",
     )
 
+    if energy_diagnostics is not None:
+        energy_diagnostics.update(h_in_Jkg=h_inlet, h_after_heat_extraction_Jkg=gas.enthalpy_mass,
+            h_chamber_Jkg=gas.enthalpy_mass, heat_loss_W=heat_loss_W, combustion_loss_W=0.,
+            T_chamber_ideal_K=gas.T,
+            energy_residual_W=mdot_total*(gas.enthalpy_mass-h_inlet)+heat_loss_W)
     return _gas_to_state(gas, pressure)
 
 
@@ -493,6 +607,8 @@ def _equilibrate_HP(
     """
     # ── 快路径 ─────────────────────────────────────────────
     checkpoint()
+    if not (math.isfinite(h_target) and math.isfinite(pressure) and pressure > 0):
+        raise ValueError("HP 平衡要求有限目标焓和正压力。")
     try:
         # 1) 用 3000 K 把组分先 TP 平衡到产物,setState_HP 才能稳定收敛
         gas.TPY = 3000.0, pressure, Y_init
@@ -507,8 +623,10 @@ def _equilibrate_HP(
         checkpoint()
 
         # 3) 健全性校验:T 合理 + 焓与目标一致
-        T_ok = 200.0 < gas.T < 6000.0
-        h_tol = max(1.0e3, 1e-4 * abs(h_target))
+        # Fast and safeguarded paths share the same declared gas-temperature
+        # envelope. Which numerical path succeeds must not change validity.
+        T_ok = 300.0 <= gas.T <= (5000.0 if gas.name == "nDodecane_IG" else 5500.0)
+        h_tol = max(0.05, 1e-8 * abs(h_target))
         h_ok = abs(gas.enthalpy_mass - h_target) < h_tol
         if T_ok and h_ok:
             return
@@ -529,7 +647,7 @@ def _equilibrate_HP_bisection(
     Y_init,
     T_lo: float = 300.0,
     T_hi: float = 5500.0,
-    tol_K: float = 1e-2,
+    tol_K: float = 1e-7,
     max_iter: int = 60,
     context: str = "",
 ) -> None:
@@ -549,6 +667,10 @@ def _equilibrate_HP_bisection(
     """
     # 1) 建立 Y 的原子约束(equilibrate 会重分配原子,但原子总数守恒)
     checkpoint()
+    if not (math.isfinite(h_target) and math.isfinite(pressure) and pressure > 0):
+        raise ValueError("HP 平衡要求有限目标焓和正压力。")
+    if gas.name == "nDodecane_IG":
+        T_lo, T_hi = max(T_lo, 300.0), min(T_hi, 5000.0)
     gas.TPY = 0.5 * (T_lo + T_hi), pressure, Y_init
 
     # 2) 检查上下界包络 h_target
@@ -564,24 +686,11 @@ def _equilibrate_HP_bisection(
     checkpoint()
     h_hi = gas.enthalpy_mass
 
-    if h_target <= h_lo:
-        warnings.warn(
-            f"HP 平衡 {context}: h_target={h_target:.0f} J/kg 低于 T={T_lo}K "
-            f"的平衡焓 {h_lo:.0f} J/kg。结果截断到 T={T_lo}K。",
-            RuntimeWarning,
+    if h_target < h_lo or h_target > h_hi:
+        raise ValueError(
+            f"HP 平衡 {context}: 目标焓 {h_target:.6g} J/kg 超出 "
+            f"{T_lo:g}–{T_hi:g} K 的气相平衡焓包络 [{h_lo:.6g}, {h_hi:.6g}] J/kg；不截断温度。"
         )
-        gas.TP = T_lo, pressure
-        checkpoint()
-        gas.equilibrate("TP")
-        checkpoint()
-        return
-    if h_target >= h_hi:
-        warnings.warn(
-            f"HP 平衡 {context}: h_target={h_target:.0f} J/kg 高于 T={T_hi}K "
-            f"的平衡焓 {h_hi:.0f} J/kg。结果截断到 T={T_hi}K。",
-            RuntimeWarning,
-        )
-        return  # gas 已停在 T_hi
 
     # 3) 二分
     for _ in range(max_iter):
@@ -603,6 +712,8 @@ def _equilibrate_HP_bisection(
     checkpoint()
     gas.equilibrate("TP")
     checkpoint()
+    if abs(gas.enthalpy_mass - h_target) > max(0.05, 1e-8 * abs(h_target)):
+        raise ValueError(f"HP 平衡 {context} 未满足焓残差容差。")
 
 
 def _cantera_chamber(
@@ -610,6 +721,8 @@ def _cantera_chamber(
     fuel_T: float, fuel_mdot: float, fuel_comp: Dict[str, float],
     pressure: float,
     efficiency: float = 1.0,
+    *, ox_enthalpy: float | None = None, fuel_enthalpy: float | None = None,
+    heat_loss_W: float = 0.0, energy_diagnostics: dict | None = None,
 ) -> GasState:
     """
     两股涡轮排气在主燃烧室混合 → HP 平衡。
@@ -617,7 +730,7 @@ def _cantera_chamber(
     efficiency < 1 时按燃烧温升效率折减温度（见 chamber_equilibrium 文档）。
     """
     checkpoint()
-    gas = _get_gas()
+    gas = _get_gas(_fuel_from_compositions(ox_comp, fuel_comp))
     mdot_total = ox_mdot + fuel_mdot
     f_ox   = ox_mdot   / max(mdot_total, 1e-9)
     f_fuel = fuel_mdot / max(mdot_total, 1e-9)
@@ -627,12 +740,12 @@ def _cantera_chamber(
     # ── 富氧排气焓 ─────────────────────────────────────
     Y_ox = _dict_to_Y(gas, ox_comp)
     gas.TPY = ox_T, pressure, Y_ox
-    h_ox = gas.enthalpy_mass
+    h_ox = gas.enthalpy_mass if ox_enthalpy is None else float(ox_enthalpy)
 
     # ── 富燃排气焓 ─────────────────────────────────────
     Y_fuel = _dict_to_Y(gas, fuel_comp)
     gas.TPY = fuel_T, pressure, Y_fuel
-    h_fuel = gas.enthalpy_mass
+    h_fuel = gas.enthalpy_mass if fuel_enthalpy is None else float(fuel_enthalpy)
 
     # ── 质量加权混合 ───────────────────────────────────
     import numpy as np
@@ -641,7 +754,7 @@ def _cantera_chamber(
 
     # ── HP 平衡(快路径 + 二分回退) ──────────────────────────────
     _equilibrate_HP(
-        gas, h_target=h_mix, pressure=pressure,
+        gas, h_target=h_mix - heat_loss_W / mdot_total, pressure=pressure,
         Y_init=[float(v) for v in Y_mix],
         context=f"chamber(ox_mdot={ox_mdot:.3g},fuel_mdot={fuel_mdot:.3g})",
     )
@@ -650,11 +763,25 @@ def _cantera_chamber(
     # T_real = T_mix + η·(T_ideal − T_mix)，T_mix=两股排气质量加权掺混温(燃烧前)。
     # 仅降温、组分与压力不变 → cp/γ/h/s 由 gas.TP 自洽重算；下游喷管由本态
     # 重建，故 c*/Isp 自动跟随，无双重计数。
+    T_ideal = gas.T
+    h_before_efficiency = gas.enthalpy_mass
     if efficiency < 1.0:
-        T_ideal = gas.T
         T_mix   = f_ox * ox_T + f_fuel * fuel_T
+        if T_ideal < T_mix:
+            raise ValueError("抽热后的主室平衡温度低于入口混合温度，当前燃烧温升效率模型不适用；不能把效率损失变成加热。")
         T_real  = T_mix + efficiency * (T_ideal - T_mix)
         gas.TP  = T_real, pressure
+
+    combustion_loss_W = mdot_total * (h_before_efficiency - gas.enthalpy_mass)
+    if energy_diagnostics is not None:
+        energy_diagnostics.update({
+            "h_in_Jkg": h_mix, "h_after_heat_extraction_Jkg": h_before_efficiency,
+            "h_chamber_Jkg": gas.enthalpy_mass, "heat_loss_W": heat_loss_W,
+            "combustion_loss_W": combustion_loss_W,
+            "T_chamber_ideal_K": T_ideal,
+            "energy_residual_W": mdot_total * (gas.enthalpy_mass - h_mix)
+                                 + heat_loss_W + combustion_loss_W,
+        })
 
     return _gas_to_state(gas, pressure)
 
@@ -663,7 +790,8 @@ def _cantera_turbine(
     state: GasState, p_exhaust: float, eta: float,
 ) -> dict:
     """
-    用真实状态方程做等熵膨胀，不依赖理想气体 γ 近似。
+    用所选混合气体状态方程做冻结组分膨胀。当前是理想气体 EOS，
+    采用温度相关热容，而非固定 γ；不意味着高压非理想性已经处理。
 
     步骤
     ────
@@ -676,7 +804,7 @@ def _cantera_turbine(
     7. 用 HP 反查排气温度
     """
     checkpoint()
-    gas = _get_gas()
+    gas = _gas_for_state(state)
     Y = _dict_to_Y(gas, state.composition)
 
     # 入口状态
@@ -686,6 +814,7 @@ def _cantera_turbine(
 
     # 等熵膨胀到排气压力（冻结组分）
     gas.SP = s_in, p_exhaust
+    _check_gas_model_range(gas, report=False)
     h_out_s = gas.enthalpy_mass
 
     delta_h_s = h_in - h_out_s
@@ -694,6 +823,7 @@ def _cantera_turbine(
 
     # 由实际排气焓反查温度
     gas.HP = h_exhaust, p_exhaust
+    _check_gas_model_range(gas)
     T_exhaust = gas.T
 
     return {
@@ -702,6 +832,8 @@ def _cantera_turbine(
         "T_exhaust": T_exhaust,
         "h_exhaust": h_exhaust,
         "composition": _Y_to_dict(gas),
+        "mechanism": gas_data_filename(gas),
+        "phase": gas.name,
     }
 
 
@@ -712,7 +844,7 @@ def _cantera_nozzle_expansion(
     喷管冻结流等熵膨胀（固定组分，S=const → 给定 p_exit）。
     """
     checkpoint()
-    gas = _get_gas()
+    gas = _gas_for_state(chamber)
     Y = _dict_to_Y(gas, chamber.composition)
 
     gas.TPY = chamber.temperature, chamber.pressure, Y
@@ -726,9 +858,54 @@ def _cantera_nozzle_expansion(
 
 # ─── Cantera 工具函数 ──────────────────────────────────────
 
+def _check_gas_model_range(gas: "ct.Solution", *, report: bool = True) -> Dict[str, float]:
+    if gas.name == "nDodecane_IG" and not 300.0 <= gas.T <= 5000.0:
+        raise ValueError(f"正十二烷气相温度 {gas.T:.2f} K 超出 300–5000 K 求解范围；不继续外推。")
+    if gas.min_temp <= gas.T <= gas.max_temp:
+        return {}
+    info = gas_temperature_applicability(gas)
+    outside = {s["species"]: s["mass_fraction"] for s in info["species_outside"]}
+    if outside and report:
+        # Stable wording deduplicates solver trial warnings; exact final-state
+        # temperatures, limits and fractions are persisted separately.
+        category = SurrogateThermoRangeWarning if gas.name == "nDodecane_IG" else ThermoRangeWarning
+        warnings.warn(f"{gas.name} 求解过程中存在超出声明温区的物种热力学多项式外推；"
+                      "不截断温度，不据数值收敛判定热力学适用。请查看最终状态温区明细。", category)
+    return outside
+
+
+def gas_temperature_applicability(gas: "ct.Solution") -> dict:
+    """Read-only audit of every nonzero species, including trace species.
+
+    A zero fraction is excluded from the state coverage but not from the
+    mechanism-common interval. This is a data-range check, never an error bound.
+    """
+    species = gas.species()
+    fractions = gas.Y
+    present = [(sp, float(y)) for sp, y in zip(species, fractions) if y > 0]
+    outside = [{"species": sp.name, "mass_fraction": y,
+                "min_temperature_K": float(sp.thermo.min_temp),
+                "max_temperature_K": float(sp.thermo.max_temp)}
+               for sp, y in present if not sp.thermo.min_temp <= gas.T <= sp.thermo.max_temp]
+    outside.sort(key=lambda row: row["mass_fraction"], reverse=True)
+    return {
+        "status": "extrapolated" if outside else "within_declared_ranges",
+        "temperature_K": float(gas.T), "species_outside": outside,
+        "outside_mass_fraction": math.fsum(row["mass_fraction"] for row in outside),
+        "valid_temperature_min_K": max((float(sp.thermo.min_temp) for sp, _ in present), default=None),
+        "valid_temperature_max_K": min((float(sp.thermo.max_temp) for sp, _ in present), default=None),
+        "common_temperature_min_K": max(float(sp.thermo.min_temp) for sp in species),
+        "common_temperature_max_K": min(float(sp.thermo.max_temp) for sp in species),
+        "mass_fraction_threshold": 0.0,
+        "interpretation": "声明温区检查；外推占比不是误差百分比，温区内也不代表精度已验证。",
+    }
+
+
 def _gas_to_state(gas: "ct.Solution", pressure: float) -> GasState:
     """从 Cantera Solution 对象提取 GasState"""
     checkpoint()
+    kerosene = gas.name == "nDodecane_IG"
+    extrapolation = _check_gas_model_range(gas)
     return GasState(
         temperature=gas.T,
         pressure=pressure,
@@ -739,35 +916,44 @@ def _gas_to_state(gas: "ct.Solution", pressure: float) -> GasState:
         entropy=gas.entropy_mass,
         composition=_Y_to_dict(gas),
         source="cantera",
+        mechanism=gas_data_filename(gas),
+        phase=gas.name,
+        thermo_extrapolation=extrapolation,
+        thermo_range=gas_temperature_applicability(gas),
+        gas_model=gas.thermo_model,
     )
 
 
 def _Y_to_dict(gas: "ct.Solution") -> Dict[str, float]:
-    """Cantera Y 数组 → 精简字典（忽略微量物种）"""
+    """Preserve trace species internally so rebuilding a port preserves its h and atoms."""
     checkpoint()
     return {
         gas.species_name(i): float(gas.Y[i])
         for i in range(gas.n_species)
-        if gas.Y[i] > 1e-10
+        if gas.Y[i] > 0.0
     }
 
 
 def _dict_to_Y(gas: "ct.Solution", comp: Dict[str, float]) -> list:
-    """质量分数字典 → Cantera Y 数组（未识别物种忽略）"""
+    """Check mass fractions before Cantera; only rounding drift is normalized."""
     checkpoint()
     import numpy as np
+    if not isinstance(comp, dict) or not comp:
+        raise ValueError("气相质量分数组成不能为空；不能用占位气体代替。")
     Y = np.zeros(gas.n_species)
     for name, frac in comp.items():
         checkpoint()
+        if isinstance(frac, bool) or not isinstance(frac, (int, float)) or not math.isfinite(frac) or frac < 0:
+            raise ValueError(f"物种 {name!r} 的质量分数必须是非负有限数值；收到 {frac!r}。")
         idx = gas.species_index(name) if name in gas.species_names else -1
         if idx >= 0:
             Y[idx] = frac
+        elif frac > 0:
+            raise ValueError(f"气相数据未识别物种 {name!r}；不能丢弃质量后重新归一化。")
     total = Y.sum()
-    if total > 0:
-        Y /= total   # 归一化
-    else:
-        # fallback：纯 N2 占位（不应发生）
-        Y[gas.species_index("N2")] = 1.0
+    if total <= 0 or abs(total - 1.0) > 1e-8:
+        raise ValueError(f"气相质量分数之和为 {total:.16g}；要求 1±1e-8，不接受任意归一化。")
+    Y /= total
     return Y.tolist()
 
 
@@ -1015,58 +1201,77 @@ try:
 except ImportError:
     ROCKETCEA_AVAILABLE = False
 
-_PSIA_PER_BAR = 14.5038      # 1 bar = 14.5038 psia
+_PSIA_PER_BAR = 1e5 / 6894.757293168  # exact SI conversion to psi
 _FT_S_TO_M_S  = 0.3048       # ft/s -> m/s
 _RANKINE_TO_K = 1.0 / 1.8    # R -> K
 
-# ── 第三步修正:CEA 反应物入口温度与 Cantera 基准锁同 ─────────────────
-# rocketcea 默认 "LOX/CH4" 实际已经是液态(LOX@90.17K / 液 CH4@~111.65K),
-# 但 Cantera 在本程序里用的是 LOX@90K / CH4@110K,基准差 ~1-2 K。
-# 这里通过 add_new_oxidizer/add_new_fuel 注册"温度精确对齐到 Cantera 入口"的
-# 自定义反应物,使 CEA vs Cantera 的差异只来自模型(CEA 数据库 vs GRI-3.0)
-# 与平衡/冻结模式,而非入口温度基准。注册是懒式且按 (T_ox, T_fuel) 缓存的。
-#
-# 焓的算法:
-#   LOX:  h_ref(O2 液,90.17K) = -3102 cal/mol(NIST 反算,与 rocketcea 默认值匹配)
-#         dh/dT (液相 cp_p) = 13.0 cal/(mol·K)  (NIST WebBook @ NBP:
-#                                                 cp_l=1.6964 kJ/(kg·K)·32 g/mol
-#                                                     = 54.27 J/(mol·K) = 12.97 cal/(mol·K))
-#         注:V6.1 修正 — 旧版误用气相 cp=6.5,造成低/高温 LOX 工况下 CEA 入口
-#         焓系统偏高,Tc 偏高 ~0.1%(对 T_LOX=70K 密度化工况 ~4 K)。
-#   LCH4: h_ref(CH4 液,111.65K) ≈ -21490 cal/mol(由气态 298K 基准 -17896,
-#         加 298→111.65 显热 -1607 cal/mol,减汽化潜热 1985 cal/mol)
-#         dh/dT (液相 cp_p) ≈ 13 cal/(mol·K)(NIST 实测 13.3,~2% 误差)
+# CEA cards receive the same pressure-dependent inlet enthalpies as Cantera.
+# Product species and phases are still different; no accuracy verdict is inferred.
 _CEA_CUSTOM_REGISTERED: "dict[tuple, tuple[str, str]]" = {}
 
-def _ensure_cea_custom_reactants(T_ox_K: float, T_fuel_K: float) -> "tuple[str, str]":
-    """注册一对 (LOX, LCH4) 自定义反应物,入口温度对齐到 Cantera 基准。
+def validation_reactants(T_fuel_K, T_ox_K, pressure, fuel_species="CH4") -> dict:
+    """Identical inlet chemical enthalpy for both validation solvers, no fallback.
 
-    返回 (ox_name, fuel_name) 可直接传给 _CEA_Obj。温度按 0.1 K 量化,
-    相同温度对只注册一次。rocketcea 不可用时返回默认名(调用方应已先做可用性检查)。
+    HEOS enthalpy is anchored to the chosen Cantera ideal species reference;
+    finite-pressure residual enthalpy is removed at the reference point.
+    J/kg * kg/kmol / 1000 / 4.184 = cal/mol.
+    The pressure is an explicit inlet assumption, equal to chamber pressure.
     """
+    if not CANTERA_AVAILABLE or not COOLPROP_AVAILABLE:
+        raise RuntimeError("同入口焓对比需要 Cantera 和 CoolProp；不使用经验焓回退。")
+    gas = _get_gas(fuel_species)
+    fuel_species = normalize_fuel_species(fuel_species)
+    ox_species = "o2" if fuel_species == "c12h26" else "O2"
+    if fuel_species == "c12h26":
+        validate_surrogate_state(T_fuel_K, pressure)
+    reference_T, reference_p = ((600.0, 1000.0) if fuel_species == "c12h26"
+                                else (298.15, 101325.0))
+    result = {"fuel_species": fuel_species, "oxidizer_species": ox_species,
+              "reference": {"temperature_K": reference_T, "pressure_Pa": reference_p,
+                            "id": enthalpy_reference_id(fuel_species),
+                            "basis": "Cantera ideal species chemical enthalpy + HEOS H(T,p) - HEOS H_ideal(T_ref)"},
+              "inlet_pressure_Pa": pressure,
+              "pressure_assumption": "独立燃烧室基准：两路入口物性压力均取燃烧室压力。"}
+    for role, species, temperature in (("fuel", fuel_species, T_fuel_K), ("oxidizer", ox_species, T_ox_K)):
+        enthalpy = _real_fluid_enthalpy(species, temperature, pressure, gas)
+        molecular_weight = float(gas.molecular_weights[gas.species_index(species)])
+        result[role + "_enthalpy_Jkg"] = enthalpy
+        result[role + "_molecular_weight_kg_kmol"] = molecular_weight
+        result[role + "_enthalpy_cal_mol"] = enthalpy * molecular_weight / 4184.0
+        result[role + "_temperature_K"] = temperature
+        result[role + "_phase"] = fluid_state_tp(species, temperature, pressure)["phase"]
+    return result
+
+
+def _ensure_cea_custom_reactants(T_ox_K: float, T_fuel_K: float, pressure: float = 30e6,
+                                fuel_species: str = "CH4", reactants=None) -> "tuple[str, str]":
+    """Register exact shared chemical inlet enthalpies, including pressure.
+
+    Cards encode elemental formula and explicit h,cal (cal/mol); their names
+    hash all inputs so sub-0.1 K changes cannot alias an earlier cached card.
+    """
+    import hashlib
+    import json
     checkpoint()
     if not ROCKETCEA_AVAILABLE:
-        return ("LOX", "CH4")
-
-    key = (round(float(T_ox_K), 1), round(float(T_fuel_K), 1))
+        raise RuntimeError("RocketCEA 未安装，不能计算或伪造 CEA 结果。")
+    reactants = reactants or validation_reactants(T_fuel_K, T_ox_K, pressure, fuel_species)
+    key = hashlib.sha256(json.dumps(reactants, sort_keys=True).encode()).hexdigest()[:20]
     cached = _CEA_CUSTOM_REGISTERED.get(key)
     if cached is not None:
         return cached
 
-    # 名称里的小数点替换为 'p',避免被 CEA 名称解析当成分隔符
-    ox_name   = f"LOX_{key[0]:.1f}K".replace(".", "p")
-    fuel_name = f"LCH4_{key[1]:.1f}K".replace(".", "p")
-
-    h_lox  = -3102.0  + (T_ox_K   - 90.17)  * 13.0   # NIST 液相 cp(原 6.5 误用气相值)
-    h_lch4 = -21490.0 + (T_fuel_K - 111.65) * 13.0
+    ox_name, fuel_name = "OX_" + key, "FUEL_" + key
+    h_lox, h_fuel = reactants["oxidizer_enthalpy_cal_mol"], reactants["fuel_enthalpy_cal_mol"]
+    formula = "C 12 H 26" if reactants["fuel_species"] == "c12h26" else "C 1 H 4"
 
     _add_new_ox(
         ox_name,
-        f"oxid O2(L) O 2.0\nh,cal={h_lox:.1f}  t(k)={T_ox_K:.2f}\n",
+        f"oxid O2_input O 2.0 wt%=100.\nh,cal={h_lox:.12g} t(k)={T_ox_K:.12g}\n",
     )
     _add_new_fuel(
         fuel_name,
-        f"fuel CH4(L) C 1.0 H 4.0\nh,cal={h_lch4:.1f}  t(k)={T_fuel_K:.2f}\n",
+        f"fuel Fuel_input {formula} wt%=100.\nh,cal={h_fuel:.12g} t(k)={T_fuel_K:.12g}\n",
     )
 
     _CEA_CUSTOM_REGISTERED[key] = (ox_name, fuel_name)
@@ -1098,27 +1303,68 @@ def _mach_from_area_ratio(eps: float, gamma: float) -> float:
     return (lo + hi) * 0.5
 
 
+def isentropic_sound_speed(gas, equilibrium: bool = True, relative_step: float = 1e-4) -> float:
+    """Sound speed from (dp/drho)_s, with explicit chemistry constraint.
+
+    Equilibrium derivative follows Cantera's documented sound-speed example;
+    central differences reduce truncation error. The original state is restored.
+    https://cantera.org/3.1/examples/python/thermo/sound_speed.html
+    """
+    if not equilibrium:
+        return float(gas.sound_speed)
+    state = gas.TDY
+    entropy, pressure = gas.entropy_mass, gas.P
+    try:
+        densities = []
+        for factor in (1.0-relative_step, 1.0+relative_step):
+            checkpoint()
+            gas.TDY = state
+            gas.SP = entropy, pressure * factor
+            gas.equilibrate("SP", rtol=1e-10)
+            densities.append(gas.density_mass)
+        derivative = pressure * (2*relative_step) / (densities[1]-densities[0])
+        if not _math.isfinite(derivative) or derivative <= 0:
+            raise ValueError("平衡等熵声速导数无有效正值。")
+        return _math.sqrt(derivative)
+    finally:
+        gas.TDY = state
+
+
+def _nozzle_station(gas, equilibrium) -> dict:
+    speed = isentropic_sound_speed(gas, equilibrium)
+    return {"temperature_K": float(gas.T), "pressure_Pa": float(gas.P),
+            "density_kg_m3": float(gas.density_mass), "enthalpy_Jkg": float(gas.enthalpy_mass),
+            "entropy_JkgK": float(gas.entropy_mass), "sound_speed_m_s": speed,
+            "MW_kg_kmol": float(gas.mean_molecular_weight),
+            "gamma_isentropic": speed**2 * gas.density_mass / gas.P,
+            "cp_cv_frozen": float(gas.cp_mass/gas.cv_mass),
+            "mass_fractions": {name: float(value) for name, value in zip(gas.species_names, gas.Y) if value > 0},
+            "element_mass_fractions": {name: float(gas.elemental_mass_fraction(name)) for name in gas.element_names}}
+
+
 def _cantera_nozzle_expand(
     chamber: GasState, p_chamber: float, eps: float,
     equilibrium: bool = True,
     p_amb: float = 0.0,
     n_iter: int = 40,
+    freeze_at_throat: bool = False,
+    diagnostics: bool = False,
+    gas_override=None,
 ) -> "dict | None":
     """
     Cantera 喷管膨胀,**统一冻结流 / 平衡流两种口径**,出口压力按面积比自洽求解。
 
     equilibrium=True  → 平衡流:每截面 gas.equilibrate("SP"),组分随膨胀重组,
-                        离解物种(H/OH/O)在低温段复合放热 → Isp 偏高(理论上界,
-                        与 NASA CEA 默认同口径)。慢(~600ms,只在交叉验证/最终报告用)。
+                        允许离解物种在膨胀时重新达到平衡。此假设可与 CEA 同口径对照。
     equilibrium=False → 冻结流:组分锁定,只 gas.SP(无 equilibrate)。快(~10ms,
-                        可在 Newton 关键路径用),更接近真实喷管(有限速率反应会冻结)。
+                        可在 Newton 关键路径用)。主室冻结与实际冻结位置的符合程度尚未验证。
 
     出口压力 p_e 不再借用理想 γ 估计,而是按 ρV(p_e)=ṁ/A_t/ε 二分求解,
     与给定面积比 ε 自洽。
 
     算法:
     1. 燃烧室态记下 s_c, h_c(等熵 + 能量守恒不变量)
-    2. 喉部:二分 p 找 V=a(M=1) → ρ_t·V_t = ṁ/A_t, C*=Pc/(ρ_t·V_t)
+    2. 平衡喉部:最大化等熵质量通量 ρV；冻结喉部沿用 V=a 二分
     3. 出口:二分 p 找 ρV(p_e)=ρ_t·V_t/ε → 自洽 p_e, V_e
     4. Isp_vac = (V_e + p_e·ε·C*/Pc)/g₀;Isp_SL = Isp_vac − p_amb·ε·C*/(Pc·g₀)
 
@@ -1127,7 +1373,13 @@ def _cantera_nozzle_expand(
     checkpoint()
     if not CANTERA_AVAILABLE:
         return None
-    gas = _get_gas()
+    if freeze_at_throat and not equilibrium:
+        raise ValueError("喉部冻结必须先按平衡流计算燃烧室至喉部。")
+    flow_model = "frozen_throat" if freeze_at_throat else ("equilibrium" if equilibrium else "frozen")
+    # Independent validation may supply a deliberately restricted species set
+    # or a different thermochemical data file. Retain that same phase throughout
+    # the nozzle; reconstructing the production phase would change the problem.
+    gas = gas_override if gas_override is not None else _gas_for_state(chamber)
 
     Y_chamber = _dict_to_Y(gas, chamber.composition)
     gas.TPY = chamber.temperature, p_chamber, Y_chamber
@@ -1142,6 +1394,7 @@ def _cantera_nozzle_expand(
             checkpoint()
             gas.equilibrate("SP")
             checkpoint()
+        _check_gas_model_range(gas, report=False)
         T   = gas.T
         rho = gas.density_mass
         h   = gas.enthalpy_mass
@@ -1151,22 +1404,54 @@ def _cantera_nozzle_expand(
         a = _math.sqrt(max(gamma_local * p / max(rho, 1.0e-9), 0.0))
         return T, rho, V, a
 
-    # ── 喉部 V = a (M = 1) ────────────────────────────
+    chamber_diagnostics = _nozzle_station(gas, equilibrium) if diagnostics else None
+    # Equilibrium choking maximizes rho*sqrt(2*(h0-h)) on the equilibrium
+    # isentrope. cp/cv is the frozen-composition derivative and cannot locate
+    # an equilibrium throat. Keep the established frozen solver unchanged.
     p_lo, p_hi = 0.05 * p_chamber, 0.95 * p_chamber
-    for _ in range(n_iter):
-        checkpoint()
-        p_mid = 0.5 * (p_lo + p_hi)
-        _, _, V, a = state_at(p_mid)
-        if V > a:
-            p_lo = p_mid
-        else:
-            p_hi = p_mid
-        if p_hi - p_lo < p_chamber * 1.0e-6:
-            break
+    if equilibrium:
+        p_lo, p_hi = 0.0001 * p_chamber, 0.9999 * p_chamber
+        ratio = (_math.sqrt(5.0) - 1.0) / 2.0
+        left = p_hi - ratio * (p_hi-p_lo)
+        right = p_lo + ratio * (p_hi-p_lo)
+        def mass_flux(p):
+            # Reset the full state so optimizer order cannot change its objective.
+            gas.TPY = chamber.temperature, p_chamber, Y_chamber
+            _, density, velocity, _ = state_at(p)
+            return density * velocity
+        f_left, f_right = mass_flux(left), mass_flux(right)
+        for _ in range(max(n_iter, 50)):
+            checkpoint()
+            if f_left < f_right:
+                p_lo, left, f_left = left, right, f_right
+                right = p_lo + ratio * (p_hi-p_lo)
+                f_right = mass_flux(right)
+            else:
+                p_hi, right, f_right = right, left, f_left
+                left = p_hi - ratio * (p_hi-p_lo)
+                f_left = mass_flux(left)
+            if p_hi-p_lo < p_chamber * 1e-8:
+                break
+    else:
+        for _ in range(n_iter):
+            checkpoint()
+            p_mid = 0.5 * (p_lo + p_hi)
+            _, _, V, a = state_at(p_mid)
+            if V > a:
+                p_lo = p_mid
+            else:
+                p_hi = p_mid
+            if p_hi - p_lo < p_chamber * 1.0e-6:
+                break
     p_throat = 0.5 * (p_lo + p_hi)
     T_throat, rho_throat, V_throat, _ = state_at(p_throat)
+    throat_diagnostics = _nozzle_station(gas, equilibrium) if diagnostics else None
+    if freeze_at_throat:
+        equilibrium = False  # gas retains the equilibrium throat composition
 
     if V_throat <= 1.0 or rho_throat <= 1.0e-6:
+        if gas.name == "nDodecane_IG":
+            raise ValueError("正十二烷喷管喉部求解无有效质量通量；不回退为常比热理想气体。")
         return None
 
     mdot_per_At = rho_throat * V_throat
@@ -1183,10 +1468,14 @@ def _cantera_nozzle_expand(
             p_lo = p_mid
         else:
             p_hi = p_mid
-        if p_hi - p_lo < 1.0:
+        if p_hi - p_lo < (max(1e-6, p_mid*1e-8) if diagnostics else 1.0):
             break
     p_exit = 0.5 * (p_lo + p_hi)
+    if eps == 1.0 and diagnostics:
+        p_exit = p_throat
     T_exit, _, V_exit, _ = state_at(p_exit)
+    _check_gas_model_range(gas)
+    exit_diagnostics = _nozzle_station(gas, equilibrium) if diagnostics else None
 
     # 推力系数 + 比冲(真空 & 海平面)
     # C_F = F/(Pc·A_t);Isp = C*·C_F/g₀
@@ -1195,8 +1484,8 @@ def _cantera_nozzle_expand(
     Isp_vac = Cstar * cf_vac / _G0
     Isp_sl  = Cstar * cf_sl  / _G0
 
-    return {
-        "flow_model": "equilibrium" if equilibrium else "frozen",
+    result = {
+        "flow_model": flow_model,
         "Tc":        chamber.temperature,
         "p_chamber": p_chamber,
         "p_throat":  p_throat,
@@ -1211,6 +1500,17 @@ def _cantera_nozzle_expand(
         "Isp_vac":   Isp_vac,
         "Isp_sl":    Isp_sl,
     }
+    if diagnostics:
+        result["stations"] = {"chamber": chamber_diagnostics, "throat": throat_diagnostics,
+                              "exit": exit_diagnostics}
+        result["diagnostics"] = {
+            "throat_method": "equilibrium_mass_flux_maximum" if flow_model != "frozen" else "frozen_sonic_condition",
+            "throat_sonic_residual": V_throat / throat_diagnostics["sound_speed_m_s"] - 1.0,
+            "area_relative_residual": exit_diagnostics["density_kg_m3"] * V_exit * eps / mdot_per_At - 1.0,
+            "energy_residual_Jkg": exit_diagnostics["enthalpy_Jkg"] + V_exit**2/2 - h_chamber,
+            "entropy_residual_JkgK": exit_diagnostics["entropy_JkgK"] - s_chamber,
+        }
+    return result
 
 
 def _cantera_equilibrium_nozzle(chamber: GasState, p_chamber: float, eps: float):
@@ -1244,33 +1544,15 @@ def _cantera_perf_point(
     """
     checkpoint()
     if not CANTERA_AVAILABLE:
-        return None
-    try:
-        mdot_fuel = 1.0 / (1.0 + of)
-        mdot_ox   = of  / (1.0 + of)
-        state = _cantera_combustion(mdot_fuel, mdot_ox, T_fuel_K, T_ox_K, pc_pa)
-
-        # 平衡流喷管展开
-        nozzle = _cantera_equilibrium_nozzle(state, pc_pa, eps)
-        if nozzle is None:
-            return None
-
-        return {
-            "source":     "cantera",
-            "Isp_vac_s":  nozzle["Isp_vac"],
-            "Cstar_m_s":  nozzle["Cstar"],
-            "Tc_K":       state.temperature,
-            "gamma":      state.gamma,
-            "MW_kg_kmol": state.molar_mass,
-            "flow_model": "equilibrium",   # 标识口径
-            "p_throat":   nozzle["p_throat"],
-            "T_throat":   nozzle["T_throat"],
-            "p_exit":     nozzle["p_exit"],
-            "T_exit":     nozzle["T_exit"],
-            "V_exit":     nozzle["V_exit"],
-        }
-    except Exception:
-        return None
+        raise RuntimeError("Cantera 未安装；无可用热力学对比结果。")
+    from webapp.thermo_compare import _cantera_point, normalize_request, _comparison_reactants
+    from propellants import get_propellant
+    request = normalize_request({"pc_pa": pc_pa, "T_fuel_K": T_fuel_K, "T_ox_K": T_ox_K,
+                                 "mode": "equilibrium", "methane_thermo_dataset": active_methane_dataset()})
+    result = _cantera_point(request, of, eps, _comparison_reactants(request, get_propellant()))
+    return result["metrics"] | {"source": "cantera", "flow_model": "equilibrium",
+        "gamma": result["metrics"]["gamma_chamber"], "MW_kg_kmol": result["metrics"]["MW_chamber_kg_kmol"],
+        "stations": result["stations"], "diagnostics": result["diagnostics"]}
 
 
 def _cea_perf_point(
@@ -1283,9 +1565,7 @@ def _cea_perf_point(
     """
     rocketcea 单点计算 -> SI 单位结果字典，或 None（rocketcea 不可用时）。
 
-    第三步修正:通过 _ensure_cea_custom_reactants() 注册温度对齐到
-    Cantera 基准的 LOX/LCH4 反应物,使 CEA-Cantera 差异只来自模型层,
-    不再混入入口温度基准差。
+    入口化学焓、元素配比与 Cantera 一致；产品数据库/相范围仍未统一。
 
     rocketcea 默认英制输出：
         Isp_vac : s       (已是 SI，无需转换)
@@ -1295,30 +1575,15 @@ def _cea_perf_point(
     """
     checkpoint()
     if not ROCKETCEA_AVAILABLE:
-        return None
-    try:
-        ox_name, fuel_name = _ensure_cea_custom_reactants(T_ox_K, T_fuel_K)
-        cea     = _CEA_Obj(oxName=ox_name, fuelName=fuel_name)
-        pc_psia = pc_bar * _PSIA_PER_BAR
-
-        # get_IvacCstrTc_exitMwGam -> (Isp_vac_s, Cstar_ft_s, Tc_R, MW, gamma)
-        isp_vac, cstar_ft_s, Tc_R, MW, gamma = cea.get_IvacCstrTc_exitMwGam(
-            Pc=pc_psia, MR=of, eps=eps
-        )
-        return {
-            "source":     "cea",
-            "Isp_vac_s":  isp_vac,
-            "Cstar_m_s":  cstar_ft_s * _FT_S_TO_M_S,
-            "Tc_K":       Tc_R * _RANKINE_TO_K,
-            "gamma":      gamma,
-            "MW_kg_kmol": float(MW),
-            "T_fuel_K":   T_fuel_K,
-            "T_ox_K":     T_ox_K,
-            "ox_name":    ox_name,
-            "fuel_name":  fuel_name,
-        }
-    except Exception:
-        return None
+        raise RuntimeError("RocketCEA 未安装；无可用 CEA 对比结果。")
+    from webapp.thermo_compare import _cea_point, normalize_request, _comparison_reactants
+    from propellants import get_propellant
+    request = normalize_request({"pc_pa": pc_bar*1e5, "T_fuel_K": T_fuel_K, "T_ox_K": T_ox_K,
+                                 "mode": "equilibrium", "methane_thermo_dataset": active_methane_dataset()})
+    result = _cea_point(request, of, eps, _comparison_reactants(request, get_propellant()))
+    return result["metrics"] | {"source": "cea", "flow_model": "equilibrium",
+        "gamma": result["metrics"]["gamma_chamber"], "MW_kg_kmol": result["metrics"]["MW_chamber_kg_kmol"],
+        "stations": result["stations"], "diagnostics": result["diagnostics"]}
 
 
 def cross_validate_cea_cantera(
@@ -1327,6 +1592,7 @@ def cross_validate_cea_cantera(
     pc_pa:      float = 30e6,
     T_fuel_K:   float = 110.0,
     T_ox_K:     float = 90.0,
+    methane_thermo_dataset: str | None = None,
 ) -> list:
     """
     在 O/F x eps 网格上并排对比 Cantera 和 NASA CEA 的燃烧室性能。
@@ -1360,8 +1626,15 @@ def cross_validate_cea_cantera(
         checkpoint()
         for eps in eps_list:
             checkpoint()
-            ct_res  = _cantera_perf_point(of, pc_pa, eps, T_fuel_K, T_ox_K)
-            cea_res = _cea_perf_point(of, pc_bar, eps, T_fuel_K, T_ox_K)
+            # Preserve the desktop table contract while retaining explicit status,
+            # diagnostics and reasons from the auditable comparison implementation.
+            from webapp.thermo_compare import compare_thermochemistry
+            report = compare_thermochemistry({"of_values": [of], "eps_values": [eps],
+                "pc_pa": pc_pa, "T_fuel_K": T_fuel_K, "T_ox_K": T_ox_K,
+                "methane_thermo_dataset": methane_thermo_dataset or active_methane_dataset()})
+            point = report["points"][0]
+            ct_res = point["cantera"]["metrics"] if point["cantera"]["status"] == "ok" else None
+            cea_res = point["cea"]["metrics"] if point["cea"]["status"] == "ok" else None
 
             rec = {
                 "of":     of,
@@ -1369,6 +1642,11 @@ def cross_validate_cea_cantera(
                 "pc_bar": pc_bar,
                 "cantera": ct_res,
                 "cea":     cea_res,
+                "validation": point,
+                "cantera_status": point["cantera"]["status"],
+                "cea_status": point["cea"]["status"],
+                "cantera_error": point["cantera"]["reason"],
+                "cea_error": point["cea"]["reason"],
             }
 
             for key in ("Isp_vac_s", "Cstar_m_s", "Tc_K"):

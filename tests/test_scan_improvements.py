@@ -5,6 +5,7 @@ import inspect
 import math
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from core import EngineInputs
+from convergence import numerical_convergence
 from cycle import FFSCCycleModel
+from engine_presets import preset_input_values
 from gui_pyside6 import WorkerSignals
 from scan_parameters import build_scan_points, verify_scan_replay
 from sweep import sweep_ox_preburner_mr
@@ -197,16 +200,35 @@ class ScanUiTests(unittest.TestCase):
 
     def test_genuine_fixed_mr_scan_candidate_replays_with_same_model(self):
         w = self.window
-        inputs = EngineInputs()
-        inputs.cooling_marching_enable = 0
+        # This integration test verifies scan/apply/replay of the complete input
+        # contract with two real solves. Use an explicit system heat budget;
+        # detailed coolant/hot-gas closure is covered by its dedicated tests.
+        # The legacy marching flag alone no longer disables physical cooling.
+        inputs = EngineInputs(**preset_input_values("raptor3_ffsc"))
+        inputs.cooling_bartz_mode = 0
+        inputs.cooling_heat_load = 90e6
+        inputs.cooling_dp_pa = 5e6
+        inputs.use_target_preburner_temp = 0
+        inputs.use_target_preburner_mr = 1
+        # Known converged branch, taken from the unified physical design and
+        # independently checked with this explicit heat/pressure budget. The
+        # temperatures are outputs here (about 742/808 K), not target values.
+        # EngineInputs' legacy 60/.13 pair is not a feasible-branch guarantee.
+        inputs.ox_preburner_mr_target = 59.81689453125
+        inputs.fuel_preburner_mr_target = 0.1599658203125
+        scan_target = inputs.ox_preburner_mr_target
         source = asdict(inputs)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            record = sweep_ox_preburner_mr(inputs, [60])[0]
+            record = sweep_ox_preburner_mr(inputs, [scan_target])[0]
             self.assertTrue(record["converged"], f"Selected regression point failed: {record}")
             self.select_candidate(source, record)
             w._on_of_sweep_apply()
             replay = FFSCCycleModel(w._read_inputs()).evaluate()
+        self.assertEqual(replay.inputs.cooling_bartz_mode, 0)
+        self.assertEqual(replay.inputs.cooling_heat_load, source["cooling_heat_load"])
+        self.assertEqual(replay.inputs.cooling_dp_pa, source["cooling_dp_pa"])
+        self.assertEqual(numerical_convergence(replay)["status"], "pass")
         result = verify_scan_replay(record, replay)
         self.assertTrue(result["consistent"], result["different_fields"])
         # The actual completion callback must also publish the replay check.
@@ -221,6 +243,25 @@ class ScanUiTests(unittest.TestCase):
         with patch("workbench.legacy.MainWindow._on_solve_finished"):
             w._on_solve_finished(replay)
         self.assertIsNone(w._last_scan_replay_check)
+
+    def test_undefined_pump_npsh_is_not_a_pass_or_a_crash(self):
+        for nss in (None, float("nan"), float("inf")):
+            with self.subTest(nss=nss):
+                outputs = {"u_tip_est_ms": 100.0, "tip_speed_limit_ms": 550.0,
+                           "npsh_available_m": None, "npsh_applicable": 0.0,
+                           "suction_specific_speed_Nss": nss}
+                badges = self.window._component_status_badges(
+                    "fuel_pump", SimpleNamespace(outputs=outputs))
+                npsh_badges = [(text, level) for text, level in badges
+                              if "NPSH" in text or "Nss" in text]
+                self.assertEqual(npsh_badges, [("NPSH / Nss 未判定或不适用", "neutral")])
+                self.assertIsNone(self.window._pump_crosscheck(outputs))
+
+        outputs.update(npsh_available_m=-0.1, npsh_applicable=1.0,
+                       suction_specific_speed_Nss=None)
+        badges = self.window._component_status_badges(
+            "fuel_pump", SimpleNamespace(outputs=outputs))
+        self.assertTrue(any("NPSHa" in text and level == "error" for text, level in badges))
 
 
 if __name__ == "__main__":

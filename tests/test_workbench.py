@@ -14,12 +14,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool
 from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
 from workbench_fonts import configure_fonts
 from workbench import PAGES, WorkbenchWindow
 from windows_identity import configure_process_identity, current_process_identity, APP_USER_MODEL_ID
 from qt_chart_canvas import SafeFigureCanvasQTAgg
+from engine_presets import preset_input_values
+from core import ComponentResult, CycleResults, EngineInputs
 
 
 class DesktopTests(unittest.TestCase):
@@ -29,6 +31,8 @@ class DesktopTests(unittest.TestCase):
         cls.app.setStyle("Fusion")
         configure_fonts(cls.app)
         cls.window = WorkbenchWindow()
+        # Keep these real workers isolated from other desktop test classes.
+        cls.window.thread_pool = QThreadPool(cls.window)
         cls.window.show()
         cls.app.processEvents()
 
@@ -47,6 +51,31 @@ class DesktopTests(unittest.TestCase):
                 self.window.reset_defaults()
         self.window._saved_signature = self.window._signature()
         self.window._remember_saved_case()
+
+    def tearDown(self):
+        w = self.window
+        if w._busy or w.thread_pool.activeThreadCount():
+            # A timeout must still fail its test, but must not leave a live
+            # worker or a locked parameter pane behind for the next test.
+            w._connect_active_worker()
+            worker = getattr(w, "_active_worker", None)
+            if worker is not None and hasattr(worker, "request_cancel"):
+                worker.request_cancel()
+            deadline = time.monotonic() + 10
+            while (w._busy or w.thread_pool.activeThreadCount()) and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(0.01)
+            self.app.processEvents()
+            self.assertEqual(w.thread_pool.activeThreadCount(), 0, "worker did not cancel during cleanup")
+            self.assertFalse(w._busy, "worker completion did not restore the UI")
+
+    def wait_for_worker(self, timeout):
+        deadline = time.monotonic() + timeout
+        while (self.window._busy or self.window.thread_pool.activeThreadCount()) and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.01)
+        self.assertFalse(self.window._busy, "worker timeout")
+        self.assertEqual(self.window.thread_pool.activeThreadCount(), 0, "worker timeout")
 
     def test_all_analysis_pages_and_small_window(self):
         w = self.window
@@ -120,6 +149,14 @@ class DesktopTests(unittest.TestCase):
     def test_actual_gg_worker_and_result_staleness(self):
         w = self.window
         w._apply_engine_preset("tq12a_gg")
+        # This integration test covers real GG solving, UI unlock and result
+        # identity/staleness. Use an explicit system-budget case, also used by
+        # the real-library GG feed-state tests, rather than making worker/UI
+        # correctness depend on nested quasi-1D cooling convergence time.
+        values = preset_input_values("tq12a_gg")
+        values.update(cooling_bartz_mode=0., cooling_heat_load=10e6,
+                      cooling_dp_pa=2e6)
+        w._write_input_values(values)
         w.last_results = None
         error_messages = []
         modal_guard = patch.object(QMessageBox, "critical", side_effect=lambda parent, title, message: error_messages.append(message))
@@ -128,16 +165,12 @@ class DesktopTests(unittest.TestCase):
         w.run_cycle()
         self.assertTrue(w._busy)
         self.assertFalse(w.header_run.isEnabled())
-        deadline = time.monotonic() + 75
-        while w._busy and time.monotonic() < deadline:
-            self.app.processEvents()
-            time.sleep(0.02)
-        timed_out = w._busy
-        if timed_out:
-            w._busy = False
-        self.assertFalse(timed_out, "worker timeout")
+        self.wait_for_worker(75)
         self.assertIsNotNone(w.last_results, " | ".join(error_messages))
         self.assertEqual(w.last_results.inputs.cycle_type, "gg")
+        self.assertEqual(w.last_results.inputs.cooling_bartz_mode, 0.)
+        self.assertEqual(w.last_results.summary["numerical_converged"], 1.)
+        self.assertFalse(error_messages)
         self.assertTrue(w.header_run.isEnabled())
         self.assertEqual(w._result_signature, w._signature())
         self.assertGreater(w.last_results.summary["thrust_N"], 0)
@@ -162,14 +195,7 @@ class DesktopTests(unittest.TestCase):
         w.run_thermo_compare()
         self.assertTrue(w._busy)
         self.assertFalse(w.btn_run_of_sweep.isEnabled())
-        deadline = time.monotonic() + 40
-        while w._busy and time.monotonic() < deadline:
-            self.app.processEvents()
-            time.sleep(0.01)
-        timed_out = w._busy
-        if timed_out:
-            w._busy = False
-        self.assertFalse(timed_out)
+        self.wait_for_worker(40)
         self.assertEqual(w.thermo_table.rowCount(), 2)
         self.assertTrue(w.btn_run_of_sweep.isEnabled())
         # Repeated busy notifications must not replace the idle-state snapshot.
@@ -180,24 +206,30 @@ class DesktopTests(unittest.TestCase):
 
     def test_actual_single_point_preburner_scan(self):
         w = self.window
+        # Exercise the real worker, streamed row and UI unlock using the known
+        # branch also used by test_scan_improvements. This is a system-budget
+        # case; physical coolant/hot-gas closure has independent regression tests.
+        values = preset_input_values("raptor3_ffsc")
+        values.update(cooling_bartz_mode=0.0, cooling_heat_load=90e6,
+                      cooling_dp_pa=5e6, use_target_preburner_temp=0.0,
+                      use_target_preburner_mr=1.0,
+                      ox_preburner_mr_target=59.81689453125,
+                      fuel_preburner_mr_target=0.1599658203125)
+        w._write_input_values(values)
+        target = values["ox_preburner_mr_target"]
         w.last_of_sweep = None
-        w.of_sweep_start.setText("80")
-        w.of_sweep_end.setText("80")
+        w.of_sweep_start.setText(str(target))
+        w.of_sweep_end.setText(str(target))
         w.of_sweep_step.setText("1")
         w.btn_run_of_sweep.click()
         self.assertTrue(w._busy)
-        deadline = time.monotonic() + 60
-        while w._busy and time.monotonic() < deadline:
-            self.app.processEvents()
-            time.sleep(0.01)
-        timed_out = w._busy
-        if timed_out:
-            w._busy = False
-        self.assertFalse(timed_out)
+        self.wait_for_worker(60)
         self.assertIsNotNone(w.last_of_sweep)
         self.assertEqual(w.of_sweep_table.rowCount(), 1)
-        self.assertEqual(w.last_of_sweep["records"][0]["of_target"], 80)
+        self.assertEqual(w.last_of_sweep["records"][0]["of_target"], target)
+        self.assertTrue(w.last_of_sweep["records"][0]["converged"])
         self.assertTrue(w.btn_run_of_sweep.isEnabled())
+        self.assertTrue(w.parameter_pane.isEnabled())
 
     def test_gg_preburner_scan_explains_limitation_without_wrong_model(self):
         from sweep import sweep_ox_preburner_mr, sweep_fuel_preburner_mr
@@ -241,8 +273,19 @@ class DesktopTests(unittest.TestCase):
         from PySide6.QtCore import QPoint, QPointF, Qt
         from PySide6.QtGui import QWheelEvent
         w = self.window
-        self.assertIsNotNone(w.last_results)
-        w._populate_materials_tab(w.last_results)
+        # Rendering/selection fixture, not a claimed engine solution. Do not
+        # depend on another test having completed an actual design calculation.
+        material_result = CycleResults(
+            EngineInputs(**preset_input_values("raptor3_ffsc")), {}, {},
+            {
+                "ox_preburner_turbine": ComponentResult("ox_preburner_turbine", {"T_in_K": 750.0, "U_mean_actual_ms": 40.0}),
+                "fuel_preburner_turbine": ComponentResult("fuel_preburner_turbine", {"T_in_K": 850.0, "U_mean_actual_ms": 40.0}),
+                "ox_pump": ComponentResult("ox_pump", {"T_out_K": 85.0, "u_tip_est_ms": 250.0}),
+                "fuel_pump": ComponentResult("fuel_pump", {"T_out_K": 120.0, "u_tip_est_ms": 300.0}),
+            }, [],
+        )
+        w._latest_results = material_result
+        w._populate_materials_tab(material_result)
         leaves = [w.materials_tree.topLevelItem(i).child(j)
                   for i in range(w.materials_tree.topLevelItemCount())
                   for j in range(w.materials_tree.topLevelItem(i).childCount())]

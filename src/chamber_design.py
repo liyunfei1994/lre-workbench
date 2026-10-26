@@ -11,19 +11,20 @@ chamber_design.py — 推力室部件级详细设计的数据模型与计算引�
      N 分段常数（断点即分叉/合并站，对标 Raptor/RS-25 HARCC 变截面策略），
      w/h/t 分段线性。序列化为 JSON 存 EngineInputs.cooling_channel_table_json，
      随导出 JSON 一起持久化。
-  3. 边界条件快照（BoundarySnapshot）：从收敛循环解冻结推力室边界——这是
-     「双层循环显式握手」的下半环：系统级解出边界 → 部件级在冻结边界上快速
-     迭代（marching_preview，不进 Newton）→ 设计定型后回写（Δp/几何）重跑设计点。
+  3. 边界条件快照（BoundarySnapshot）：记录当前循环解和输入指纹。
+     冷却沿程直接读取 cooling_channel.profile；修改通道、换热或损失参数后，
+     必须重算完整循环，不能只回写压降或另行计算一套沿程结果。
   4. 可行性校核与记分卡（compute_scorecard）：区域 × 判据的裕度矩阵。
 
-依赖方向：本模块只被 cooling_marching（惰性 import resolve）与 GUI 调用；
-本模块对 cooling_marching 的调用（marching_preview）也走惰性 import，无循环依赖。
+依赖方向：本模块提供通道分布与保存结果读取接口，不调用独立冷却后处理求解器。
 """
 
 from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
+from collections.abc import Mapping
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -92,8 +93,11 @@ class ChannelRow:
         # 表格与标量对同一物理量必须同口径，否则表格能填出标量禁填的值）。
         if self.anchor not in ANCHORS:
             raise ValueError(f"anchor={self.anchor!r} 不在 {ANCHORS}")
-        if not (10 <= self.n <= 2000):
+        if (isinstance(self.n, bool) or not isinstance(self.n, (int, float))
+                or not math.isfinite(self.n) or int(self.n) != self.n or not (10 <= self.n <= 2000)):
             raise ValueError(f"通道数 n={self.n} 超范围 [10, 2000]")
+        if not math.isfinite(self.x_mm) or self.x_mm < 0:
+            raise ValueError("通道断点 x 必须为有限非负坐标。")
         if not (0.3 <= self.w_mm <= 12.0):
             raise ValueError(f"通道宽 w={self.w_mm} mm 超范围 [0.3, 12]")
         if not (0.5 <= self.h_mm <= 20.0):
@@ -116,7 +120,7 @@ def parse_channel_table(json_str: str) -> Optional[List[ChannelRow]]:
         row = ChannelRow(
             anchor=str(rr.get("anchor", "x_mm")),
             x_mm=float(rr.get("x_mm", 0.0) or 0.0),
-            n=int(rr.get("n", 300)),
+            n=rr.get("n", 300),
             w_mm=float(rr.get("w_mm", 1.5)),
             h_mm=float(rr.get("h_mm", 5.0)),
             t_mm=float(rr.get("t_mm", 0.5)),
@@ -138,20 +142,33 @@ def serialize_channel_table(rows: Optional[List[ChannelRow]]) -> str:
         ensure_ascii=False)
 
 
-def default_rows_from_inputs(inputs, cooling_outputs: Optional[Dict] = None) -> List[ChannelRow]:
-    """从当前单段标量生成等效单行表（工作区「从当前标量生成」按钮用）。"""
-    co = cooling_outputs or {}
-    n = int(co.get("n_channels", 0) or getattr(inputs, "cooling_n_channels", 300))
-    h_mm = float(co.get("channel_height_mm", 0.0) or 0.0)
-    if h_mm <= 0.1:
-        h_mm = float(getattr(inputs, "cooling_channel_height_m", 5.0e-3)) * 1000.0
-    return [ChannelRow(
-        anchor="throat",
-        n=n,
-        w_mm=float(getattr(inputs, "cooling_channel_width_m", 1.5e-3)) * 1000.0,
-        h_mm=h_mm,
-        t_mm=float(getattr(inputs, "cooling_wall_thickness_m", 0.5e-3)) * 1000.0,
-    )]
+def default_rows_from_inputs(inputs, cooling_outputs: Optional[Dict] = None,
+                             *, cooling_profile: Optional[Dict] = None) -> List[ChannelRow]:
+    """Snapshot the solved channel geometry as an explicit piecewise-linear table.
+
+    Every original node is retained. This freezes a sampled representation at
+    absolute x coordinates; it is not an analytic radius-proportional rule on
+    a different contour/grid. A throat-only row would silently change that rule
+    into constant width everywhere and is deliberately no longer generated.
+    """
+    if (not isinstance(cooling_profile, dict)
+            or cooling_profile.get("model_id") != "regen_quasi1d_ph_v1"):
+        raise ValueError("生成节点采样表需要完整的已解冷却剖面，请先运行当前设计点。")
+    nodes = (cooling_profile.get("geometry") or {}).get("nodes")
+    if not isinstance(nodes, list) or len(nodes) < 2:
+        raise ValueError("冷却剖面没有完整几何节点，不能从喉部标量假造全域通道。")
+    rows = []
+    previous_x = -math.inf
+    for node in sorted(nodes, key=lambda row: row["x_m"]):
+        if not math.isfinite(node["x_m"]) or node["x_m"] <= previous_x:
+            raise ValueError("冷却几何节点坐标必须有限且严格递增。")
+        previous_x = node["x_m"]
+        row = ChannelRow(anchor="x_mm", x_mm=1000 * node["x_m"],
+                         n=node["n_channels"], w_mm=1000 * node["width_m"],
+                         h_mm=1000 * node["height_m"], t_mm=1000 * node["wall_thickness_m"])
+        row.validate()
+        rows.append(row)
+    return rows
 
 
 def _resolve_anchor_x(row: ChannelRow, *, x_throat: float, L_cyl: float,
@@ -179,12 +196,19 @@ def resolve_channel_distribution(
     """
     if not rows:
         raise ValueError("分布表为空")
+    for row in rows:
+        row.validate()
+    if len(x_arr) != len(r_arr):
+        raise ValueError("通道插值坐标与半径数组长度不一致。")
     resolved = sorted(
         ((_resolve_anchor_x(r, x_throat=x_throat, L_cyl=L_cyl, x_exit=x_exit), r)
          for r in rows),
         key=lambda t: t[0])
     xs_bp = [t[0] for t in resolved]
     rws = [t[1] for t in resolved]
+    if (any(not math.isfinite(x) or x < 0 or x > x_exit + 1e-12 for x in xs_bp)
+            or any(b <= a for a, b in zip(xs_bp, xs_bp[1:]))):
+        raise ValueError("通道断点必须位于当前轮廓内，且不能重复或重合。")
 
     n_out: List[float] = []
     w_out: List[float] = []
@@ -288,7 +312,7 @@ class BoundarySnapshot:
     # 冷却剂（CH4 全流量）
     coolant_in_T_K: float = 0.0
     coolant_in_p_Pa: float = 0.0
-    coolant_out_T_K: float = 0.0     # 单点模型出口（对照）
+    coolant_out_T_K: float = 0.0     # 本次循环采用的冷却出口
     coolant_out_p_Pa: float = 0.0
     # 主喷注器入口（两股涡轮排气）
     inj_ox_T_K: float = 0.0
@@ -313,6 +337,7 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
     """从 CycleResults 提取边界快照；数据不足返回 None。"""
     if results is None:
         return None
+    from convergence import numerical_convergence
     try:
         s = results.summary
         comps = results.components
@@ -321,6 +346,17 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
         At = float(noz.get("At_m2") or 0.0)
         if At <= 0:
             return None
+        cooling = comps.get("cooling_channel")
+        profile = getattr(cooling, "profile", None)
+        geometry = {}
+        if profile is not None:
+            if (not isinstance(profile, dict)
+                    or profile.get("model_id") != "regen_quasi1d_ph_v1"
+                    or not isinstance(profile.get("geometry"), dict)
+                    or not profile["geometry"].get("nodes")):
+                return None
+            geometry = profile["geometry"]
+            At = math.pi * float(geometry["r_t_m"]) ** 2
         fuel_pump_out = results.states.get("fuel_after_pump")
         fuel_cooled = results.states.get("fuel_after_cooling")
         inj_ox = results.states.get("ox_turbine_exhaust")
@@ -328,7 +364,7 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
         from datetime import datetime
         snap = BoundarySnapshot(
             solved_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            converged=float(s.get("solver_residual_norm", 1.0)) < 1e-3,
+            converged=numerical_convergence(results)["status"] == "pass",
             pc_Pa=float(results.inputs.pc),
             T_c_K=float(s.get("chamber_temperature_K", 0.0) or 0.0),
             gamma=float(s.get("chamber_gamma", 1.19) or 1.19),
@@ -340,10 +376,11 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
             thrust_N=float(s.get("thrust_N", 0.0) or 0.0),
             isp_s=float(s.get("Isp_s", 0.0) or 0.0),
             r_t_m=math.sqrt(At / math.pi),
-            r_c_m=float(ch.get("cc_diameter_m", 0.0) or 0.0) / 2.0,
-            L_cyl_m=float(ch.get("cc_length_m", 0.0) or 0.0),
-            L_conv_m=float(ch.get("cc_convergent_length_mm", 0.0) or 0.0) / 1000.0,
-            expansion_ratio=float(getattr(results.inputs, "expansion_ratio", 0.0)),
+            r_c_m=float(geometry.get("r_c_m", float(ch.get("cc_diameter_m", 0.0) or 0.0) / 2.0)),
+            L_cyl_m=float(geometry.get("L_cyl_m", ch.get("cc_length_m", 0.0)) or 0.0),
+            L_conv_m=float(geometry.get("L_conv_m",
+                float(ch.get("cc_convergent_length_mm", 0.0) or 0.0) / 1000.0)),
+            expansion_ratio=float(geometry.get("expansion_ratio", getattr(results.inputs, "expansion_ratio", 0.0))),
             film_T_K=float(s.get("fuel_turbine_exhaust_T_K", 850.0) or 850.0),
         )
         if fuel_pump_out is not None:
@@ -372,29 +409,22 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
 def snapshot_stale_fields(snap: BoundarySnapshot, current_inputs) -> List[str]:
     """快照过期检查：当前输入与快照指纹不一致的字段名（空 = 快照仍然有效）。
 
-    只比较**影响循环解/推力室边界**的字段——通道分布表/膜冷却/辐射发射率等
-    marching 后处理参数不会改变冻结边界本身，改了它们照样可以「冻结边界重算沿程」。
+    冷却几何、粗糙度、换热及边界输入均属于当前循环记录。任何输入改变后，
+    保存结果仍可只读查看，但不能宣称与修改后的设计状态一致。
     """
-    POST_ONLY = {
-        "cooling_channel_table_json", "film_cooling_fraction",
-        "film_effectiveness_initial", "film_decay_length_m",
-        "cooling_gas_emissivity", "cooling_wall_temp_limit_K",
-        "cooling_marching_enable", "cooling_cover_eps",
-        "cooling_htc_enhancement", "cooling_channel_rel_roughness",
-        "cooling_channel_k_minor",
-    }
     fp = snap.inputs_fingerprint or {}
     if not fp:
-        return []
+        return ["__missing_input_fingerprint__"]
     stale: List[str] = []
     try:
-        cur = asdict(current_inputs)
+        cur = dict(current_inputs) if isinstance(current_inputs, Mapping) else asdict(current_inputs)
     except Exception:
-        return []
-    for k, v_old in fp.items():
-        if k in POST_ONLY:
+        return ["__invalid_current_inputs__"]
+    for k in sorted(set(fp) | set(cur)):
+        if k not in fp or k not in cur:
+            stale.append(k)
             continue
-        v_new = cur.get(k, v_old)
+        v_old, v_new = fp[k], cur[k]
         try:
             same = (abs(float(v_new) - float(v_old)) <=
                     1e-9 * max(abs(float(v_old)), 1.0))
@@ -406,46 +436,32 @@ def snapshot_stale_fields(snap: BoundarySnapshot, current_inputs) -> List[str]:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 4. 冻结边界的 marching 预览（不进 Newton、不改动主结果）
+# 4. 当前循环冷却结果的只读展示接口
 # ════════════════════════════════════════════════════════════════════
 
-class _ResultsShell:
-    """run_marching_postpass 需要的最小 CycleResults 外壳（浅拷贝容器，
-    使 postpass 写入不污染真正的 last_results）。"""
-
-    def __init__(self, base):
-        self.inputs = base.inputs
-        self.summary = dict(base.summary)
-        self.states = base.states
-        self.components = dict(base.components)
-        self.warnings: List[str] = []
+def saved_cooling_result(base_results) -> Dict[str, Any]:
+    """Copy the profile actually used by the cycle; never rerun heat/hydraulics."""
+    comp = getattr(base_results, "components", {}).get("cooling_channel")
+    profile = getattr(comp, "profile", None) if comp is not None else None
+    if (not isinstance(profile, dict) or profile.get("model_id") != "regen_quasi1d_ph_v1"
+            or profile.get("version") != 1 or len(profile.get("nodes") or []) < 2
+            or not profile.get("cells")):
+        raise ValueError("当前记录没有统一冷却沿程解；请按当前输入重算完整循环，不能从预算或历史后处理生成替代曲线。")
+    return {"component": deepcopy(comp), "profile": deepcopy(profile),
+            "warnings": list(profile.get("validity", {}).get("warnings", [])),
+            "summary_delta": {}, "source": "saved_cycle_cooling_profile"}
 
 
 def marching_preview(base_results, inputs) -> Dict[str, Any]:
-    """在冻结边界（base_results 的收敛解）上用**新的推力室参数** inputs 重算
-    沿程 marching。返回 {"component", "profile", "warnings", "summary_delta"}；
-    不修改 base_results。
-
-    这是双层循环握手的部件级内环：改通道分布/膜冷却/材料 → 秒级看新剖面，
-    不用重解 Newton。注意：冷却剂入口态/热力参数仍取冻结解——若新设计的
-    Δp/吸热与单点模型差异大，应「回写循环重跑设计点」闭合。
-    """
-    from cooling_marching import run_marching_postpass
-    shell = _ResultsShell(base_results)
-    run_marching_postpass(shell, inputs)
-    comp = shell.components.get("cooling_marching")
-    profile = getattr(comp, "profile", None) if comp is not None else None
-    delta: Dict[str, float] = {}
-    if comp is not None:
-        base_cm = base_results.components.get("cooling_marching")
-        if base_cm is not None:
-            for k in ("Q_total_MW", "delta_P_MPa", "T_coolant_out_K",
-                      "T_wall_hot_max_K", "T_wall_cold_max_K", "V_coolant_max_ms"):
-                v_new = float(comp.outputs.get(k, 0.0) or 0.0)
-                v_old = float(base_cm.outputs.get(k, 0.0) or 0.0)
-                delta[k] = v_new - v_old
-    return {"component": comp, "profile": profile,
-            "warnings": shell.warnings, "summary_delta": delta}
+    """Compatibility entry point: read-only saved profile, never marching again."""
+    saved_inputs = getattr(base_results, "inputs", None)
+    try:
+        snap = BoundarySnapshot(inputs_fingerprint=asdict(saved_inputs))
+    except (TypeError, ValueError):
+        raise ValueError("当前记录缺少输入指纹；请重算完整循环。")
+    if snapshot_stale_fields(snap, inputs):
+        raise ValueError("参数已修改：必须重算完整循环；不能只重算冷却沿程或回写压降。")
+    return saved_cooling_result(base_results)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -455,7 +471,7 @@ def marching_preview(base_results, inputs) -> Dict[str, Any]:
 def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
     """区域 × 判据的裕度记分卡。
 
-    wf：thermal_structural.WallField（domain="full"，marching 剖面来源）。
+    wf：thermal_structural.WallField（domain="full"，保存的冷却剖面来源）。
     返回行列表：{zone, zone_label, criterion, value, limit, margin_text, status}。
     status ∈ ok / warn / fail / na。
     """
@@ -524,7 +540,12 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
                 margin_text=f"{V_hard - V:+.0f} m/s",
                 status=_st(V <= 150.0, V <= V_hard)))
         # ④ 内壁结构 SF
-        if wf.SF:
+        if getattr(wf, "structural_status", "legacy_screening") == "not_assessed":
+            rows.append(dict(
+                zone=zkey, zone_label=zlabel, criterion="内壁安全系数 SF",
+                value="未评估", limit="需对应的结构材料与制造状态数据",
+                margin_text=getattr(wf, "structural_reason", "材料结构数据未对应"), status="na"))
+        elif wf.SF:
             i_sf = min(idx, key=lambda i: wf.SF[i])
             sf = wf.SF[i_sf]
             rows.append(dict(
@@ -551,23 +572,19 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
                                rib_min >= RIB_MIN_HARD_MM * 1e-3)))
 
     # 全程判据（不分区）
-    if wf.p_coolant:
-        p_in = max(wf.p_coolant)
-        dp = p_in - min(wf.p_coolant)
+    cool = results.components.get("cooling_channel") if results is not None else None
+    profile = getattr(cool, "profile", {}) or {}
+    recorded = profile.get("summary", {})
+    nodes = profile.get("nodes") or []
+    dp = recorded.get("dp_total_Pa")
+    p_in = nodes[0].get("p_Pa") if nodes else None
+    if isinstance(dp, (int, float)) and math.isfinite(dp) and isinstance(p_in, (int, float)) and math.isfinite(p_in):
         rows.append(dict(
             zone="global", zone_label="全程", criterion="冷却回路压降 Δp",
             value=f"{dp/1e6:.1f} MPa（入口 {p_in/1e6:.0f} MPa）",
-            limit="≤ 0.45×入口压",
-            margin_text=f"{(0.45*p_in - dp)/1e6:+.1f} MPa",
-            status=_st(dp <= 0.45 * p_in, dp <= 0.60 * p_in)))
-    dp_cycle = float(s.get("cooling_dp_MPa", 0.0) or 0.0)
-    dp_march = float(s.get("cooling_marching_dp_MPa", 0.0) or 0.0)
-    if dp_cycle > 0:
-        mismatch = abs(dp_march - dp_cycle)
-        rows.append(dict(
-            zone="global", zone_label="全程", criterion="双层握手：Δp 口径一致性",
-            value=f"marching {dp_march:.1f} vs 循环预算 {dp_cycle:.1f} MPa",
-            limit="偏差 ≤ 30%",
-            margin_text=f"{mismatch:.1f} MPa（{100.0*mismatch/max(dp_cycle,1e-9):.0f}%）",
-            status=_st(mismatch <= 0.30 * dp_cycle, mismatch <= 0.60 * dp_cycle)))
+            limit="保存的入口端口压力 − 出口端口压力",
+            margin_text="不是 max(p)−min(p)；不以任意入口压比例判可行", status="na"))
+    else:
+        rows.append(dict(zone="global", zone_label="全程", criterion="冷却回路压降 Δp",
+                         value="未保存统一冷却端口压降", limit="需重算完整循环", margin_text="—", status="na"))
     return rows

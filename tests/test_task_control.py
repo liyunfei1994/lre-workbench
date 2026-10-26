@@ -1,5 +1,6 @@
 """Cancellation must preserve finished rows and never invent failed physics rows."""
 import os
+from dataclasses import asdict
 from pathlib import Path
 import sys
 import time
@@ -112,17 +113,19 @@ class CancellationTests(unittest.TestCase):
                 self.assertEqual(residual.call_count, 1)
 
     def test_throttle_models_preserve_one_completed_record_on_cancel(self):
+        from web_tests.test_throttle_analysis import solved_fixture
         for model_class in (FFSCCycleModel, GGCycleModel):
             with self.subTest(model=model_class.__name__):
                 inputs = EngineInputs()
                 inputs.cooling_marching_enable = 0
                 inputs.cooling_channel_auto_size = 0
+                inputs.cooling_bartz_mode = 0  # Analytic fixture is an explicit heat budget.
                 inputs.throttle_steps = 3
                 token, records = CancellationToken(), []
                 def on_record(record):
                     records.append(record)
                     token.cancel()
-                with patch.object(model_class, "evaluate", return_value=fake_result()):
+                with patch.object(model_class, "evaluate", return_value=solved_fixture(asdict(inputs))):
                     with cancellation_scope(token):
                         with self.assertRaises(TaskCancelled):
                             model_class(inputs).throttle_sweep(record_callback=on_record)
@@ -168,8 +171,12 @@ class CancellationTests(unittest.TestCase):
             gas = thermo._get_gas()
             self.assertEqual(gas.n_species, 53)
             self.assertEqual(gas.n_reactions, 325)
-        inputs = EngineInputs()
-        inputs.cooling_marching_enable = 0
+        # Exercise the real solver thread and cancellation checkpoints with an
+        # explicit heat/pressure budget. The legacy marching flag only omits
+        # a saved-profile view; it no longer disables the coupled cooling solve.
+        # Physical cooling integration has separate conservation/coupling tests.
+        inputs = EngineInputs(cooling_bartz_mode=0., cooling_heat_load=90e6,
+                              cooling_dp_pa=5e6)
         worker = SolveWorker(inputs)
         worker.setAutoDelete(False)
         events = self.collect(worker)
@@ -191,6 +198,7 @@ class CancellationTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(progress, "Real solver never reached its first iteration")
         self.assertLess(time.monotonic() - cancelled_at, 5)
+        self.assertEqual(len(events["cancelled"]), 1)
         self.assertEqual(events["cancelled"][0]["kind"], "solve")
         self.assertFalse(events["finished"])
         self.assertFalse(events["error"])

@@ -62,6 +62,9 @@ class Preburner:
         fuel_temp: float,
         ox_temp: float,
         injector_dp_ratio: float = 0.12,
+        fuel_species: str = "CH4",
+        fuel_enthalpy: float | None = None,
+        ox_enthalpy: float | None = None,
     ):
         _check_range(f"{name}.phi（当量比）",
                      phi, lo=0, lo_inclusive=False)
@@ -84,6 +87,9 @@ class Preburner:
         self.fuel_temp = fuel_temp
         self.ox_temp   = ox_temp
         self.injector_dp_ratio = injector_dp_ratio
+        self.fuel_species = fuel_species
+        self.fuel_enthalpy = fuel_enthalpy
+        self.ox_enthalpy = ox_enthalpy
 
     def evaluate(self) -> tuple[FlowState, GasState, ComponentResult]:
         """
@@ -112,19 +118,26 @@ class Preburner:
             T_fuel=self.fuel_temp,
             T_ox=self.ox_temp,
             pressure=self.pressure,
+            fuel_species=self.fuel_species,
+            fuel_enthalpy=self.fuel_enthalpy,
+            ox_enthalpy=self.ox_enthalpy,
         )
         t_comb = comb.temperature
         cp     = comb.cp
         gamma  = comb.gamma
         h_out  = comb.enthalpy
 
-        # 诊断用进口焓（采用液相 cp，与 pump.py 中 _CP_LOX/_CP_CH4 保持一致）
-        # 注意：此值与 Cantera 内部用 GRI-Mech 气相焓做的 HP 平衡的 h_in
-        #       存在系统差 ~180 kJ/kg（LOX 汽化潜热），仅用于能量审计显示。
-        h_in_liquid_ref = (
-            self.mdot_fuel * 3.5e3 * self.fuel_temp
-            + self.mdot_ox  * 1.7e3 * self.ox_temp
-        ) / max(mdot, 1e-9)
+        h_fuel = 3.5e3 * self.fuel_temp
+        h_ox = 1.7e3 * self.ox_temp
+        if comb.source == "cantera":
+            from thermo import reactant_enthalpy
+            h_fuel = (reactant_enthalpy(self.fuel_species, self.fuel_temp,
+                                       self.pressure, fuel_species=self.fuel_species)
+                      if self.fuel_enthalpy is None else self.fuel_enthalpy)
+            h_ox = (reactant_enthalpy("O2", self.ox_temp, self.pressure,
+                                     fuel_species=self.fuel_species)
+                    if self.ox_enthalpy is None else self.ox_enthalpy)
+        h_in_liquid_ref = (self.mdot_fuel * h_fuel + self.mdot_ox * h_ox) / mdot
 
         combustion_flow_state = FlowState(
             name=f"{self.name}_outlet",
@@ -157,7 +170,11 @@ class Preburner:
                 "phi":             self.phi,
                 "T_combustion_K":  t_comb,
                 "h_in_Jkg":        h_in_liquid_ref,
+                "h_fuel_in_Jkg":   h_fuel,
+                "h_ox_in_Jkg":     h_ox,
                 "h_combustion_Jkg": h_out,
+                "energy_residual_W": mdot * (h_out - h_in_liquid_ref),
+                "chemical_enthalpy_basis_available": float(comb.source == "cantera"),
                 "cp_Jkgk":         cp,
                 "gamma":           gamma,
                 "fuel_fraction":   fuel_frac,

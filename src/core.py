@@ -3,27 +3,10 @@ core.py
 
 系统级数据结构定义（System Data Layer）
 
-V7 修改记录（对标 Raptor 3）：
-─────────────────────────────────────────────────────────
-1. 默认参数全部对标 SpaceX Raptor 3（公开资料 + 工程估算）：
-   · target_isp 327 → 363 s（海平面 ~330，真空 ~380，二者加权）
-   · inlet_pressure 0.2 → 0.6 MPa（含 boost pump 增压后）
-   · cooling_heat_load 25 → 90 MW（更接近实际再生冷却热载荷）
-   · fuel_preburner_temp_limit 1100 → 950 K（Raptor 富燃涡轮入口实测 ~870 K）
-2. 新增压力网络参数（V7）：
-   · injector_dp_ratio_ox / fuel：喷注器压降比例（默认 0.20 / 0.18）
-   · cooling_dp_pa：冷却通道压降（默认 8 MPa）
-   · valve_line_dp_ratio：阀门+管路压降（默认 0.03）
-3. 新增材料/几何参数（V7）：
-   · chamber_wall_material：燃烧室内壁材料（默认 GRCop-84）
-   · chamber_wall_allow_pa：许用应力（GRCop ~120 MPa @ 800 K）
-   · 这样几何模块能算出 mm 级的真实壁厚，而不是 V6 的 48 mm
-
-V6 历史记录：
-─────────────────────────────────────────────────────────
-1. EngineInputs 新增预燃室温度上限参数。
-2. EngineInputs 新增节流范围参数。
-3. 新增目标预燃室混合比模式。
+EngineInputs 的默认值构成工程设计示例，不是一套经过验证的 Raptor 3 实机数据。
+公开机型性能及其来源由 engine_presets / ENGINE_REFERENCES 单独管理。
+设计边界、部件假设、运行限值与数值初值必须按当前模式区分；参数名称和
+历史序列化键保持兼容，不表示所有字段都会参与当前计算。
 """
 
 from __future__ import annotations
@@ -106,61 +89,56 @@ class EngineInputs:
     """
     发动机设计输入参数（Design Point Definition）
 
-    ⚠️ V6 重要说明：
-    - fuel_split_to_ox_preburner 和 ox_split_to_ox_preburner
-      仅作为求解器的初始猜测值，实际分流比由功率平衡决定
-    - 预燃室温度上限是硬约束，用于验证求解结果的物理合理性
+    - 温度目标模式反求预燃室 O/F；混合比模式将 O/F 作为设计约束。
+    - 两个 split 字段仅用于历史自由分流模式的初值，目标模式不使用。
+    - 温度上限是用户给定的运行约束，不能代替材料与寿命验证。
     """
 
-    # ---------- 基本性能（对标 Raptor 3）----------
-    thrust: float = 2.45e6            # 推力 [N]  (Raptor 3 海平面 2.45 MN = 250 tf；真空 2.70 MN = 275 tf)
-    pc: float = 33.0e6                # 燃烧室压力 [Pa] (Raptor 3 ~33 MPa)
-    of_ratio: float = 3.6             # 氧燃比 (Raptor 优化点 3.55–3.65)
-    expansion_ratio: float = 34.34    # 喷管膨胀比 (Raptor 3 海平面型号 34.34；真空 RVac=80 是另一台发动机)
-    # 主燃烧室燃烧效率 η_comb：实际达到的"燃烧温升 / 理想温升"比例(能量释放效率)。
-    #   1.0 = 理想完全燃烧(化学平衡上限,即旧行为)；
-    #   气-气 FFSC 主燃室掺混/反应充分,典型 0.98–0.995,默认 0.99。
-    # 作用：把理想平衡 Tc 折减为真实主流温度 →  c*/Isp 与喉部热流随之一致降低
-    #       (单点注入、不双重计数；喷管由 chamber_state 重建,故性能自动跟随)。
+    # ---------- 基本性能（工程设计输入）----------
+    thrust: float = 2.45e6            # 当前环境下的目标推力 [N]；通用历史默认值
+    pc: float = 33.0e6               # 燃烧室压力 [Pa]，工程假设
+    of_ratio: float = 3.6            # 总氧化剂/燃料质量流量比，工程假设
+    expansion_ratio: float = 34.34   # 喷管出口/喉部面积比，工程假设
+    # 历史键 combustion_efficiency 实现的是主室温升折减系数：先求化学平衡，
+    # 再保持组成不变折减温升，并将焓差列为损失。不是 c* 效率或燃尽率。
+    # 1.0 表示不施加该经验折减；0.99 是示例假设，不是实机测量值。
     combustion_efficiency: float = 0.99
+    # 缺失字段的旧方案沿用旧温升模型；新参考示例显式选用焓平衡。
+    # adiabatic 表示不附加经验燃烧损失，不会取消单独记账的再生冷却抽热。
+    combustion_loss_model: str = "legacy_temperature_rise"
+    # Old snapshots keep GRI30. High-temperature species data are an explicit
+    # model choice, not an EOS change or a finite-rate chemistry certification.
+    methane_thermo_dataset: str = "gri30_highT"
 
-    # ---------- 入口条件 ----------
-    fuel_inlet_temp: float = 100.0    # 液态甲烷温度 [K]（过冷LCH4 @ 100 K，NIST/Piunti 2022）
-    ox_inlet_temp: float = 70.0       # 液氧温度 [K]（过冷LOX @ 70 K，NIST/Piunti 2022）
+    # ---------- 贮箱出口边界（历史键名 inlet_temp）----------
+    fuel_inlet_temp: float = 100.0   # 燃料贮箱出口温度 [K]，工程边界假设
+    ox_inlet_temp: float = 70.0      # 液氧贮箱出口温度 [K]，工程边界假设
     # ════════ 增压输送系统（贮箱 → 增压泵 → 主泵）════════════════════
-    # 真实 FFSC 供给链，三个压力节点分开建模，避免把「贮箱压力」与
-    # 「主泵入口压力」混为一谈：
+    # 本示例供给链假设；三个压力节点分开建模：
     #
     #   贮箱(tank_pressure_pa)  → 增压泵(boost)  → 短管(feed_line_dp_pa) → 主泵入口
     #        ~3 bar               抬到 ~10 bar        −0.5 bar              9.5 bar
-    #   (自生增压,为省壁重很低)  (LPP,给主泵诱导轮供 NPSH)
-    #
-    # 工程依据：SSME/RD-170/国内补燃发动机均有独立低压增压泵(前置泵)；其作用
-    # 是把低贮箱压力抬到主泵入口所需值，抑制主泵汽蚀。增压泵扬程低、功率小
-    # （主泵的~1–3%，常由主泵排出口抽流的小液力涡轮驱动，闭环回收），系统级
-    # 功率平衡里不计入主轴残差，仅作信息量显示。
+    # 增压泵在当前模型中由外部功源供能，不计入两根主轴残差，但计入总能量账。
+    # 未据此验证任何实机增压泵驱动方式或汽蚀裕度。
 
-    # ① 贮箱(自生增压)压力——真实值很低，不是 10 bar！
-    tank_pressure_pa: float = 3.0e5   # 贮箱自生增压压力 [Pa]（3 bar；methalox 典型 2–4 bar）
+    # ① 贮箱压力边界（不模拟自生增压过程）
+    tank_pressure_pa: float = 3.0e5   # 贮箱压力 [Pa]，工程假设
 
     # ② 增压泵出口压力 = 主泵供给压力（沿用历史键名 inlet_pressure）
-    #    取 10 bar：扣 0.5 bar 短管 → 主泵入口 9.5 bar，使液氧诱导轮 nss(EU)≈750
-    #    （优良诱导轮可达）、甲烷≈440（宽裕）。SSME 主氧泵入口约 29 bar，此处更低
-    #    （致密化深过冷降低 NPSH 需求）。
-    inlet_pressure: float = 1.0e6     # 增压泵(boost)出口压力 = 主泵供给压力 [Pa]（10 bar）
+    #    主泵入口压力还需扣除 feed_line_dp_pa。
+    inlet_pressure: float = 1.0e6     # 增压泵出口压力 [Pa]，工程假设
 
-    # ③ 增压泵效率（低压前置泵，效率低于主泵）
+    # ③ 增压泵常效率假设
     boost_pump_efficiency: float = 0.70
 
     # ---------- 增压泵→主泵 短管压降 ----------
-    # 增压泵紧贴主泵，中间只有短导管 + 弯头，损失 ~0.3–0.5 bar。
-    feed_line_dp_pa: float = 0.5e5    # 增压泵→主泵短管压降 [Pa]（0.5 bar）
+    feed_line_dp_pa: float = 0.5e5    # 增压泵→主泵短管压降预算 [Pa]
 
-    # ---------- 效率参数 ----------
-    pump_efficiency_ox:   float = 0.86   # V8: 0.84→0.86（Raptor 实测高效）
-    pump_efficiency_fuel: float = 0.85   # V8: 0.81→0.85
-    turbine_efficiency_ox: float = 0.85   # V8: 0.80→0.85
-    turbine_efficiency_fuel: float = 0.88   # V8: 0.83→0.88
+    # ---------- 部件常效率假设（非 Raptor 实测值）----------
+    pump_efficiency_ox:   float = 0.86
+    pump_efficiency_fuel: float = 0.85
+    turbine_efficiency_ox: float = 0.85
+    turbine_efficiency_fuel: float = 0.88
 
     # ---------- 冷却系统 ----------
     # V8：默认启用 Bartz 热流估算模式（cooling_bartz_mode=True）
@@ -168,106 +146,88 @@ class EngineInputs:
     # 固定模式（cooling_bartz_mode=False）：直接用 cooling_heat_load（V7 兼容）
     cooling_bartz_mode: float = 1.0      # 1=Bartz估算（默认），0=固定热载荷（V7兼容）
     cooling_heat_load: float = 90.0e6   # 再生冷却吸热量 [W]（固定模式用；Bartz模式忽略）
-    coolant_cp: float = 2.4e3           # 高压超临界 CH4 比热 [J/(kg·K)]（固定模式用）
+    coolant_cp: float = 2.4e3           # 历史无物性库回退用常数 [J/(kg·K)]；正常焓路径不用
 
     # ---------- 再生冷却通道几何（V14：正式纳入，之前用 getattr 读但未定义 → 锁死）----------
-    # 修 Major 1（冷却几何 vs 固定压降自相矛盾）：通道几何现可配置，并支持
-    # 「按目标流速自动定通道深度」+「压降由水力学(Darcy)实算」，避免 354 m/s 的
-    # 非物理流速与固定 5 MPa 压降并存。
+    # 几何、换热系数和材料常数均为设计假设。自动定尺寸与水力估算是低阶模型，
+    # 启用后也不代表通道几何、热量积分范围与压降模型已获得试验验证。
     cooling_n_channels: float = 300.0        # 冷却通道数（周向，受室周长约束；典型 150–400）
     cooling_channel_width_m: float = 1.5e-3  # 通道周向宽 [m]
     cooling_channel_height_m: float = 5.0e-3 # 通道径向深 [m]（auto_size=1 时被反算覆盖）
     cooling_wall_thickness_m: float = 0.5e-3 # 内衬热壁厚 [m]（GRCop ~0.5–1 mm）
     cooling_wall_conductivity: float = 320.0 # 内衬导热 [W/(m·K)]（GRCop-84 @600K）
     cooling_htc_enhancement: float = 1.0     # 喉部弯曲/入口段换热强化因子（1.0–1.5）
-    # ★ 自动定尺寸：固定通道数+宽，反算通道「深度」命中目标流速（真实再生通道做法）
+    # 固定通道数与宽度，用目标流速作概念尺寸约束，反算通道深度。
     cooling_channel_auto_size: float = 1.0   # 1=按目标流速反算通道深度（默认），0=用上面固定几何
     cooling_target_velocity_ms: float = 100.0  # 目标冷却剂流速 [m/s]（再生通道典型 40–150）
-    # ★ 压降来源：1=水力学(Darcy+局部损失)实算并反馈进泵压预算；0=用固定 cooling_dp_pa
-    cooling_dp_auto: float = 0.0             # 默认 0（保持泵压预算稳定；置 1 启用水力压降耦合）
+    # 旧方案兼容字段，不再控制物理模型。准一维模式同时求解热量与压降。
+    cooling_dp_auto: float = 0.0
     cooling_channel_rel_roughness: float = 0.003  # 通道相对粗糙度 ε/D_h（AM 打印态 ~3e-3）
     cooling_channel_k_minor: float = 3.0     # 进出口+集流环+弯头局部损失（动压头数）
 
-    # ---------- 沿程逐站 marching（V15：收敛设计点后处理，出 T_wall(x)/p_co(x) 剖面）----------
-    cooling_marching_enable: float = 1.0     # 1=求解后自动跑 marching 剖面（默认），0=关闭
+    # ---------- 唯一准一维冷却模型 ----------
+    cooling_marching_enable: float = 1.0     # 旧方案兼容字段；统一内核始终返回沿程结果
+    cooling_grid_points: float = 120.0      # 唯一准一维网格分辨率；不改变冷却物理模式
     cooling_cover_eps: float = 0.0           # 再生冷却覆盖到的面积比（0=全喷管 ε；如填 8 表示只冷到 ε=8）
-    cooling_wall_temp_limit_K: float = 800.0 # 热面壁温限值（GRCop 系 ~800 K），marching 超限即告警
+    cooling_wall_temp_limit_K: float = 800.0 # 用户给定热面壁温限值 [K]；不替代材料寿命校核
     # 燃气辐射发射率 ε_g（灰气体一阶代理，marching 辐射热流用；V19 起为正式输入字段，
     # 之前 marching 用 getattr 读取但字段不存在 → 永远只能用 0.20 默认值）
     cooling_gas_emissivity: float = 0.20
     # ---------- 冷却通道沿程分布表（V19：推力室设计工作区）----------
-    # JSON 断点表，定义 N/宽/深/衬厚 沿轴向的分布（分段线性，N 在断点处分叉/合并）。
-    # "" = 不启用（沿用上面的单段标量，行为与 V15 完全一致）。
+    # JSON 断点表定义宽/深/衬厚沿轴向分布；当前未建集流分支，通道数 N 必须恒定。
+    # "" = 使用标量通道几何假设，仍调用同一个准一维内核。
     # 格式见 chamber_design.py：{"version":1,"rows":[{"anchor":"throat","n":300,
     #   "w_mm":1.5,"h_mm":5.0,"t_mm":0.5}, ...]}，anchor ∈ injector/conv_start/throat/exit/x_mm
     cooling_channel_table_json: str = ""
 
-    # ---------- 膜冷却（V15：一阶效能模型；FFSC 气-气膜，气源=富燃涡轮排气）----------
-    # T_aw_eff = T_aw − η(x)·(T_aw − T_film)，η(x)=η₀·exp(−x/L_decay)。
-    # 默认关闭（fraction=0）；开启后仅作用于热载荷，不反馈主流性能（<3% 时 Isp 影响 <1 s）。
-    film_cooling_fraction: float = 0.0       # 膜冷却流量占燃料流量比例（0=关；典型 0.01–0.05）
-    film_effectiveness_initial: float = 0.9  # 喷注面处初始效能 η₀
-    film_decay_length_m: float = 0.0         # 效能衰减特征长 [m]（0=自动取 L_cyl+L_conv）
+    # 历史膜冷却字段只供旧方案读取；未建质量/焓支路，物理沿程内核拒绝非零流量。
+    film_cooling_fraction: float = 0.0
+    film_effectiveness_initial: float = 0.9  # 兼容值，当前不生效
+    film_decay_length_m: float = 0.0         # 兼容值，当前不生效
 
-    # ---------- 燃烧室估计 ----------
-    chamber_temp_guess: float = 3550.0  # Raptor 主燃烧室实测约 3500–3600 K
-    chamber_gamma: float = 1.18         # 高压富燃产物 γ 偏低
-    molar_mass: float = 21.0            # 高压平衡平均 MW
+    # ---------- 主室热反馈初值（不是焓参考态，也不是实机测量值）----------
+    # 启用热反馈时由求解结果更新；关闭该反馈时成为固定的性能近似输入。
+    chamber_temp_guess: float = 3550.0  # 主室温度初值 [K]
+    chamber_gamma: float = 1.18         # 比热比初值 [-]
+    molar_mass: float = 21.0            # 平均摩尔质量初值 [kg/kmol]
+    # 化学焓与真实流体焓的参考态对齐由 thermo.py 管理，与这些初值无关。
 
-    # ---------- 系统目标 ----------
-    # V7：Raptor 3 公开真空 Isp ~380 s，海平面 ~330 s。
-    # 这里给海平面参考（与 thrust 海平面值一致），用户可以改。
-    target_isp: float = 327.0   # 目标比冲 [s] (Raptor 3 海平面 327 s；仅作 mdot 初猜，真实 Isp 由热化学算出)
+    # ---------- 总流量初值 ----------
+    target_isp: float = 327.0   # 比冲初值 [s]；仅用于 mdot 初猜，不是最终比冲约束
 
-    # ---------- 预燃室参数 ----------
+    # ---------- 预燃室压力比（p_pb/p_c，不是真正的涡轮入口/出口压比）----------
+    # 目标模式用于构造涡轮压比初值；历史自由分流模式中为固定压力关系。
     ox_preburner_pressure_ratio: float = 1.15
     fuel_preburner_pressure_ratio: float = 1.18
-    # 涡轮排气进入主燃烧室须经过主喷注器，出口压力 = Pc*(1 + dp_ratio)。
-    # 两侧压降不同，原因：
-    #   1. 富氧排气（主要O2）密度高、流速快 → 较大压降（Raptor 约 24% Pc）
-    #   2. 富燃排气（主要CH4）密度低、流速慢 → 较小压降（Raptor 约 9% Pc）
-    # 参考：Piunti 2022 Table 14/15（Pc=300 bar → LOX 373 bar，CH4 328 bar）
-    ox_turbine_exhaust_dp_ratio: float = 0.243    # LOX侧主喷注器压降/Pc ≈ 24.3%
-    fuel_turbine_exhaust_dp_ratio: float = 0.093  # CH4侧主喷注器压降/Pc ≈  9.3%
+    # 涡轮排气至主燃烧室的热气段压降预算，包含当前主喷注器口径：
+    # p_turbine_out = Pc*(1 + dp_ratio)。数值为工程假设，非实机测量。
+    ox_turbine_exhaust_dp_ratio: float = 0.243
+    fuel_turbine_exhaust_dp_ratio: float = 0.093
 
-    # ---------- 预燃室温度上限（V6, V7 修正）----------
-    #
-    # 全流量分级燃烧循环中，预燃室出口温度直接决定涡轮入口温度。
-    # 涡轮叶片材料的耐温性是硬约束：
-    #   - 富氧侧：高温富氧环境极其苛刻，特殊合金 (Monel/铜合金) 耐温约 750–800 K
-    #     Raptor 富氧涡轮入口实测约 ~730 K
-    #   - 富燃侧：富甲烷环境相对温和，镍基高温合金可达 ~900–1000 K
-    #     Raptor 富燃涡轮入口实测约 ~870 K → V7 下调至 950 K
-    #
-    ox_preburner_temp_limit: float = 800.0    # [K] 富氧侧涡轮入口温度上限
-    # V5.3.6：980→900K（O/F_fuel 由 0.16 降到 0.13 后实际工况 ~870K，留 30K 余量；
-    #          Raptor 富燃涡轮镍基合金真实耐温上限约 870–950K）
-    fuel_preburner_temp_limit: float = 900.0  # [K] 富燃侧涡轮入口温度上限
+    # ---------- 用户指定预燃室出口/涡轮入口温度上限 ----------
+    # 本模型将两者视为同一温度节点；限值不由选定材料自动推导。
+    # 实际允许值还需材料、环境、冷却和寿命证据，不能称为通用材料耐温极限。
+    ox_preburner_temp_limit: float = 800.0    # [K] 富氧侧运行限值假设
+    fuel_preburner_temp_limit: float = 900.0  # [K] 富燃侧运行限值假设
 
     # ---------- 压力网络（V7 新增，FFSC 必需）----------
     # ⚠ FFSC 模式已废弃（V13）：主燃烧室喷注器压降统一由 ox/fuel_turbine_exhaust_dp_ratio
-    #   表示（= 涡轮排气压力 − Pc，与压力网络同口径，Piunti 富氧24.3%/富燃9.3%）。
+    #   表示（= 涡轮排气压力 − Pc，与压力网络同口径）。
     # ★ V20 复活：GG（燃气发生器）模式下主燃烧室是 **液-液喷注**，这两个参数
     #   即为液路主喷注器压降比 ΔP/Pc（典型 0.15–0.25），由 gg_cycle.py 使用。
     injector_dp_ratio_ox:   float = 0.20   # FFSC 不用；GG=主燃室液氧喷注压降比
     injector_dp_ratio_fuel: float = 0.20   # FFSC 不用；GG=主燃室甲烷喷注压降比
     # 预燃室喷注器压降 / 预燃室压力（两个预燃室各自一套喷注器）。
-    #   参考 Schoenman 1981(NASA TR)：富氧/富燃高压预燃室喷注器 ΔP/Pc_pb=5.7–20%，典型 ~14%。
-    #   这是主泵出口压力预算里的关键一项：p_pump_out = p_pre + ΔP_inj_pb + ΔP_valve(+冷却)。
-    #   引用「预燃室压力」而非 Pc，物理更对，且与 preburner.py 卡片显示同口径。
-    #   取 0.12（现代高压发动机偏精简端，兼顾燃烧稳定裕度）→ 液氧泵出口约 2.17×Pc≈717 bar，
-    #   与 Raptor 主氧泵出口 ~2.0–2.2×Pc 量级吻合。
+    #   设计点按对应预燃室压力计算，形成所需供给压力预算；当前 0.12 为
+    #   示例假设，不构成喷注器稳定性验证，也不是已核实的 Raptor 内部压降。
     preburner_injector_dp_ratio: float = 0.12   # 预燃室喷注器 ΔP / 预燃室压力
-    # 再生冷却通道压降：高压 CH4 经过细密通道阻力大，典型 5–12 MPa
-    # V5.3.6：3→5 MPa（更贴近 Raptor 真实 HARCC，迫使 CH4 泵出口抬到 ~78 MPa，
-    #         为 CH4 涡轮提供更大压比，富燃 PB 温度可自然降到 ~870 K）
+    # 给定冷却压降 [Pa]；仅 Q、压降预算模式生效。准一维模式中仅作耦合初值。
     cooling_dp_pa: float = 5.0e6
-    # 阀门 + 管路 + 喷注器面板冗余压降比 pc
+    # 支路阀门/管路基础压降预算与 pc 之比；另求的调节压降单独记账。
     valve_line_dp_ratio: float = 0.03
 
     # ---------- 材料 / 几何（V7 新增）----------
-    # 燃烧室内壁是 GRCop-84 / GRCop-42 (Cu-Cr-Nb 合金)
-    # σ_allow ≈ 100–140 MPa @ 800 K
+    # 壁面强度与安全系数为概念估算输入，不声明任何实机材料或寿命能力。
     chamber_wall_allow_pa: float = 120.0e6
     chamber_wall_safety_factor: float = 1.5
     # 主燃烧室几何初估：圆柱燃烧段 + 收缩段 + 喉部圆弧过渡
@@ -278,79 +238,55 @@ class EngineInputs:
     # 钟形喷管长度比（0.80 = 80% bell，TOP 的核心定义参数；V19 起为正式输入，
     # 全链同口径：geometry 轮廓 / cooling_marching / 2D图 / CSV 导出）
     nozzle_bell_fraction: float = 0.80
-    # 主壳体（外结构）用 Inconel 718, σ_allow ≈ 600 MPa @ 800 K
+    # 具体材料选择与温度依赖物性由下面的材料字段管理。
 
-    # ---------- 预燃室混合比目标（V3 新增）----------
-    # 推荐先使用目标混合比模式：
-    #   富氧预燃室 O/F ≈ 40–80，对应 phi ≈ 0.05–0.10
-    #   富燃预燃室 O/F ≈ 0.05–0.30，对应 phi ≈ 13–80
-    # use_target_preburner_mr = 1：由目标 O/F 反求分流量，求解器调节两侧预燃室压力比。
-    # use_target_preburner_mr = 0：保留旧的自由分流功率闭合模式。
+    # ---------- 预燃室混合比模式与历史序列化开关 ----------
+    # 温度开关优先：temp>=0.5 时由外环反求 MR，下列 MR 字段仅为其初值。
+    # temp<0.5 且 mr>=0.5：指定 MR，反求分流与涡轮压比。
+    # 两个开关均<0.5：历史自由分流模式，保留兼容，不作为新设计默认。
     use_target_preburner_mr: float = 1.0
     ox_preburner_mr_target: float = 60.0
-    # V5.3.6：0.16 → 0.13。配合 cooling_dp 抬到 5 MPa，CH4 涡轮可用焓降更大，
-    #         同样 34 MW 功率只需更低燃烧温度，T_PB_fuel 自然落到 ~870 K（贴近 Raptor 实测）。
     fuel_preburner_mr_target: float = 0.13
 
     # ---------- 预燃室温度目标模式（V11 新增）──────────────────
-    #
-    # 架构修正：涡轮入口温度（=预燃室出口温度）是材料硬约束，应"顶着材料
-    # 极限设计"。旧逻辑把混合比当输入、温度当输出（事后告警），需手动试凑
-    # MR 才能命中温度。本模式把因果方向摆正：
-    #
-    #   use_target_preburner_temp = 1：
-    #     在 MR 目标模式之上加一层一维外环，自动反求 MR 使两侧预燃室出口温度
-    #     = 目标温度。预燃室火焰温度几乎只由 MR 决定（强度量）且对 MR 单调，
-    #     故为干净的一维反求，与已有的 Tc Picard 外环同构。
-    #   use_target_preburner_temp = 0（默认）：
-    #     沿用 use_target_preburner_mr 指定的固定 MR（向后兼容，已验证工作点）。
-    #
-    # 目标温度独立于材料上限（*_temp_limit）：目标是"你选择跑多热"，上限是
-    # "材料能扛多热"。默认目标取 Raptor 实测量级，各留 ≥50 K 裕度。
-    # 硬约束：目标温度必须 ≤ 对应材料上限。
-    # V11.1：默认开启温度目标模式 —— "顶着材料极限设计"成为默认行为。
-    # 工作点从旧的 737/762 K 迁移到 750/850 K（更贴 Raptor 富燃侧 ~870 K 实测）。
-    # 需要旧的固定 MR 行为时置 0。
+    # 温度模式适用于给定预燃室出口温度的概念设计；外环在当前入口焓与压力下
+    # 反求 MR，并重新检查耦合后的目标误差。它不是比固定 MR 更真实的物理模型。
+    # 目标必须不超过用户给定上限；默认目标与上限均为假设，不声称材料裕度已验证。
     use_target_preburner_temp: float = 1.0
-    ox_preburner_temp_target: float = 750.0    # [K] 富氧涡轮入口目标温度（Raptor ~730–750）
-    fuel_preburner_temp_target: float = 850.0  # [K] 富燃涡轮入口目标温度（Raptor ~870，留裕度）
+    ox_preburner_temp_target: float = 750.0    # [K] 富氧预燃室出口设计目标
+    fuel_preburner_temp_target: float = 850.0  # [K] 富燃预燃室出口设计目标
 
     # ---------- 流量分配（自由分流模式初始猜测）----------
-    # 仅在 use_target_preburner_mr = 0 时作为求解初值。
+    # 仅在温度和混合比目标模式均关闭时作为求解初值。
     fuel_split_to_ox_preburner: float = 0.06
     ox_split_to_ox_preburner: float = 0.97
 
     # ---------- 节流参数（V6 新增）----------
-    throttle_min: float = 0.40      # 最低节流比例 [-]（Raptor 约 40%）
+    throttle_min: float = 0.40      # 申请扫描的最低推力比例 [-]，不代表已验证节流能力
     throttle_steps: int = 5         # 节流扫描点数
 
     # ---------- 涡轮泵转速参数（V10 新增）──────────────────
-    # 设计原则（参考 NASA SP-125 §6, Huzel & Huang）：
-    #   1) override_rpm > 0 时直接锁定该转速（用于 CFTurbo 设计点指定）
-    #   2) override_rpm = 0 时按 (Ns_target, n_stages, ψ) 反推
-    #   3) 涡轮转速 = 同轴泵转速（FFSC 真实工程实现）
+    # 概念选型规则，不是部件特性图联立匹配：
+    #   1) override_rpm > 0 时直接采用给定转速。
+    #   2) override_rpm = 0 时按 Ns_target 与每级扬程、体积流量反推转速。
+    #   3) 涡轮转速 = 同轴泵转速；ψ 参与几何估算，不参与该转速反推公式。
     #
     # 比转速 Ns（量纲式，N 用 rpm，Q 用 m³/s，H 用 m，per-stage）：
-    #   火箭泵典型 Ns ∈ [15, 80]，离心泵最优区间 [25, 50]
-    #   Raptor-3 公开估算：LOX ≈ 22-25k rpm，LCH4 ≈ 28-32k rpm
+    #   Ns = N·sqrt(Q)/H_per_stage^0.75，依赖单位约定，不是无量纲比转速。
     #
     # 压头系数 ψ = g·H / u_tip²：
     #   高压离心泵典型 0.45–0.55，更小越接近轴流
     #
-    # ★ LOX 泵 —— 设计点已锁定（CFTurbo 冻结点）
-    #   N=26500 rpm 由 nq(EU)≈30 反推后取整锁定（CFTurbo 离心区 10–40 的中段，
-    #   u_tip=333 m/s < 550 限值；与同轴富氧涡轮共用此转速）。
+    # LOX 泵示例设计设定，未以实机转速、叶轮或特性图验证。
     lox_pump_speed_rpm_override: float = 26500.0   # [rpm] 锁定；置 0 改回按 nq 反推
     lox_pump_specific_speed_target: float = 30.0   # nq(EU)=N·√Q/H^0.75（与 CFTurbo nq(EU) 同口径）
-    lox_pump_n_stages: int = 1                  # Raptor LOX 单级离心
+    lox_pump_n_stages: int = 1                  # 用户指定级数假设
     lox_pump_head_coefficient_psi: float = 0.50
 
-    # ★ LCH4 泵 —— 设计点已锁定（CFTurbo 冻结点）
-    #   N=38000 rpm（nq(EU)≈30，落在 CFTurbo 离心区中段、留机械裕度；比 nq=35 的
-    #   44288 rpm 低 14%，效率仅降~1%，避开离心/混流边界 40 与高轴承 DN）。
+    # 燃料泵示例设计设定；不据此声称机械裕度或效率随转速变化已验证。
     fuel_pump_speed_rpm_override: float = 38000.0
     fuel_pump_specific_speed_target: float = 30.0
-    fuel_pump_n_stages: int = 2                 # Raptor LCH4 双级离心(主流公开估算)
+    fuel_pump_n_stages: int = 2                 # 用户指定级数假设
     fuel_pump_head_coefficient_psi: float = 0.50
 
     # ---------- 涡轮气动设计目标（V10 新增）──────────────
@@ -366,8 +302,7 @@ class EngineInputs:
     turb_fuel_n_stages_user: int = 0
 
     # ---------- 涡轮叶尖速度上限（材料强度约束）──────────
-    # 火箭涡轮 U_mean 典型 200–400 m/s。超过 450 m/s 多数镍基合金
-    # 在工况温度下会失稳；富氧侧因 LowCo 合金强度低，更严。
+    # 用户给定的速度筛查限值；不由材料名自动得到，也不等于转子强度验证。
     turb_ox_u_max_ms:   float = 380.0
     turb_fuel_u_max_ms: float = 450.0
 
@@ -388,19 +323,12 @@ class EngineInputs:
     turb_fuel_housing_material: str = "hastelloyx"
 
     # ---------- 推力室壁材料选择（V18 新增）─────────────────
-    # 主燃烧室内壁(铜合金，燃气侧，高热流) + 外壳(镍基，结构层，承高压冷却剂)，
+    # 历史结构筛查配置：内衬与外套。外套并不必然为镍基合金。
     # 材料 key 必须存在于 materials.MATERIALS 且 parts 含 chamber_inner_wall /
     # chamber_outer_wall。默认沿用 materials.DEFAULT_CHAMBER_WALL_MATERIALS。
     #
-    # 选择驱动：① 再生冷却 marching k(T) 取此材料(若挂随温模型,如 grcop84)；
-    #          ② 热结构云图/SF 校核取此材料 σy(T)；③ 材料库卡片显示此材料详情。
-    #
-    # 内壁候选(LOX/CH4 高压再生冷却 chamber inner)：
-    #   grcop84    NASA Cu-8Cr-4Nb 弥散强化，Tmax 1023K，Raptor/RS-25E 主选(有手册随温物性)
-    #   grcop42    NASA Cu-4Cr-2Nb，导热更高(310)，AM 友好，Raptor 2/Vulcan BE-4
-    #   cucrzr     传统 Cu-Cr-Zr，导热 330 最高但 Tmax 仅 623K，中低热流/早期对照
-    #   glidcop_al15 Al2O3 弥散强化铜(ODS)，Tmax 1123K，研究型候选
-    #   narloy_z   SSME 经典 Cu-3Ag-0.5Zr，导热 316，Tmax 811K
+    # 冷却导热改由 wall_thermal_dataset_id / 轴向分区驱动。历史结构库的
+    # 简化强度数据独立管理；未匹配热物性材料/状态时不生成内衬安全系数。
     chamber_inner_wall_material: str = "grcop84"
     chamber_outer_wall_material: str = "inconel718_wall"
 
@@ -424,6 +352,9 @@ class EngineInputs:
     # "gg"   = 燃气发生器开式循环（蓝箭 TQ-12 类甲烷机：少量推进剂在富燃燃气
     #          发生器燃烧驱动涡轮，涡轮排气经小膨胀比排气喷管直排，不进主燃室）
     cycle_type: str = "ffsc"
+    # Fuel choice is part of the immutable design input. Kerosene uses an
+    # explicitly identified n-dodecane surrogate, initially in GG cycles only.
+    propellant_pair: str = "lox_methane"
 
     # ---------- 燃气发生器循环参数（V20 新增，cycle_type="gg" 时生效）────
     # 轴系布局：
@@ -433,9 +364,9 @@ class EngineInputs:
     # GG 混合比（富燃）：典型 0.2–0.45，对应出口温度 ~700–1000 K。
     # use_target_gg_temp=1 时此值仅作外环初值，实际 MR 由目标温度反求。
     gg_mr_target: float = 0.30
-    use_target_gg_temp: float = 1.0     # 1=按 GG 目标出口温度反求 MR（顶着材料极限设计）
+    use_target_gg_temp: float = 1.0     # 1=按用户给定的 GG 出口温度目标反求 MR
     gg_temp_target: float = 850.0       # GG 出口(=涡轮入口)目标温度 [K]（富燃甲烷 GG 典型 800–950）
-    gg_temp_limit: float = 950.0        # GG 温度上限 [K]（涡轮材料硬约束）
+    gg_temp_limit: float = 950.0        # 用户指定 GG 温度上限 [K]
     # GG 喷注器压降 / p_gg（液-液喷注，Schoenman 同源口径）
     gg_injector_dp_ratio: float = 0.15
     # 涡轮排气背压 = 排气喷管入口压力 [Pa]（开式循环涡轮压比大的来源；典型 2–6 bar）
@@ -447,8 +378,44 @@ class EngineInputs:
     # GG 流量分数初猜（占总流量比例；GG 循环典型 2–5%）
     gg_fraction_guess: float = 0.03
 
+    # Numerical method only: both backends solve the same physical residuals.
+    # Appended to preserve the positional order of existing serialized inputs.
+    nonlinear_solver: str = "newton"
+
+    # Solid thermal data are separate from legacy structural material records.
+    # These appended fields preserve old positional input ordering. Empty zones
+    # apply the default dataset to the entire cooled liner; state is not assumed.
+    wall_thermal_dataset_id: str = ""
+    wall_manufacturing_state: str = "unspecified"
+    wall_material_zones_json: str = ""
+
     def __post_init__(self):
         """输入参数物理范围校验。"""
+
+        if self.nonlinear_solver not in ("newton", "trf"):
+            raise ValidationError("nonlinear_solver 必须是 newton 或 trf。")
+
+        from wall_materials import get_wall_dataset, default_dataset_for_material
+        from wall_thermal import parse_material_zones, validate_manufacturing_state
+        try:
+            if self.wall_thermal_dataset_id == "" and self.cooling_bartz_mode:
+                self.wall_thermal_dataset_id = default_dataset_for_material(self.chamber_inner_wall_material)
+            if self.wall_thermal_dataset_id:
+                get_wall_dataset(self.wall_thermal_dataset_id)
+            validate_manufacturing_state(self.wall_manufacturing_state)
+            parse_material_zones(self.wall_material_zones_json)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValidationError(f"壁面热物性设置无效：{exc}") from exc
+
+        if self.propellant_pair not in ("lox_methane", "lox_kerosene"):
+            raise ValidationError("propellant_pair 必须是 lox_methane 或 lox_kerosene。")
+        if self.propellant_pair == "lox_kerosene":
+            if self.cycle_type != "gg":
+                raise ValidationError("液氧/煤油代理模型目前支持 GG 燃气发生器循环，尚不支持 FFSC。")
+            if self.cooling_bartz_mode >= 0.5:
+                raise ValidationError("液氧/煤油代理模型目前采用给定吸热量的再生冷却；请将 cooling_bartz_mode 设为 0，不能使用甲烷 Bartz 关联式。")
+            _check_range("fuel_inlet_temp（正十二烷代理物性范围）",
+                         self.fuel_inlet_temp, lo=263.6, hi=700.0)
 
         # ── 推力 & 压力（必须 > 0）─────────────────────────
         _check_range("thrust（推力）",          self.thrust,     lo=0, lo_inclusive=False)
@@ -472,9 +439,13 @@ class EngineInputs:
         _warn_range("of_ratio（氧燃比）",        self.of_ratio,   1.0, 10.0)
 
         # ── 主燃烧室燃烧效率（硬约束：0 < η ≤ 1）────────────
-        _check_range("combustion_efficiency（主燃室燃烧效率）",
+        if self.combustion_loss_model not in ("legacy_temperature_rise", "adiabatic"):
+            raise ValidationError("combustion_loss_model 必须是 adiabatic 或 legacy_temperature_rise。")
+        if self.methane_thermo_dataset not in ("gri30", "gri30_highT"):
+            raise ValidationError("methane_thermo_dataset 必须是 gri30 或 gri30_highT。")
+        _check_range("combustion_efficiency（主室温升折减系数）",
                      self.combustion_efficiency, lo=0, hi=1.0, lo_inclusive=False)
-        _warn_range("combustion_efficiency（主燃室燃烧效率）",
+        _warn_range("combustion_efficiency（主室温升折减系数）",
                     self.combustion_efficiency, 0.95, 1.0)
 
         # ── 膨胀比（必须 ≥ 1）──────────────────────────────
@@ -482,13 +453,13 @@ class EngineInputs:
         _warn_range("expansion_ratio（膨胀比）",  self.expansion_ratio, 2.0, 300.0)
 
         # ── 温度（必须 > 0 K）─────────────────────────────
-        _check_range("fuel_inlet_temp（燃料入口温度）", self.fuel_inlet_temp, lo=0, lo_inclusive=False)
-        _check_range("ox_inlet_temp（氧化剂入口温度）", self.ox_inlet_temp,   lo=0, lo_inclusive=False)
+        _check_range("fuel_inlet_temp（燃料贮箱出口温度）", self.fuel_inlet_temp, lo=0, lo_inclusive=False)
+        _check_range("ox_inlet_temp（氧化剂贮箱出口温度）", self.ox_inlet_temp,   lo=0, lo_inclusive=False)
 
         # ── 泵效率（硬约束：0 < η ≤ 1）──────────────────
         _check_range("pump_efficiency_ox（LOX泵效率）",
                      self.pump_efficiency_ox,   lo=0, hi=1.0, lo_inclusive=False)
-        _check_range("pump_efficiency_fuel（CH₄泵效率）",
+        _check_range("pump_efficiency_fuel（燃料泵效率）",
                      self.pump_efficiency_fuel, lo=0, hi=1.0, lo_inclusive=False)
 
         # ── 涡轮效率（硬约束：0 < η ≤ 1）────────────────
@@ -532,6 +503,9 @@ class EngineInputs:
             except Exception as exc:
                 raise ValidationError(f"cooling_channel_table_json 不是有效 JSON：{exc}")
         _check_range("cooling_marching_enable（marching 开关）", self.cooling_marching_enable, lo=0.0, hi=1.0)
+        _check_range("cooling_grid_points（冷却网格点数）", self.cooling_grid_points, lo=24, hi=1000)
+        if int(self.cooling_grid_points) != self.cooling_grid_points:
+            raise ValidationError("cooling_grid_points 必须为整数。")
         if self.cooling_cover_eps != 0.0:
             _check_range("cooling_cover_eps（再生冷却覆盖面积比）", self.cooling_cover_eps, lo=1.5, hi=400.0)
         _check_range("cooling_wall_temp_limit_K（热面壁温限值）", self.cooling_wall_temp_limit_K, lo=400.0, hi=1500.0)
@@ -610,18 +584,18 @@ class EngineInputs:
         _check_range("fuel_preburner_temp_target（富燃预燃室目标温度）",
                      self.fuel_preburner_temp_target, lo=600.0, hi=1500.0)
         if self.use_target_preburner_temp >= 0.5:
-            # 目标温度不能超过材料温度上限（顶着极限但不能越界）
+            # 目标温度不得超过用户指定运行限值；不代表已完成材料验证。
             if self.ox_preburner_temp_target > self.ox_preburner_temp_limit:
                 raise ValidationError(
                     f"ox_preburner_temp_target = {self.ox_preburner_temp_target} K "
                     f"> ox_preburner_temp_limit = {self.ox_preburner_temp_limit} K，"
-                    f"目标温度不能超过富氧涡轮材料上限"
+                    f"目标温度不能超过富氧侧指定温度上限"
                 )
             if self.fuel_preburner_temp_target > self.fuel_preburner_temp_limit:
                 raise ValidationError(
                     f"fuel_preburner_temp_target = {self.fuel_preburner_temp_target} K "
                     f"> fuel_preburner_temp_limit = {self.fuel_preburner_temp_limit} K，"
-                    f"目标温度不能超过富燃涡轮材料上限"
+                    f"目标温度不能超过富燃侧指定温度上限"
                 )
 
         # ── 自由分流模式初始猜测 ─────────────────────────
@@ -647,18 +621,18 @@ class EngineInputs:
         # override_rpm 允许 0（=自动反推）或 [1000, 200000] 之间
         for nm, val in [
             ("lox_pump_speed_rpm_override（LOX 泵转速锁定）",  self.lox_pump_speed_rpm_override),
-            ("fuel_pump_speed_rpm_override（CH4 泵转速锁定）", self.fuel_pump_speed_rpm_override),
+            ("fuel_pump_speed_rpm_override（燃料泵转速锁定）", self.fuel_pump_speed_rpm_override),
         ]:
             _check_range(nm, val, lo=0.0)
             if val > 0:
                 _warn_range(nm, val, 5000.0, 80000.0)
         _check_range("lox_pump_specific_speed_target（LOX Ns 目标）",
                      self.lox_pump_specific_speed_target, lo=5.0, hi=200.0)
-        _check_range("fuel_pump_specific_speed_target（CH4 Ns 目标）",
+        _check_range("fuel_pump_specific_speed_target（燃料 Ns 目标）",
                      self.fuel_pump_specific_speed_target, lo=5.0, hi=200.0)
         _warn_range("lox_pump_specific_speed_target（LOX Ns 目标）",
                     self.lox_pump_specific_speed_target, 15.0, 80.0)
-        _warn_range("fuel_pump_specific_speed_target（CH4 Ns 目标）",
+        _warn_range("fuel_pump_specific_speed_target（燃料 Ns 目标）",
                     self.fuel_pump_specific_speed_target, 15.0, 80.0)
         if not isinstance(self.lox_pump_n_stages, int) or self.lox_pump_n_stages < 1:
             self.lox_pump_n_stages = max(1, int(self.lox_pump_n_stages))
@@ -666,11 +640,11 @@ class EngineInputs:
             self.fuel_pump_n_stages = max(1, int(self.fuel_pump_n_stages))
         _check_range("lox_pump_n_stages（LOX 泵级数）",
                      float(self.lox_pump_n_stages), lo=1, hi=6)
-        _check_range("fuel_pump_n_stages（CH4 泵级数）",
+        _check_range("fuel_pump_n_stages（燃料泵级数）",
                      float(self.fuel_pump_n_stages), lo=1, hi=6)
         _check_range("lox_pump_head_coefficient_psi（LOX 压头系数 ψ）",
                      self.lox_pump_head_coefficient_psi, lo=0.2, hi=0.8)
-        _check_range("fuel_pump_head_coefficient_psi（CH4 压头系数 ψ）",
+        _check_range("fuel_pump_head_coefficient_psi（燃料压头系数 ψ）",
                      self.fuel_pump_head_coefficient_psi, lo=0.2, hi=0.8)
 
         # ── 涡轮气动设计目标（V10 新增）─────────────────
@@ -771,7 +745,7 @@ class EngineInputs:
         if self.use_target_gg_temp >= 0.5 and self.gg_temp_target > self.gg_temp_limit:
             raise ValidationError(
                 f"gg_temp_target = {self.gg_temp_target} K > gg_temp_limit = "
-                f"{self.gg_temp_limit} K，GG 目标温度不能超过涡轮材料上限"
+                f"{self.gg_temp_limit} K，GG 目标温度不能超过指定温度上限"
             )
         _check_range("gg_injector_dp_ratio（GG 喷注器压降比）",
                      self.gg_injector_dp_ratio, lo=0.03, hi=0.40)
@@ -804,7 +778,7 @@ class FlowState:
     density: float | None = None
 
     composition: Dict[str, float] = field(default_factory=dict)
-    metadata: Dict[str, float] = field(default_factory=dict)
+    metadata: Dict[str, object] = field(default_factory=dict)
 
 
 # =========================================
@@ -818,6 +792,7 @@ class ComponentResult:
     name: str
     outputs: Dict[str, float] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    profile: Dict[str, object] | None = None
 
 
 # =========================================
@@ -853,3 +828,8 @@ class CycleResults:
     topology_nodes:  List = field(default_factory=list)
     topology_edges:  List = field(default_factory=list)
     geometry:        Dict[str, float] = field(default_factory=dict)
+    # Versioned solver evidence; empty on legacy records (never implies success).
+    convergence:     dict = field(default_factory=dict)
+    # Versioned boundary/equation evidence. Legacy records have no closure proof.
+    steady_closure:  dict = field(default_factory=dict)
+    thermodynamic_applicability: dict = field(default_factory=dict)

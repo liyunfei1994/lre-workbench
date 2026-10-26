@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parent.parent
@@ -344,6 +345,29 @@ class CfdRunnerTests(unittest.TestCase):
         self.wait_for(lambda: bool(self.finished))
         self.wait_for(child_stopped)
         self.assertEqual(self.finished[0][1], "cancelled")
+
+    def test_tree_stop_helper_failure_is_visible_and_handled_once(self):
+        # A denied OS tree-stop must not be silently represented as confirmed
+        # cancellation of all descendants. The direct child is still stopped.
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                helper = Mock()
+                helper._tree_stop_handled = False
+                helper._owned_root_handle = None
+                helper.state.return_value = QProcess.Running if timed_out else QProcess.NotRunning
+                helper.exitCode.return_value = 1
+                helper.error.return_value = QProcess.UnknownError
+                helper.readAllStandardError.return_value = b"Access is denied."
+                process = Mock()
+                process.state.return_value = QProcess.Running
+                with patch.object(self.runner, "_diagnostic") as diagnostic:
+                    self.runner._tree_stop_done(helper, process)
+                    self.runner._tree_stop_done(helper, process)
+                diagnostic.assert_called_once()
+                self.assertIn("子进程可能仍在运行", diagnostic.call_args.args[1])
+                self.assertIn("等待超时" if timed_out else "退出码 1", diagnostic.call_args.args[1])
+                process.kill.assert_called_once()
+                self.assertEqual(helper.kill.call_count, int(timed_out))
 
 
 if __name__ == "__main__":

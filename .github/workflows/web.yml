@@ -1,0 +1,60 @@
+name: Validate local web workspace
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  web:
+    name: Web Python 3.14 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # Real FFSC/GG worker cases include coupled regenerative cooling. The full
+    # suite on hosted Linux reaches those cases after about 13 minutes; retain
+    # all numerical checks and allow them to finish on shared runner hardware.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      PYTHONUTF8: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-web.txt
+      - run: python -m pip install -r requirements-web.txt
+      - run: python -m pip check
+      - run: python -m unittest discover -s web_tests -v
+      - name: Check propellant thermodynamics and conservation
+        run: python -m unittest tests.test_propellant_physics tests.test_thermo_validation_physics tests.test_fluid_properties tests.test_thermochemical_reference tests.test_regen_circuit tests.test_heated_nozzle tests.test_regen_coupling tests.test_steady_closure tests.test_gg_feed_states -v
+      - name: Check JavaScript syntax
+        run: |
+          node --check webapp/static/app.js
+          node --check webapp/static/results.js
+          node --check webapp/static/component-analysis.js
+          node --check webapp/static/cycle-model.js
+          node --check webapp/static/cycle-schematic.js
+          node --check webapp/static/flow-model.js
+          node --check webapp/static/flow-analysis.js
+          node --check webapp/static/validation.js
+          node --check webapp/static/validation-charts.js
+          node --check webapp/static/property-comparison.js
+          node --check webapp/static/throttle.js
+          node --check webapp/static/transient.js
+          node --check webapp/static/feed-network.js
+          node --check webapp/static/chilldown.js
+          node --check webapp/static/ignition.js
+      - name: Check workbench editing and result views
+        run: node --test web_tests/*.mjs

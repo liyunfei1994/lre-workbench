@@ -9,7 +9,7 @@ V9 修改记录：
    形成独立 Turbine 类。
 2. preburner.Preburner 只负责 HP 化学平衡 → 产出 GasState（涡轮入口状态）。
 3. Turbine 类接收 GasState + 排气压力 + 等熵效率，调用
-   thermo.turbine_expansion()（Cantera 真实状态方程 / 经验回退）
+   thermo.turbine_expansion()（当前为 Cantera 理想气体混合物 / 经验回退）
    产出涡轮排气 FlowState 与 ComponentResult。
 4. 行为与 V8 完全等价（cycle.py 的求解残差和数值结果不变），
    只是物理对象的边界更清晰，为后续做 CFTurbo 联调留出接口。

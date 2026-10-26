@@ -35,6 +35,7 @@ from typing import Callable, List, Optional
 from core import EngineInputs
 from cycle import FFSCCycleModel
 from task_control import checkpoint
+from convergence import numerical_convergence
 
 
 # 【已废弃】历史经验修正项。早期 Cantera 用气相 NASA 多项式查 LOX 入口焓，
@@ -93,7 +94,7 @@ def _extract_record(of_target: float, results, side: str) -> dict:
     T_real_est = T_PB
 
     residual = float(s.get("solver_residual_norm", 1.0))
-    converged = residual < 1e-3 and not bool(s.get("solver_warning", 0.0))
+    converged = numerical_convergence(results)["status"] == "pass"
 
     return {
         "side": side,

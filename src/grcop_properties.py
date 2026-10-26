@@ -11,7 +11,7 @@ grcop_properties.py — GRCop-84 随温度变化物性（NASA 手册回归式，
 保守，可对屈服/抗拉再乘一个 knockdown（见 LOWER_95_KNOCKDOWN_*）。
 
 ⚠ 适用范围与诚实标注
-  · k(T)   : 手册导热式基于**高 Fe(150–250 ppm)**粉末批；手册明确指出低 Fe(120 ppm)
+  · k(T)   : 手册导热式基于**高 Fe(150–250 ppm)**粉末批；手册明确指出低 Fe(<20 ppm)
             现代料在 25–350°C 区导热显著更高（RT 约 340–350 vs 此式 ~285）。本式偏
             保守(低导热→高壁温)，用作基准；现代低 Fe 料可上修 ~15–20%。
   · σy/UTS : 手册给 as-extruded 与 as-HIPed 两态闭式；默认用 **extruded**（强度上界、

@@ -673,25 +673,30 @@ def compare_chamber_liner_materials(results, candidate_keys: Optional[List[str]]
                                     targets: Optional[SpecTargets] = None,
                                     coolant_T_throat: Optional[float] = None,
                                     h_c_throat: Optional[float] = None):
-    """同一冷却工况下对比各铜合金燃烧室内壁能否扛住（耦合冷却）。
+    """Compare candidate responses to saved throat thermal loads, without a thermal solve.
 
-    固定燃气侧(T_aw,h_g)与冷却侧(T_co,h_c)——均与内壁材料无关——只把材料的 k(T)
-    换掉：低导热 → 穿壁温差大 → 热面壁温高。再逐材料判定 温度/热应力/LCF。
-    返回 (rows, op)；rows 已按 扛得住→临界→扛不住 排序。
-
-    coolant_T_throat：喉部冷却剂温度覆盖值（GUI 可传沿程 marching 的真实值，
-                      与「再生冷却」Tab 完全一致；缺省用 cooling 单点值）。
+    Changing material conductivity changes the coupled thermal state and therefore
+    requires a complete cycle rerun. This table is only a frozen-load screening.
+    Legacy boundary overrides are rejected rather than replacing saved evidence.
     """
+    if coolant_T_throat is not None or h_c_throat is not None:
+        raise ValueError("材料比较只读取保存的冷却载荷；改变热边界需重算完整循环。")
+    from chamber_design import saved_cooling_result
+    profile = saved_cooling_result(results)["profile"]
+    cells = [c for c in profile.get("cells", []) if c.get("kind") == "channel"]
+    if not cells:
+        raise ValueError("统一冷却剖面未保存通道单元；请重算完整循环。")
+    throat_x = float(profile.get("x_throat_m", profile.get("summary", {}).get("x_throat_m", float("nan"))))
+    if not math.isfinite(throat_x):
+        raise ValueError("统一冷却剖面缺少喉部坐标。")
+    cell = min(cells, key=lambda c: abs(c["x_m"] - throat_x))
+    keys = ("h_g_W_m2K", "h_c_W_m2K", "T_coolant_K", "wall_thickness_m",
+            "T_wall_hot_K", "T_wall_cold_K", "q_W_m2")
+    if any(not isinstance(cell.get(k), (int, float)) or not math.isfinite(cell[k]) for k in keys):
+        raise ValueError("保存的喉部冷却载荷不完整，不能使用猜测值代替。")
     tgt = targets or SpecTargets()
-    cc = results.components.get("cooling_channel")
-    co = cc.outputs if cc else {}
-    h_g = float(co.get("h_g_throat_W_m2_K", 5.0e4) or 5.0e4)
-    T_aw = float(co.get("T_aw_throat_K", 3500.0) or 3500.0)
-    h_c = float(h_c_throat if h_c_throat is not None
-                else (co.get("h_coolant_W_m2K", 3.0e5) or 3.0e5))
-    T_co = float(coolant_T_throat if coolant_T_throat is not None
-                 else (co.get("T_coolant_throat_K", 250.0) or 250.0))
-    t = float(co.get("liner_thickness_m", 0.5e-3) or 0.5e-3)
+    h_g, h_c, T_co, t, T_wg, T_wc, q = (float(cell[k]) for k in keys)
+    T_aw = float((cell.get("hot_side") or {}).get("T_aw_K", float("nan")))
 
     try:
         from thermal_structural import _k_of_T
@@ -709,19 +714,7 @@ def compare_chamber_liner_materials(results, candidate_keys: Optional[List[str]]
             m = get_material(key)
         except Exception:
             continue
-        # k(T) 自洽求热面壁温（h_g、T_aw、T_co、h_c 固定，只随材料 k 变）
-        T_wg = T_co + 300.0
-        q = 0.0
-        for _ in range(10):
-            kw = _k_of_T(m, 0.5 * (T_wg + T_co))
-            R = 1.0 / max(h_g, 1.0) + t / max(kw, 1e-6) + 1.0 / max(h_c, 1.0)
-            q = max((T_aw - T_co) / max(R, 1e-9), 0.0)
-            T_wg_new = T_aw - q / max(h_g, 1.0)
-            if abs(T_wg_new - T_wg) < 0.3:
-                T_wg = T_wg_new
-                break
-            T_wg = 0.5 * T_wg + 0.5 * T_wg_new
-        T_wc = T_co + q / max(h_c, 1.0)
+        # All candidates use the same recorded temperatures and flux. No k(T) heat solve.
         dT = T_wg - T_wc
         E = m.youngs_modulus_GPa * 1e9
         al = m.cte_1e6_per_K * 1e-6
@@ -735,13 +728,13 @@ def compare_chamber_liner_materials(results, candidate_keys: Optional[List[str]]
         k_op = _k_of_T(m, T_wg)
 
         if T_wg > m.T_max_short_K:
-            verdict = "❌ 温度扛不住(超短时上限,熔/严重软化)"; level = "gap"
+            verdict = "记录温度超过短时材料上限"; level = "gap"
         elif T_wg > m.T_max_use_K:
-            verdict = "⚠ 超长期上限(短时可,复用寿命差)"; level = "marginal"
+            verdict = "记录温度超过长期材料上限"; level = "marginal"
         elif N_f < tgt.life_cycles:
-            verdict = f"⚠ 温度OK但LCF寿命不足({_fmt_life(N_f)}<{tgt.life_cycles})"; level = "marginal"
+            verdict = f"简化 LCF 估计低于目标({_fmt_life(N_f)}<{tgt.life_cycles})"; level = "marginal"
         else:
-            verdict = "✅ 扛得住(温度+寿命均满足)"; level = "ok"
+            verdict = "未触发本表筛查限值（未经验证）"; level = "ok"
 
         rows.append({
             "key": key, "name": m.display_name,
@@ -755,7 +748,7 @@ def compare_chamber_liner_materials(results, candidate_keys: Optional[List[str]]
 
     order = {"ok": 0, "marginal": 1, "gap": 2}
     rows.sort(key=lambda r: (order[r["level"]], -r["T_margin"]))
-    op = {"q_throat_MW": float(co.get("q_throat_MW_m2", 0.0) or 0.0),
+    op = {"q_throat_MW": q / 1e6, "source": "saved_cooling_throat_load",
           "h_c": h_c, "T_co": T_co, "T_aw": T_aw, "h_g": h_g, "t_mm": t * 1000.0,
           "life_target": tgt.life_cycles}
     return rows, op
@@ -765,11 +758,11 @@ def format_liner_comparison(rows: List[dict], op: dict) -> str:
     """铜合金对比文本表。"""
     L: List[str] = []
     L.append("═" * 90)
-    L.append("  燃烧室内壁铜合金对比（耦合冷却）—— 能不能扛住当前工况？")
+    L.append("  燃烧室内壁材料筛查（保存的喉部热负荷，未经结构验证）")
     L.append("═" * 90)
-    L.append(f"  喉部工况(材料无关)：q≈{op['q_throat_MW']:.0f} MW/m²　T_aw={op['T_aw']:.0f}K　"
+    L.append(f"  当前设计保存的喉部工况：q≈{op['q_throat_MW']:.0f} MW/m²　T_aw={op['T_aw']:.0f}K　"
              f"h_g={op['h_g']:.1e}　h_c={op['h_c']:.1e}　冷却剂T={op['T_co']:.0f}K　衬里厚={op['t_mm']:.2f}mm")
-    L.append("  原理：燃气侧/冷却侧固定，只换材料 k(T)；低导热→穿壁温差大→热面壁温高→可能超材料上限。")
+    L.append("  所有候选材料使用相同的保存壁温与热流。更换材料后必须重算完整循环，本表不预测新的壁温。")
     L.append("")
     L.append(f"  {'材料':<13}{'k@工况':>7}{'热面T_wg':>9}{'温度上限':>9}{'温度余量':>9}{'静态SF':>8}{'LCF寿命':>8}  判定")
     L.append("  " + "─" * 86)
@@ -777,20 +770,8 @@ def format_liner_comparison(rows: List[dict], op: dict) -> str:
         L.append(f"  {r['name_short']:<13}{r['k_op']:>7.0f}{r['T_wg']:>9.0f}{r['T_max_use']:>9.0f}"
                  f"{r['T_margin']:>+9.0f}{r['SF']:>8.2f}{_fmt_life(r['N_f']):>8}  {r['verdict']}")
     L.append("")
-    ok = [r for r in rows if r["level"] == "ok"]
-    if ok:
-        best = ok[0]
-        L.append(f"  ▶ 结论：{len(ok)} 种扛得住当前工况；按温度余量推荐 {best['name_short']}"
-                 f"（余量 {best['T_margin']:+.0f}K，LCF≈{_fmt_life(best['N_f'])} 次）。")
-    else:
-        mg = [r for r in rows if r["level"] == "marginal"]
-        if mg:
-            L.append(f"  ▶ 结论：无一稳妥满足；{mg[0]['name_short']} 最接近(临界)。"
-                     "建议降热流(强化冷却/减薄衬里)或研发更高耐温铜合金。")
-        else:
-            L.append("  ▶ 结论：现有铜合金均扛不住当前工况 → 必须强化冷却或研发新材料。")
-    L.append("  注：静态 SF<1 是再生冷却铜室常态(热应力>屈服→每循环塑性)，寿命看 LCF；")
-    L.append("      k(T)/LCF 为工程量级估算，详细设计需实测曲线；冷却剂温取自当前冷却解。")
+    L.append("  静态 SF 和 LCF 仅为简化筛查估计，不构成材料选型、疲劳寿命或结构验证结论。")
+    L.append("  材料温度限值及模型仍需核实；改变材料后的导热反馈需完整循环重算。")
     L.append("═" * 90)
     return "\n".join(L)
 
@@ -829,15 +810,15 @@ def plot_liner_comparison(fig, rows: List[dict], op: dict) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels([r["name_short"] for r in rows], fontsize=9)
     ax.set_ylabel("温度 [K]", fontsize=9.5)
-    ax.set_title("同一冷却工况下各铜合金：热面壁温 T_wg vs 各自温度上限\n"
+    ax.set_title("保存的同一热负荷下材料筛查：壁温 T_wg vs 各自温度上限\n"
                  f"(喉部 q≈{op['q_throat_MW']:.0f} MW/m²  ·  h_c={op['h_c']:.1e}  ·  "
                  f"冷却剂 {op['T_co']:.0f}K  ·  衬里 {op['t_mm']:.2f}mm)",
                  fontsize=11, fontweight="bold", color="#0f172a")
     ax.set_ylim(0, max(max(twg), max(r["T_max_short"] for r in rows)) * 1.18)
     legend = [
-        Patch(facecolor="#15803D", label="扛得住"),
-        Patch(facecolor="#B45309", label="临界/寿命不足"),
-        Patch(facecolor="#B91C1C", label="扛不住"),
+        Patch(facecolor="#15803D", label="未触发筛查限值"),
+        Patch(facecolor="#B45309", label="触发筛查限值"),
+        Patch(facecolor="#B91C1C", label="超短时温度限值"),
         Line2D([0], [0], color="#111827", lw=2.4, label="长期 T_max"),
         Line2D([0], [0], color="#6B7280", ls=":", lw=1.2, label="短时 T_max"),
     ]

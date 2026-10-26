@@ -532,10 +532,10 @@ _MATERIALS_LIST: List[TurbineMaterial] = [
         spec_heat_J_kgK=382.0,            # 手册 cp(300K)；随温查 cp(T)
         temp_prop_model="grcop84",        # ★ 挂 NASA 手册回归式：k(T)/cp(T)/σy(T)/UTS(T)
         notes="NASA Glenn 研发的 Cu-8at%Cr-4at%Nb 弥散强化合金。Cr2Nb 颗粒弥散强化,"
-              "800℃ 仍保持强度与抗氧化/抗蠕变。Raptor/RS-25E 内壁主选。"
+              "历史结构筛查条目；不声明具体发动机选材或已验证的使用温度。"
               "★随温物性来自 Ellis《Aerospace Structural Materials Handbook Supplement: "
               "GRCop-84》回归式（k/cp/σy/UTS 随温，extruded 态）。注：导热式基于高Fe"
-              "(150–250ppm)批,现代低Fe(120ppm)料 RT 导热更高(~340);严控 Cr:Nb>1.15、"
+              "(150–250ppm)批,文献低Fe(<20ppm)试样不应与该批回归曲线混用；严控 Cr:Nb>1.15、"
               "不可铸造、高温钎焊会粗化 Cr2Nb 降强度。",
     ),
 
@@ -560,7 +560,7 @@ _MATERIALS_LIST: List[TurbineMaterial] = [
         spec_heat_J_kgK=385.0,
         notes="GRCop-84 的低 Cr-Nb 含量改进版（Cu-4Cr-2Nb at%）,"
               "析出相更少→导热更高(~310)但耐温略低;更适合 SLM 增材(粉末流动性好)。"
-              "Raptor 2 / Vulcan BE-4 内壁选用。",
+              "历史简化结构条目；未配置有制造状态和温区依据的系统冷却数据集。",
     ),
 
     TurbineMaterial(

@@ -1,4 +1,5 @@
 .venv/
+.venv-web/
 .venv.backup-*/
 .runtime/
 .tools/

@@ -310,7 +310,8 @@ class CfdPanel(QWidget):
         try:
             summary = results.summary
             residual = float(summary.get("solver_residual_norm", math.inf))
-            if summary.get("solver_warning", False) or not math.isfinite(residual) or residual >= 1e-3:
+            from convergence import numerical_convergence
+            if numerical_convergence(results)["status"] != "pass":
                 return False, "初算尚未数值收敛，不能作为 CFD 任务的边界来源。"
             current_inputs = _plain_inputs(self.main._read_inputs())
             submitted = getattr(self.main, "_solved_input_snapshot", None)
@@ -318,10 +319,19 @@ class CfdPanel(QWidget):
                     _same_fallback_inputs(_plain_inputs(results.inputs), current_inputs))
             if not same:
                 return False, "初算与当前实际计算输入不一致，请重新运行设计点。"
+            from engineering_assessment import assess_engineering
+            assessment = assess_engineering(results)
         except Exception as error:
             return False, f"请检查当前输入：{error}"
+        # A complete numerical solve is the export gate. Engineering limits
+        # are separate evidence, and need not have a corresponding warning.
+        engineering_text = assessment["label"]
+        failures = [row["label"] for row in assessment["checks"] if row["status"] == "fail"]
+        if failures:
+            engineering_text += "：" + "、".join(failures)
         count = len(getattr(results, "warnings", []) or [])
-        return True, f"初算已数值收敛 · 残差 {residual:.3g}" + (f" · 保留 {count} 项工程警告，导出后仍需检查。" if count else " · 可导出边界快照。")
+        return True, f"初算已数值收敛 · 残差 {residual:.3g} · {engineering_text}" + (
+            f" · 保留 {count} 项模型警告。" if count else "。") + "可导出边界快照；导出不代表工程约束通过。"
 
     def _job_settings_match(self):
         if self._job is None:

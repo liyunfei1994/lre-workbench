@@ -28,7 +28,9 @@ import math
 
 
 def _beta_rad(conv_half_angle_deg: float) -> float:
-    return math.radians(max(min(conv_half_angle_deg, 80.0), 5.0))
+    if not math.isfinite(conv_half_angle_deg) or not 0 < conv_half_angle_deg < 80:
+        raise ValueError("contraction half-angle must lie in (0, 80) degrees")
+    return math.radians(conv_half_angle_deg)
 
 
 def _resolve_radii(rc: float, rt: float, beta: float,
@@ -42,6 +44,10 @@ def _resolve_radii(rc: float, rt: float, beta: float,
       r_tan2    直锥↔喉部弧 下切点半径
       L_straight 直锥段轴向长
     """
+    if not all(math.isfinite(v) for v in (rc, rt, Ru_factor, R1_factor)):
+        raise ValueError("convergent geometry must be finite")
+    if not (rc > rt > 0 and Ru_factor > 0 and R1_factor >= 0):
+        raise ValueError("invalid convergent radii or curvature factors")
     cosb = math.cos(beta)
     omc = 1.0 - cosb
     Ru = Ru_factor * rt
