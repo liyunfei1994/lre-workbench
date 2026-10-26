@@ -48,8 +48,8 @@ class CfdPanelTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # External route intentionally disables internal marching. The
-            # references used below are real outputs of the existing solver.
+            # Retain a legacy input for backward compatibility. It does not
+            # disable the unified cooling model used by these real results.
             cls.native = FFSCCycleModel(EngineInputs(cooling_marching_enable=0.0)).evaluate()
         if cls.native.summary.get("solver_warning") or cls.native.summary.get("solver_residual_norm", 1.0) >= 1e-3:
             raise AssertionError("Actual native fixture did not converge")
@@ -120,7 +120,8 @@ class CfdPanelTests(unittest.TestCase):
     def test_export_requires_current_numerically_converged_source(self):
         self.panel.route_combo.setCurrentIndex(self.panel.route_combo.findData("external"))
         self.assertTrue(self.panel.export_button.isEnabled())
-        self.assertIn("工程警告", self.panel.source_status.text())
+        from engineering_assessment import assess_engineering
+        self.assertIn(assess_engineering(self.main.last_results)["label"], self.panel.source_status.text())
         self.main.inputs.pc *= 1.01
         self.panel.refresh_source()
         self.assertFalse(self.panel.export_button.isEnabled())
@@ -135,6 +136,20 @@ class CfdPanelTests(unittest.TestCase):
         self.main.last_results = None
         self.panel.refresh_source()
         self.assertFalse(self.panel.export_button.isEnabled())
+
+    def test_export_preserves_failed_wall_limit_without_warning_list(self):
+        # UI contract fixture only: a failed engineering limit must remain
+        # visible even when the solver's free-form warning list is empty.
+        from tests.cooling_profile_fixture import cooling_profile
+        self.main.last_results.warnings = []
+        self.main.last_results.components["cooling_channel"].profile = cooling_profile(1343)
+        self.panel.route_combo.setCurrentIndex(self.panel.route_combo.findData("external"))
+        self.panel.refresh_source()
+        self.assertTrue(self.panel.export_button.isEnabled())
+        self.assertIn("已数值收敛", self.panel.source_status.text())
+        self.assertIn("工程约束未通过", self.panel.source_status.text())
+        self.assertIn("沿程热面壁温峰值", self.panel.source_status.text())
+        self.assertIn("导出不代表工程约束通过", self.panel.source_status.text())
 
     def test_fallback_accepts_only_float_display_noise(self):
         self.assertTrue(_same_fallback_inputs({"float": 3.333333333333333, "text": "same"},
