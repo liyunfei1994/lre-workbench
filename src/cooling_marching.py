@@ -65,8 +65,9 @@ def _hot_state(cell, *, gamma, T_c, pc, mu_g, cp_g, Pr_g, supplied=None):
 
 def _wall_heat(cell, bulk, hot, *, mdot_coolant, mdot_total, r_t, pc,
                wall_conductivity, k_wall_func, htc_enhancement, x_throat,
-               gas_emissivity, heat_transfer_enabled, throat_upstream_radius_m):
-    """Bracketed wall balance, using bulk cold properties only."""
+               gas_emissivity, heat_transfer_enabled, throat_upstream_radius_m,
+               k_wall_integral=None):
+    """Variable-k slab conduction and a declared representative-k rib model."""
     rho, mu, k, cp = (bulk[key] for key in ("rho_kgm3", "mu_Pas", "k_WmK", "cp_JkgK"))
     velocity = mdot_coolant/(rho*cell["A_flow_m2"])
     re = rho*velocity*cell["D_h_m"]/mu
@@ -84,26 +85,56 @@ def _wall_heat(cell, bulk, hot, *, mdot_coolant, mdot_total, r_t, pc,
     hg_base = (0.026/dt**0.2)*(hot["mu_Pas"]**0.2*hot["cp_JkgK"]/hot["Pr"]**0.6)*(mdot_total/(math.pi*r_t*r_t))**0.8*curvature_factor
     eps = gas_emissivity*min(hot["p_Pa"]/pc, 1.0)
     tb = bulk["T_K"]
-    def values(tw):
-        kw = float(k_wall_func(tw) if k_wall_func is not None else wall_conductivity)
-        if not math.isfinite(kw) or kw <= 0:
+    def conductivity(t):
+        value = float(k_wall_func(t) if k_wall_func is not None else wall_conductivity)
+        if not math.isfinite(value) or value <= 0:
             raise ValueError("nonpositive wall conductivity")
-        mh = math.sqrt(2*hc_base/(kw*cell["rib_m"]))*cell["height_m"]
-        eta = math.tanh(mh)/mh if mh else 1.0
-        fin = (cell["width_m"]+2*eta*cell["height_m"])/cell["pitch_m"]
-        hc = hc_base*fin*enhancement
+        return value
+    def conduction(a, b):
+        if k_wall_integral is not None:
+            return float(k_wall_integral(a, b))
+        if k_wall_func is None:
+            return wall_conductivity*(b-a)
+        # Only compatibility callers supply an arbitrary function. Production
+        # datasets have their own exact, piecewise analytic integral.
+        from scipy.integrate import quad
+        return quad(conductivity, a, b, epsabs=1e-6, epsrel=1e-9)[0]
+    def gas_heat(tw):
         hg = hg_base*cell["area_ratio"]**(-0.9)*_bartz_sigma_local(hot["gamma"], tw, hot["T0_K"], hot["M"])
         qc = hg*(hot["T_aw_K"]-tw) if heat_transfer_enabled else 0.0
         qr = eps*_SIGMA_SB*(hot["T_static_K"]**4-tw**4) if heat_transfer_enabled else 0.0
+        return hg, qc, qr
+    def values(tw):
+        tf = .5*(tb+tw)
+        kfin = conductivity(tf)
+        mh = math.sqrt(2*hc_base*enhancement/(kfin*cell["rib_m"]))*cell["height_m"]
+        eta = math.tanh(mh)/mh if mh else 1.0
+        fin = (cell["width_m"]+2*eta*cell["height_m"])/cell["pitch_m"]
+        hc = hc_base*fin*enhancement
+        hg, qc, qr = gas_heat(tw)
         q = qc+qr
         tc = tb+q/hc
-        res = tw-tc-q*cell["wall_thickness_m"]/kw
+        potential = conduction(tc, tw)
+        kw = potential/(tw-tc) if abs(tw-tc) > 1e-8 else conductivity(.5*(tw+tc))
+        integral_res = potential-q*cell["wall_thickness_m"]
+        res = integral_res/kw
         return res, dict(q_W_m2=q, q_conv_W_m2=qc, q_rad_W_m2=qr,
             T_wall_hot_K=tw, T_wall_cold_K=tc, h_g_W_m2K=hg, h_c_W_m2K=hc,
-            wall_conductivity_WmK=kw, wall_residual_K=res, Re=re, Pr=pr, fin_efficiency=eta)
+            wall_conductivity_WmK=kw, wall_residual_K=res, Re=re, Pr=pr, fin_efficiency=eta,
+            wall_conduction_residual_W_m=integral_res, fin_conductivity_WmK=kfin,
+            fin_reference_temperature_K=tf)
     if not heat_transfer_enabled:
         return values(tb)[1]
-    lo, hi = min(tb, hot["T_aw_K"], hot["T_static_K"]), max(tb, hot["T_aw_K"], hot["T_static_K"])
+    lo, hi = tb, max(tb, hot["T_aw_K"], hot["T_static_K"])
+    def net_heat(t):
+        _, conv, rad = gas_heat(t)
+        return conv+rad
+    if net_heat(lo) < -1e-6:
+        raise ValueError("reverse wall heat flow is outside this regenerative heating model")
+    # Bound wall trials by zero net gas heat. This keeps the inferred cold face
+    # positive even when radiation is negative near the adiabatic wall state.
+    if hi > lo and net_heat(hi) < 0:
+        hi = brentq(net_heat, lo, hi, xtol=1e-10)
     if hi-lo < 1e-10:
         return values(tb)[1]
     tw, info = brentq(lambda t: values(t)[0], lo, hi, xtol=1e-8, rtol=1e-12, maxiter=100, full_output=True)
@@ -140,7 +171,8 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         conv_half_angle_deg=30.0, wall_temp_limit_K=800.0, n_points=120,
         hot_side_profile=None, inlet_enthalpy_Jkg=None, k_minor_inlet=None,
         k_minor_outlet=None, heat_transfer_enabled=True, friction_enabled=True,
-        strict=True):
+        strict=True, wall_thermal_dataset_id=None, wall_manufacturing_state="unspecified",
+        wall_material_zones=None, remap_hot_side_trial=False):
     """One conserved profile including both zero-speed cycle ports.
 
     hot_side_profile aligns with build_regen_geometry().cells in coolant order.
@@ -150,6 +182,18 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
     Minor losses reference the channel speed adjacent to each manifold.
     """
     checkpoint()
+    from wall_thermal import (parse_material_zones, validate_manufacturing_state,
+                              material_for_cell, audit_cell, material_summary)
+    from wall_materials import get_wall_dataset
+    zones = parse_material_zones(wall_material_zones)
+    validate_manufacturing_state(wall_manufacturing_state)
+    if wall_thermal_dataset_id is not None:
+        get_wall_dataset(wall_thermal_dataset_id)
+        if k_wall_func is not None:
+            raise ValueError("Choose a wall dataset or a custom conductivity function, not both")
+    elif zones:
+        raise ValueError("Material zones require a default wall dataset")
+    boundaries = sorted({z[key] for z in zones for key in ("x_start_m", "x_end_m")})
     if strict is not True:
         raise ValueError("non-strict coolant fallback is not supported")
     for name, value in (("mdot_coolant",mdot_coolant),("mdot_total",mdot_total),
@@ -173,11 +217,23 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         cover_eps=cover_eps,bell_fraction=bell_fraction,conv_half_angle_deg=conv_half_angle_deg,
         n_points=n_points,counterflow=counterflow,n_channels=n_channels,
         channel_width_m=channel_width_m,channel_height_m=channel_height_m,
-        wall_thickness_m=wall_thickness_m,channel_table=channel_table)
+        wall_thickness_m=wall_thickness_m,channel_table=channel_table,
+        material_boundaries_m=boundaries)
     # Legacy callers may supply a length, but cannot define a second contour.
     if L_conv is not None and (not math.isfinite(L_conv) or
             not math.isclose(L_conv, geom["L_conv_m"], rel_tol=1e-8, abs_tol=1e-10)):
         raise ValueError("L_conv conflicts with the canonical convergent contour")
+    if hot_side_profile is not None and remap_hot_side_trial:
+        # Only an iterative guess is remapped when sizing moves the contour
+        # relative to fixed axial material interfaces. The final hot solution is
+        # recomputed on this mesh and all coupling criteria must still pass.
+        keys = ("T_static_K", "T_aw_K", "T0_K", "p_Pa", "M", "cp_JkgK", "mu_Pas", "Pr", "gamma")
+        source = sorted(hot_side_profile, key=lambda row: row["x_m"])
+        source_x = [row["x_m"] for row in source]
+        if not source or any(not math.isfinite(x) for x in source_x) or any(a >= b for a,b in zip(source_x,source_x[1:])):
+            raise ValueError("Invalid physical coordinates for hot-side trial remapping")
+        hot_side_profile = [dict(x_m=cell["x_m"], **{key: float(np.interp(cell["x_m"], source_x,
+            [row[key] for row in source])) for key in keys}) for cell in geom["cells"]]
     if hot_side_profile is not None and len(hot_side_profile) != len(geom["cells"]):
         raise ValueError("hot-side states must align exactly with common geometric cells")
     inlet = state_tp("CH4",T_in,p_in,transport=True)
@@ -198,6 +254,9 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         pscale = max(previous["p_Pa"],1e6)
         hscale = max(abs(previous["h_HEOS_Jkg"]),1e5)
         data = None
+        wall_dataset, declared_state = ((None, wall_manufacturing_state)
+            if kind != "channel" or wall_thermal_dataset_id is None else
+            material_for_cell(cell["x_m"], wall_thermal_dataset_id, wall_manufacturing_state, zones))
         def checked_cell_state(p, h):
             try:
                 return state_ph("CH4",p,h,transport=True)
@@ -231,7 +290,9 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
                 dp_friction = f*cell["ds_m"]/cell["D_h_m"]*0.5*bulk["rho_kgm3"]*velocity**2
                 thermal = _wall_heat(cell,bulk,hot,mdot_coolant=mdot_coolant,
                     mdot_total=mdot_total,r_t=r_t,pc=pc,wall_conductivity=wall_conductivity,
-                    k_wall_func=k_wall_func,htc_enhancement=htc_enhancement,
+                    k_wall_func=wall_dataset.conductivity if wall_dataset else k_wall_func,
+                    k_wall_integral=wall_dataset.conductivity_integral if wall_dataset else None,
+                    htc_enhancement=htc_enhancement,
                     x_throat=geom["x_throat_m"],gas_emissivity=gas_emissivity,
                     heat_transfer_enabled=heat_transfer_enabled,
                     throat_upstream_radius_m=geom["throat_upstream_radius_m"])
@@ -261,6 +322,9 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         if abs(solved["momentum_residual_Pa"]) > .5 or abs(solved["energy_residual_W"]) > max(.02,abs(solved["Q_W"])*1e-8):
             raise CoolantMarchError(kind,cell["s_m"],cell["x_m"],f"p/h equations did not close: {answer.message}")
         solved["function_evaluations"] = int(answer.nfev)
+        if wall_dataset is not None:
+            solved["material"] = audit_cell(solved, wall_dataset, declared_state)
+            solved["material"]["cell_index"] = len(cells)-1
         nodes.append(end)
         cells.append(solved)
 
@@ -288,6 +352,13 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
     qmax = max(channels,key=lambda c:c["q_W_m2"])
     over = sum(c["T_wall_hot_K"] > wall_temp_limit_K for c in channels)
     warnings = []
+    materials = material_summary(channels, wall_temp_limit_K)
+    if materials["status"] == "out_of_range":
+        warnings.append(f"壁面导热率数据越界：{materials['out_of_range_cell_count']}/{len(channels)} 个单元；端点常值延用仅保留诊断解，适用性未通过。")
+    elif materials["status"] == "missing_evidence":
+        warnings.append("壁面采用无数据集来源的导热率输入；材料适用性未评估。")
+    if materials["manufacturing_match"] != "matched":
+        warnings.append("壁面制造状态未声明或与所用热物性试样状态不匹配；不能据此验证硬件性能。")
     if over:
         warnings.append("部分热面壁温高于用户限值；热量闭合不代表壁温约束通过。")
     if any(2300 < c["Re"] < 3000 for c in channels):
@@ -312,6 +383,10 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
     summary["Q_rad_fraction"] = summary["Q_rad_W"]/qtotal if qtotal else 0.
     profile = dict(version=1,model_id=MODEL_ID,flow_direction=geom["flow_direction"],
         nodes=nodes,cells=cells,geometry=geom,summary=summary,balance=balance,
+        material_applicability=materials,
+        material_assignment=dict(default_dataset_id=wall_thermal_dataset_id,
+            default_manufacturing_state=wall_manufacturing_state,zones=zones,
+            coordinate="axial_x_from_injector_m"),
         gas_heat_transfer=dict(geometry_model_id=BARTZ_GEOMETRY_ID,
             curvature_source="geometry.throat_upstream_radius_m",
             curvature_definition="effective upstream throat contour arc radius",
@@ -326,6 +401,7 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         assumptions=["Zero-speed inlet/outlet manifolds; static port enthalpy equals total enthalpy.",
             "Trapezoidal 1D momentum; signed pressure recovery, Darcy friction and end-local K.",
             "Bulk-property coolant convection plus fin correction; no near-wall extrapolation.",
+            "Wall conduction integrates k(T) between both faces; rib k uses mean bulk/hot-wall temperature.",
             "Single-phase CH4 without decomposition/deposition; wall limits are user assumptions.",
             "Bartz curvature uses the actual upstream throat arc; transport reference and sigma remain unvalidated.",
             "Supplied hot-side states." if hot_side_profile is not None else

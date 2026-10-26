@@ -93,6 +93,10 @@ def _build_thermodynamic_applicability(result):
                             "description": "本记录不是已确认的 Cantera 主室组成冻结喷管；不以缺失证据推定膨胀模型。"}
     cooling = result.components.get("cooling_channel")
     cooling_profile = (getattr(cooling, "profile", None) or {}) if cooling else {}
+    from copy import deepcopy
+    report["solid_wall_thermal"] = deepcopy(cooling_profile.get("material_applicability") or {
+        "status": "missing_evidence", "manufacturing_match": "unknown",
+        "description": "历史记录或预算模式未保存逐单元材料热物性证据；不以当前数据集回填。"})
     nozzle_profile = (getattr(nozzle, "profile", None) or {}) if nozzle else {}
     if cooling_profile.get("model_id") == "regen_quasi1d_ph_v1":
         report["cooling"] = {
@@ -191,6 +195,16 @@ def attach_thermodynamic_applicability(result):
             result.warnings.append(message)
     if result.thermodynamic_applicability.get("pure_fluid_status") == "invalid_or_unavailable":
         message = "保存的纯推进剂状态未全部通过声明温压域及单相检查；详见热力学适用性检查。"
+        if message not in result.warnings:
+            result.warnings.append(message)
+    solid = result.thermodynamic_applicability.get("solid_wall_thermal", {})
+    if solid.get("status") == "out_of_range":
+        message = (f"壁面导热率数据超出来源温区：{solid.get('out_of_range_cell_count')}/{solid.get('total_cells')} 个热单元；"
+                   "诊断解使用端点常值延用，未验证材料适用性。")
+        if message not in result.warnings:
+            result.warnings.append(message)
+    if solid.get("manufacturing_match") in ("unknown", "mismatch"):
+        message = "壁面制造状态未与热物性数据试样匹配；温区内不等于实物或重复使用性能已验证。"
         if message not in result.warnings:
             result.warnings.append(message)
     return result

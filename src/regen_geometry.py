@@ -7,6 +7,7 @@ provided. The table is never silently replaced by another geometry.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 
 
 def _positive(name, value):
@@ -20,13 +21,17 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                          bell_fraction=0.8, conv_half_angle_deg=30.0,
                          n_points=120, counterflow=True, n_channels=300,
                          channel_width_m=1.5e-3, channel_height_m=5e-3,
-                         wall_thickness_m=0.5e-3, channel_table=None):
+                         wall_thickness_m=0.5e-3, channel_table=None,
+                         material_boundaries_m=()):
     """Return channel-boundary nodes and cells in coolant-flow order.
 
     ``s_m`` is distance along the coolant path; ``x_m`` remains the common gas
     coordinate (injector face is zero). Coverage ends exactly at the requested
     divergent area ratio, interpolated on the common contour. Inlet/outlet
     manifold transitions are added by the flow solver, not this geometry.
+    Material boundaries are axial coordinates on that same covered contour.
+    They split the mesh before either the gas or coolant nodes are built, so
+    the two sides share every material interface without changing the contour.
     """
     from geometry.nozzle import full_hot_gas_geometry
 
@@ -73,6 +78,26 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
     for xy in clipped[1:]:
         if math.hypot(xy[0] - points[-1][0], xy[1] - points[-1][1]) > 1e-14:
             points.append(xy)
+    try:
+        material_boundaries = sorted(float(x) for x in material_boundaries_m)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("material boundaries must be finite axial coordinates") from exc
+    if any(not math.isfinite(x) for x in material_boundaries):
+        raise ValueError("material boundaries must be finite axial coordinates")
+    if any(a == b for a, b in zip(material_boundaries, material_boundaries[1:])):
+        raise ValueError("material boundaries must be unique")
+    if any(x < points[0][0] or x > points[-1][0] for x in material_boundaries):
+        raise ValueError("material boundaries must lie within the cooled extent")
+    point_xs = [x for x, _ in points]
+    for boundary in material_boundaries:
+        index = bisect_left(point_xs, boundary)
+        if index < len(points) and point_xs[index] == boundary:
+            continue
+        xa, ra = points[index - 1]
+        xb, rb = points[index]
+        fraction = (boundary - xa) / (xb - xa)
+        points.insert(index, (boundary, ra + fraction * (rb - ra)))
+        point_xs.insert(index, boundary)
     # Full hot-side mesh retains the exact coverage boundary and the uncooled
     # extension. Gas coordinates always run injector -> nozzle exit.
     full_points = points + [(x, r) for x, r in zip(xs, rs) if x > points[-1][0] + 1e-14]
@@ -142,6 +167,7 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                 bell_fraction=contour["bell_fraction"],
                 full_nodes=full_nodes, full_nodes_direction="gas_flow",
                 full_exit_x_m=full_exit, coverage_end_x_m=points[-1][0],
+                material_boundaries_m=material_boundaries,
                 cover_eps=cover, expansion_ratio=eps,
                 path_length_m=nodes[-1]["s_m"],
                 hot_area_m2=sum(cell["dA_hot_m2"] for cell in cells),

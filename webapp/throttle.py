@@ -29,6 +29,73 @@ def finite(value):
         return None
 
 
+def _wall_material_binding(profile, values):
+    """Pin the source's actual solid data before creating a new hardware study.
+
+    This checks saved data identity, assignment and accepted-cell audits. It
+    deliberately does not promote unknown manufacturing state or out-of-range
+    diagnostic results into material qualification.
+    """
+    from wall_materials import get_wall_dataset
+    from wall_thermal import (parse_material_zones, validate_manufacturing_state,
+                              material_for_cell, audit_cell, material_summary)
+
+    def require(condition, detail):
+        if not condition:
+            raise ValueError(f"来源设计点的壁面材料{detail}；请重新计算设计点，不能静默更换固定硬件基准的数据。")
+
+    saved = profile.get("material_applicability")
+    assignment = profile.get("material_assignment")
+    require(isinstance(saved, dict) and saved.get("schema_version") == 1
+            and isinstance(assignment, dict), "数据身份或逐单元证据缺失（历史记录）")
+    try:
+        default_id = values["wall_thermal_dataset_id"]
+        state = validate_manufacturing_state(values["wall_manufacturing_state"])
+        get_wall_dataset(default_id)
+        zones = parse_material_zones(values["wall_material_zones_json"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("来源设计点的壁面材料输入无法识别；请重新计算设计点。") from exc
+    expected_assignment = dict(default_dataset_id=default_id,
+        default_manufacturing_state=state, zones=zones, coordinate="axial_x_from_injector_m")
+    require(assignment == expected_assignment, "分区或制造状态与保存输入不一致")
+    channels = [c for c in profile.get("cells", []) if isinstance(c, dict) and c.get("kind") == "channel"]
+    require(bool(channels) and all(isinstance(c.get("material"), dict) for c in channels),
+            "逐单元证据不完整")
+    snapshots = saved.get("datasets")
+    require(isinstance(snapshots, list) and all(isinstance(d, dict) for d in snapshots),
+            "数据集快照缺失")
+    by_id = {d.get("dataset_id"): d for d in snapshots}
+    require(len(by_id) == len(snapshots), "数据集快照重复")
+    used_ids = set()
+    for cell in channels:
+        x = finite(cell.get("x_m"))
+        require(x is not None, "单元缺少有效轴向位置")
+        dataset, declared = material_for_cell(x, default_id, state, zones)
+        used_ids.add(dataset.dataset_id)
+        # Metadata includes the hash, coefficients, source, manufacturing state
+        # and revision. Comparing the entire snapshot also rejects altered data
+        # that retained an obsolete hash, without running a new thermal solve.
+        require(by_id.get(dataset.dataset_id) == dataset.metadata(),
+                "数据集版本、内容或哈希已改变/缺失")
+        try:
+            audit = audit_cell(cell, dataset, declared)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("来源设计点的壁面材料温度与数据证据不完整；请重新计算设计点。") from exc
+        require(all(cell["material"].get(key) == value for key, value in audit.items()),
+                "单元数据集、实际温区或制造状态记录不一致")
+    require(set(by_id) == used_ids, "快照与实际使用的数据集不一致")
+    checked = material_summary(channels, values["cooling_wall_temp_limit_K"])
+    for key in ("status", "dataset_ids", "total_cells", "audited_cells", "out_of_range_cell_count",
+                "min_temperature_K", "max_temperature_K", "manufacturing_match",
+                "wall_temperature_limit_K", "wall_temperature_limit_status"):
+        require(saved.get(key) == checked[key], "适用性汇总与逐单元证据不一致")
+    return dict(schema_version=1, assignment=deepcopy(expected_assignment),
+        material_boundaries_m=sorted({z[k] for z in zones for k in ("x_start_m", "x_end_m")}),
+        datasets=deepcopy(snapshots), status="saved_dataset_identity_checked",
+        applicability_status=checked["status"], manufacturing_match=checked["manufacturing_match"],
+        structural_qualification="not_assessed")
+
+
 def _cooling_baseline(calculation, values, throat_area, height):
     """Audit saved coolant evidence without performing a new thermal solve.
 
@@ -58,6 +125,7 @@ def _cooling_baseline(calculation, values, throat_area, height):
     profile = cooling.get("profile")
     require(isinstance(profile, dict) and profile.get("version") == 1 and profile.get("model_id") == "regen_quasi1d_ph_v1",
             "记录缺失或来自旧模型")
+    material_binding = _wall_material_binding(profile, values)
     geometry = profile.get("geometry")
     require(isinstance(geometry, dict) and geometry.get("version") == 2, "几何快照缺失或曲率来源版本过旧")
     from cooling_marching import BARTZ_GEOMETRY_ID
@@ -86,7 +154,8 @@ def _cooling_baseline(calculation, values, throat_area, height):
             n_points=values["cooling_grid_points"], counterflow=True,
             n_channels=values["cooling_n_channels"], channel_width_m=values["cooling_channel_width_m"],
             channel_height_m=height, wall_thickness_m=values["cooling_wall_thickness_m"],
-            channel_table=values["cooling_channel_table_json"] or None)
+            channel_table=values["cooling_channel_table_json"] or None,
+            material_boundaries_m=material_binding["material_boundaries_m"])
     except (ValueError, TypeError, KeyError) as exc:
         raise ValueError("来源设计点冷却几何不能从保存的输入重建，请修正并重新计算设计点。") from exc
 
@@ -231,6 +300,7 @@ def _cooling_baseline(calculation, values, throat_area, height):
     close(coupling["hot_side_relative_residual"],vector_error,"重算热侧状态相对差",atol=1e-12)
     return {"mode":"regen_quasi1d_ph_v1", "geometry":deepcopy(geometry),
             "geometry_sha256":fingerprint(geometry), "profile_sha256":fingerprint(profile),
+            "wall_material_binding":material_binding,
             "status":"saved_model_balances_checked", "validation_status":"requires_independent_validation",
             "limitations":["守恒与模型域检查不验证凝结、温区外推误差、高压燃气 EOS 或传热相关式。"]}
 

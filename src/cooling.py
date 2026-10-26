@@ -100,7 +100,9 @@ class CoolingChannel:
             conv_half_angle_deg=30., fuel_species="CH4", inlet_enthalpy=None,
             throat_area_m2=None, hot_side_profile=None, expansion_ratio=34.34,
             bell_fraction=.8, channel_table=None, n_points=120, k_wall_func=None,
-            gas_emissivity=.2, wall_temp_limit_K=800., film_fraction=0., counterflow=True):
+            gas_emissivity=.2, wall_temp_limit_K=800., film_fraction=0., counterflow=True,
+            wall_thermal_dataset_id=None, wall_manufacturing_state="unspecified", wall_material_zones=None,
+            remap_hot_side_trial=False):
         self.fuel_species = normalize_fuel_species(fuel_species)
         if self.fuel_species == "c12h26":
             validate_surrogate_state(t_inlet, p_inlet)
@@ -185,7 +187,10 @@ class CoolingChannel:
             counterflow=self.counterflow,channel_table=self.channel_table,bell_fraction=self.bell_fraction,
             film_fraction=self.film_fraction,gas_emissivity=self.gas_emissivity,
             conv_half_angle_deg=self.conv_half_angle_deg,wall_temp_limit_K=self.wall_temp_limit_K,
-            n_points=self.n_points,hot_side_profile=self.hot_side_profile,inlet_enthalpy_Jkg=h_in)
+            n_points=self.n_points,hot_side_profile=self.hot_side_profile,inlet_enthalpy_Jkg=h_in,
+            wall_thermal_dataset_id=self.wall_thermal_dataset_id,
+            wall_manufacturing_state=self.wall_manufacturing_state,
+            wall_material_zones=self.wall_material_zones,remap_hot_side_trial=self.remap_hot_side_trial)
         profile = result["profile"]
         s,b = result["summary"],result["balance"]
         channels = [c for c in profile["cells"] if c["kind"] == "channel"]

@@ -11,6 +11,7 @@ from webapp.solver import EngineInputs
 from materials import list_materials_for_part
 from propellants import propellant_models
 from parameter_contract import parameter_metadata, preburner_mode_field, ROLE_LABELS
+from wall_materials import list_wall_datasets
 from ui_metadata import (
     _MATERIAL_FIELD_META, CHAMBER_INPUTS, CYCLE_TYPE_CHOICES, GG_LAYOUT_CHOICES, PROPELLANT_CHOICES,
     NONLINEAR_SOLVER_CHOICES, COMBUSTION_LOSS_CHOICES, THERMO_DATASET_CHOICES,
@@ -51,6 +52,49 @@ EXTRA_FIELDS = (
     ("fuel_pump_impeller_material", "燃料泵叶轮材料", ""),
     ("cooling_channel_table_json", "冷却通道沿程分布表（JSON）", ""),
 )
+
+WALL_THERMAL_FIELDS = (
+    ("wall_thermal_dataset_id", "内衬热物性数据集", ""),
+    ("wall_manufacturing_state", "方案内衬制造状态", ""),
+    ("wall_material_zones_json", "轴向材料分区（JSON）", ""),
+)
+
+
+def _wall_thermal_group(defaults):
+    catalog = [dataset.metadata() for dataset in list_wall_datasets()]
+    cycles = ["ffsc", "gg"]
+    fields = [_field(key, label, unit, defaults, cycles)
+              for key, label, unit in WALL_THERMAL_FIELDS]
+    for field in fields:
+        field.update(role="model_assumption", role_label="模型假设",
+                     visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+    fields[0].update(type="select", choices=[{"value": item["dataset_id"], "label": item["label"]}
+                                            for item in catalog], dataset_catalog=catalog,
+                     empty_choice_label="请选择有来源的热物性数据集（历史材料无对应曲线）",
+                     help="按资料对应的材料与制造状态选择；数据集直接提供稳态壁面导热率，不使用未注明来源的铜合金通用倍率。")
+    fields[1].update(type="select", choices=[
+        {"value": "unspecified", "label": "未指定 / 待确认"},
+        *[{"value": item["manufacturing_state"]["state_id"],
+           "label": item["manufacturing_state"]["label"]} for item in catalog],
+        {"value": "other", "label": "其他制造状态（与所选数据不匹配）"}],
+        help="用于标记方案与数据试样的制造状态是否匹配；选择匹配状态不构成实际制造或结构使用资格认证。")
+    fields[2].update(advanced=True, multiline=True, role="design_input", role_label="设计输入",
+                     help='留空时使用上方数据集；未覆盖的间隙同样继承默认数据。x 从喷注面起算，单位 m，区段不能重叠且须在冷却覆盖内。格式：[{"x_start_m":0.2,"x_end_m":0.4,"dataset_id":"cuzr_qi2024_heat_treated_v1","manufacturing_state":"qi2024_solution_cold_work_aged"}]')
+    structural_context = [
+        {"key": key, "label": label,
+         "labels": {material.key: material.display_name for material in list_materials_for_part(part)},
+         "note": note}
+        for key, part, label, note in (
+            ("chamber_inner_wall_material", "chamber_inner_wall", "历史结构内衬配置",
+             "保留用于结构概念估算；当前冷却导热率由上方热物性数据集决定，二者不会自动同步。"),
+            ("chamber_outer_wall_material", "chamber_outer_wall", "外套材料配置",
+             "作为结构配置保留；未把外套厚度串入燃气至冷却剂的热阻，也未验证承载能力。"))]
+    return {"id": "wall_thermal", "title": "壁面材料与热物性", "full_title": "壁面材料与热物性",
+            "cycles": cycles, "fields": fields,
+            "description": "固体壁面数据单独管理。稳态使用内衬导热率，数据温区、方案壁温约束和结构资格分别检查。",
+            "advanced_title": "轴向材料分区",
+            "advanced_help": "分区是物理设计输入，不是数值初值。完整方案保留原始定义，结果保存实际采用的逐单元数据。",
+            "configuration_context": structural_context}
 
 
 def _title(text):
@@ -118,7 +162,7 @@ def _system_groups(groups):
     Detailed component assumptions remain in defaults/groups for lossless case
     import/export, but are not advertised as available design workspaces.
     """
-    included = set(GROUP_IDS[:10]) | {"pumps", "solver", "chamber_contour", "chamber_channels"}
+    included = set(GROUP_IDS[:10]) | {"pumps", "solver", "chamber_contour", "chamber_channels", "wall_thermal"}
     excluded = {"cooling_marching_enable", "cooling_dp_auto", "coolant_cp", "pump_tip_speed_limit_ms"}
     result = []
     for original in groups:
@@ -180,6 +224,7 @@ def design_ui_schema():
             "fields": [_field(key, CHAMBER_INPUTS[key][0], CHAMBER_INPUTS[key][1],
                                defaults, cycles, CHAMBER_INPUTS[key][2]) for key in keys],
         })
+    groups.append(_wall_thermal_group(defaults))
     groups.append({
         "id": "advanced", "title": "其他设计参数", "full_title": "其他设计参数",
         "cycles": ["ffsc", "gg"],
@@ -187,7 +232,7 @@ def design_ui_schema():
                    for key, label, unit in EXTRA_FIELDS],
     })
     return {
-        "version": 7, "defaults": defaults, "groups": groups,
+        "version": 8, "defaults": defaults, "groups": groups,
         "parameter_role_labels": dict(ROLE_LABELS),
         "propellant_models": propellant_models(),
         "system_groups": _system_groups(groups),

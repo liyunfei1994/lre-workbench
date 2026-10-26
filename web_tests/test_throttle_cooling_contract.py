@@ -4,6 +4,7 @@ The fixture is an analytic conservation ledger over the production geometry;
 its declared property states are synthetic. It is not an engine simulation.
 """
 from copy import deepcopy
+import json
 import math
 import unittest
 
@@ -11,13 +12,18 @@ from webapp.throttle import source_baseline
 from web_tests.test_throttle_analysis import source_fixture
 from chamber_contour import convergent_geometry
 from regen_geometry import build_regen_geometry
+from wall_thermal import material_for_cell, audit_cell, material_summary
+from wall_materials import GRCOP84_DATASET_ID
 
 
-def physical_source_fixture():
+def physical_source_fixture(*, material_zones=(), cover_eps=0.):
     source = source_fixture()
     c = source["result"]["calculation"]
     v = c["inputs"]
-    v.update(cooling_bartz_mode=1., cooling_grid_points=24.)
+    v.update(cooling_bartz_mode=1., cooling_grid_points=24., cooling_cover_eps=cover_eps,
+             wall_material_zones_json=json.dumps(list(material_zones)),
+             wall_thermal_dataset_id=GRCOP84_DATASET_ID)
+    boundaries = sorted({z[key] for z in material_zones for key in ("x_start_m", "x_end_m")})
     rt = math.sqrt(.05/math.pi)
     rc = rt*math.sqrt(v["chamber_contraction_ratio"])
     convergent = convergent_geometry(rc,rt,v["chamber_conv_half_angle_deg"])
@@ -25,7 +31,8 @@ def physical_source_fixture():
     geometry = build_regen_geometry(r_t=rt,r_c=rc,L_cyl=length,
         expansion_ratio=v["expansion_ratio"],n_points=24,
         n_channels=v["cooling_n_channels"],channel_width_m=v["cooling_channel_width_m"],
-        channel_height_m=v["cooling_channel_height_m"],wall_thickness_m=v["cooling_wall_thickness_m"])
+        channel_height_m=v["cooling_channel_height_m"],wall_thickness_m=v["cooling_wall_thickness_m"],
+        cover_eps=cover_eps, material_boundaries_m=boundaries)
     geom_nodes = [dict(geometry["nodes"][0],A_flow_m2=None),*geometry["nodes"],
                   dict(geometry["nodes"][-1],A_flow_m2=None)]
     geom_cells = [dict(kind="inlet_manifold"),
@@ -64,6 +71,13 @@ def physical_source_fixture():
                  for c in geometry["cells"]]
     for cold, state in zip(cells[1:-1],hot_cells):
         cold["hot_side"] = deepcopy(state)
+        # Synthetic wall states support the material identity gate only; this
+        # fixture remains an analytic ledger, not a heat-transfer solution.
+        cold.update(T_wall_hot_K=600., T_wall_cold_K=500., fin_reference_temperature_K=400.,
+                    wall_conductivity_WmK=320.)
+        dataset, declared = material_for_cell(cold["x_m"], v["wall_thermal_dataset_id"],
+                                              v["wall_manufacturing_state"], list(material_zones))
+        cold["material"] = audit_cell(cold, dataset, declared)
     hot = dict(model_id="heated_frozen_quasi1d_v1",nodes=[{}, {}, {}],
         cells=sorted(hot_cells,key=lambda c:c["x_m"]),max_scaled_residual=0.,heat_loss_W=600.,
         critical_x_m=geometry["x_throat_m"]-.001,critical_regularity_residual_per_m=0.,
@@ -78,7 +92,11 @@ def physical_source_fixture():
         nodes=nodes,cells=cells,summary=dict(Q_total_W=600.,dp_total_Pa=nodes[0]["p_Pa"]-nodes[-1]["p_Pa"]),
         balance=dict(energy_residual_W=0.,pressure_sum_residual_Pa=0.,max_cell_energy_residual_W=0.,
                      max_cell_momentum_residual_Pa=0.,max_wall_residual_K=0.,mass_residual_kg_s=0.),
-        hot_side_coupling=coupling,hot_side_profile=deepcopy(hot))
+        hot_side_coupling=coupling,hot_side_profile=deepcopy(hot),
+        material_applicability=material_summary(cells[1:-1], v["cooling_wall_temp_limit_K"]),
+        material_assignment=dict(default_dataset_id=v["wall_thermal_dataset_id"],
+            default_manufacturing_state=v["wall_manufacturing_state"], zones=list(material_zones),
+            coordinate="axial_x_from_injector_m"))
     c["components"]["cooling_channel"].update(profile=profile)
     c["components"]["cooling_channel"]["outputs"].update(A_throat_m2=.05,channel_height_mm=5.)
     c["components"]["nozzle"].update(profile=hot)

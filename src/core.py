@@ -323,18 +323,12 @@ class EngineInputs:
     turb_fuel_housing_material: str = "hastelloyx"
 
     # ---------- 推力室壁材料选择（V18 新增）─────────────────
-    # 主燃烧室内壁(铜合金，燃气侧，高热流) + 外壳(镍基，结构层，承高压冷却剂)，
+    # 历史结构筛查配置：内衬与外套。外套并不必然为镍基合金。
     # 材料 key 必须存在于 materials.MATERIALS 且 parts 含 chamber_inner_wall /
     # chamber_outer_wall。默认沿用 materials.DEFAULT_CHAMBER_WALL_MATERIALS。
     #
-    # 选择驱动：① 再生冷却 marching k(T) 取此材料(若挂随温模型,如 grcop84)；
-    #          ② 热结构云图/SF 校核取此材料 σy(T)；③ 材料库卡片显示此材料详情。
-    #
-    # 内壁候选(LOX/CH4 高压再生冷却 chamber inner)：
-    #   grcop84 / grcop42：铜铬铌合金候选材料；此处不声明任何实机选材。
-    #   cucrzr     传统 Cu-Cr-Zr，导热 330 最高但 Tmax 仅 623K，中低热流/早期对照
-    #   glidcop_al15 Al2O3 弥散强化铜(ODS)，Tmax 1123K，研究型候选
-    #   narloy_z   SSME 经典 Cu-3Ag-0.5Zr，导热 316，Tmax 811K
+    # 冷却导热改由 wall_thermal_dataset_id / 轴向分区驱动。历史结构库的
+    # 简化强度数据独立管理；未匹配热物性材料/状态时不生成内衬安全系数。
     chamber_inner_wall_material: str = "grcop84"
     chamber_outer_wall_material: str = "inconel718_wall"
 
@@ -388,11 +382,30 @@ class EngineInputs:
     # Appended to preserve the positional order of existing serialized inputs.
     nonlinear_solver: str = "newton"
 
+    # Solid thermal data are separate from legacy structural material records.
+    # These appended fields preserve old positional input ordering. Empty zones
+    # apply the default dataset to the entire cooled liner; state is not assumed.
+    wall_thermal_dataset_id: str = ""
+    wall_manufacturing_state: str = "unspecified"
+    wall_material_zones_json: str = ""
+
     def __post_init__(self):
         """输入参数物理范围校验。"""
 
         if self.nonlinear_solver not in ("newton", "trf"):
             raise ValidationError("nonlinear_solver 必须是 newton 或 trf。")
+
+        from wall_materials import get_wall_dataset, default_dataset_for_material
+        from wall_thermal import parse_material_zones, validate_manufacturing_state
+        try:
+            if self.wall_thermal_dataset_id == "" and self.cooling_bartz_mode:
+                self.wall_thermal_dataset_id = default_dataset_for_material(self.chamber_inner_wall_material)
+            if self.wall_thermal_dataset_id:
+                get_wall_dataset(self.wall_thermal_dataset_id)
+            validate_manufacturing_state(self.wall_manufacturing_state)
+            parse_material_zones(self.wall_material_zones_json)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValidationError(f"壁面热物性设置无效：{exc}") from exc
 
         if self.propellant_pair not in ("lox_methane", "lox_kerosene"):
             raise ValidationError("propellant_pair 必须是 lox_methane 或 lox_kerosene。")

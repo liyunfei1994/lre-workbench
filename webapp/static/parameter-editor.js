@@ -15,6 +15,11 @@ export function savedInputDocument(value) {
 export function mergeInputDefaults(defaults, inputs, savedSnapshot = false) {
   const result = {...defaults, ...inputs};
   if (savedSnapshot && Object.hasOwn(defaults, "methane_thermo_dataset") && !Object.hasOwn(inputs, "methane_thermo_dataset")) result.methane_thermo_dataset = "gri30";
+  if(Object.hasOwn(defaults,"wall_thermal_dataset_id") && !Object.hasOwn(inputs,"wall_thermal_dataset_id") &&
+      (savedSnapshot || Object.hasOwn(inputs,"chamber_inner_wall_material"))) {
+    const supported={grcop84:"grcop84_ellis2000_extruded_high_fe_v1",cuzr:"cuzr_qi2024_heat_treated_v1"};
+    result.wall_thermal_dataset_id=supported[inputs.chamber_inner_wall_material || defaults.chamber_inner_wall_material] || "";
+  }
   return result;
 }
 const ROLE_LABELS = {
@@ -75,8 +80,25 @@ export function parameterValue(field, inputs) {
 }
 
 export function parameterLayoutDependency(key, groups) {
-  return [PREBURNER_MODE_KEY, "cycle_type", "propellant_pair"].includes(key) || groups.some(group => group.fields.some(field =>
+  return [PREBURNER_MODE_KEY, "cycle_type", "propellant_pair", "wall_thermal_dataset_id", "wall_manufacturing_state"].includes(key) || groups.some(group => group.fields.some(field =>
     [...(field.visibility?.all || []), ...(field.visibility?.any || [])].some(condition => condition.key === key)));
+}
+
+function renderWallDatasetInfo(field, inputs) {
+  if(field.key!=="wall_thermal_dataset_id" || !Array.isArray(field.dataset_catalog))return "";
+  const dataset=field.dataset_catalog.find(item=>item.dataset_id===inputs.wall_thermal_dataset_id);
+  if(!dataset)return '<p class="field-help">当前数据集未识别；不会自动换成另一种材料。</p>';
+  const state=inputs.wall_manufacturing_state || "unspecified";
+  const manufacturing=dataset.manufacturing_state || {},expected=manufacturing.state_id;
+  const match=state==="unspecified" ? "方案制造状态未确认" : state===expected ? "方案制造状态与数据匹配" : "方案制造状态与数据不匹配";
+  const conductivity=dataset.conductivity_property || {};
+  const range=conductivity.range_K;
+  const rangeText=Array.isArray(range) && range.length===2 && range.every(Number.isFinite) ? `${range[0]}–${range[1]} K` : "未登记";
+  const source=dataset.sources?.[0] || {};
+  const sourceLabel=source.title || dataset.source_title || "未登记";
+  const url=source.url || dataset.source_url || "";
+  const sourceHtml=/^https:\/\//i.test(url) ? `<a href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(sourceLabel)}</a>` : escape(sourceLabel);
+  return `<p class="field-help wall-dataset-summary">导热率数据温区：${escape(rangeText)}。${escape(match)}。稳态计算使用 k(T)。</p><details class="wall-dataset-evidence"><summary>数据来源与制造状态</summary><p class="fine">${escape(manufacturing.label || "制造状态未登记")}</p><p class="fine">${sourceHtml}</p><p class="fine">数据版本：${escape(dataset.dataset_id)}。比热与密度的登记状态见计算记录；登记并不代表已启用壁体储热瞬态。数据温区不是材料允许使用温度。</p></details>`;
 }
 
 export function parameterSearchText(field, inputs, groupTitle = "") {
@@ -95,10 +117,11 @@ export function renderParameterField(field, inputs) {
   const options = view.choices || [];
   const control = view.choices ? `<select data-input="${escape(view.key)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>` +
     (legacy ? '<option value="legacy_free_split" selected disabled>历史模式：自由分流（保留）</option>' :
-      options.some(choice => String(value) === String(choice.value)) ? "" : `<option value="" disabled selected>无效值：${escape(value)}</option>`) +
+      options.some(choice => String(value) === String(choice.value)) ? "" : `<option value="" disabled selected>${escape(value==="" && view.empty_choice_label ? view.empty_choice_label : `无效值：${value}`)}</option>`) +
     options.map(choice => `<option value="${escape(choice.value)}"${String(value) === String(choice.value) ? " selected" : ""}>${escape(choice.label)}</option>`).join("") + "</select>" :
+    view.multiline ? `<textarea rows="5" data-input="${escape(view.key)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>${escape(value)}</textarea>` :
     `<input type="${typeof view.default === "number" ? "number" : "text"}"${typeof view.default === "number" ? ' step="any" required' : ""} data-input="${escape(view.key)}" value="${escape(value)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>`;
-  return `<label data-field="${escape(view.key)}" data-role="${escape(view.role || "")}" title="${escape(view.full_label || view.label)}"><span class="parameter-label">${escape(view.label)}${view.unit ? ` <span class="unit">[${escape(view.unit)}]</span>` : ""}</span>${view.role_label ? `<span class="parameter-role">${escape(view.role_label)}</span>` : ""}${control}${help}${evidence}${legacy ? '<span class="parameter-legacy-note" role="note">当前方案保留旧版自由分流模式与参数。选择指定温度或指定混合比后才转换；加载时不会自动转换。</span>' : ""}</label>`;
+  return `<label data-field="${escape(view.key)}" data-role="${escape(view.role || "")}" title="${escape(view.full_label || view.label)}"><span class="parameter-label">${escape(view.label)}${view.unit ? ` <span class="unit">[${escape(view.unit)}]</span>` : ""}</span>${view.role_label ? `<span class="parameter-role">${escape(view.role_label)}</span>` : ""}${control}${help}${evidence}${legacy ? '<span class="parameter-legacy-note" role="note">当前方案保留旧版自由分流模式与参数。选择指定温度或指定混合比后才转换；加载时不会自动转换。</span>' : ""}</label>${renderWallDatasetInfo(view,inputs)}`;
 }
 
 export function parameterGroups(groups, inputs) {
@@ -115,8 +138,13 @@ export function renderParameterGroups(groups, inputs, expanded = new Set()) {
     }
     const advanced = seeds.length ? `<details class="parameter-initials" data-initials="${escape(group.id)}"${expanded.has(group.id) ? " open" : ""}><summary>高级设置 · 迭代初值（${seeds.length}）</summary><p class="fine">初值用于启动求解。相同物理解分支充分收敛后，结果应在容差范围内一致。</p>${seeds.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
     const numericKey = group.id + "-numerics";
-    const numerics = numeric.length ? `<details class="parameter-initials" data-initials="${escape(numericKey)}"${expanded.has(numericKey) ? " open" : ""}><summary>高级设置 · 数值分辨率（${numeric.length}）</summary><p class="fine">分辨率影响离散误差；应比较网格加密结果，不能用作性能调参。</p>${numeric.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
-    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.description ? `<p class="fine">${escape(group.description)}</p>` : ""}${standard.map(field => renderParameterField(field, inputs)).join("")}${advanced}${numerics}</fieldset>`;
+    const numericOnly=numeric.every(field=>field.role==="solver_setting");
+    const advancedTitle=group.advanced_title || (numericOnly ? "数值分辨率" : "补充设置");
+    const advancedHelp=group.advanced_help || (numericOnly ? "分辨率影响离散误差；应比较网格加密结果，不能用作性能调参。" : "这些输入参与模型配置；完整方案与计算记录保留实际取值。");
+    const numerics = numeric.length ? `<details class="parameter-initials" data-initials="${escape(numericKey)}"${expanded.has(numericKey) ? " open" : ""}><summary>高级设置 · ${escape(advancedTitle)}（${numeric.length}）</summary><p class="fine">${escape(advancedHelp)}</p>${numeric.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
+    const contexts=Array.isArray(group.configuration_context) ? group.configuration_context : group.configuration_context ? [group.configuration_context] : [];
+    const contextText=contexts.map(context=>`<p class="fine wall-configuration-context">${escape(context.label)}：${escape(context.labels?.[inputs[context.key]] || inputs[context.key] || "未指定")}。${escape(context.note)}</p>`).join("");
+    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.description ? `<p class="fine">${escape(group.description)}</p>` : ""}${standard.map(field => renderParameterField(field, inputs)).join("")}${contextText}${advanced}${numerics}</fieldset>`;
   }).join("");
 }
 

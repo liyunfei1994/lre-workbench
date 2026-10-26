@@ -139,6 +139,49 @@ function gasHeatTransferDetails(profile) {
   return `<details class="cool-details cool-bartz-geometry">${heading}${known ? "" : `<p class="cool-note">${missing}</p>`}${table(["项目","本次记录"],rows)}<p class="cool-note">几何来源一致不代表关联式已验证；输运物性取值参考态与 σ 修正的适用性仍待校核。此处只读取本次记录，不重新计算曲率因子或补齐缺失值。</p></details>`;
 }
 
+/** Material evidence belongs to this calculation snapshot, never the live draft. */
+export function coolingMaterialState(profile={}) {
+  const audit=obj(profile.material_applicability), count=audit.out_of_range_cell_count, total=audit.total_cells;
+  const available=Object.keys(audit).length>0;
+  const complete=audit.schema_version===1 && Number.isInteger(total) && total>0 && Number.isInteger(count) && count>=0 && count<=total
+    && finite(audit.min_temperature_K) && finite(audit.max_temperature_K)
+    && audit.min_temperature_K<=audit.max_temperature_K && list(audit.dataset_ids).length>0;
+  let kind="unknown",label=available ? "材料适用性记录不完整" : "未记录材料适用性";
+  if(complete){
+    if(audit.status==="within_range" && count===0){kind="pass";label="导热率数据温区内";}
+    else if(audit.status==="out_of_range" || count>0){kind="review";label="导热率数据温区越界";}
+    else if(audit.status==="missing_evidence"){kind="review";label="材料数据证据不足";}
+  }
+  const match=({matched:"制造类别一致（声明）",unknown:"制造状态未确认",mismatch:"制造状态不匹配"})[audit.manufacturing_match] || "制造状态未记录";
+  return {audit,available,complete,kind,label,match};
+}
+
+function materialDetails(profile) {
+  const {audit,available,complete,kind,label,match}=coolingMaterialState(profile);
+  const matchKind=audit.manufacturing_match==="matched" ? "pass" : audit.manufacturing_match==="mismatch" ? "review" : "unknown";
+  const heading=`<summary>壁面材料与数据适用性 ${badge(kind,label)}${available ? ` ${badge(matchKind,match)}` : ""}</summary>`;
+  if(!available)return `<details class="cool-details cool-materials">${heading}<p class="cool-note">历史记录未保存逐单元材料数据与温区检查；需重新计算，不能用当前材料设置补写历史证据。</p></details>`;
+  const datasets=list(audit.datasets).map(raw=>obj(raw));
+  const title=(dataset)=>dataset.label || dataset.display_name || dataset.material_name || dataset.dataset_id || "未记录";
+  const span=(range)=>Array.isArray(range) && range.length===2 && range.every(finite) ? `${fmt(range[0])}–${fmt(range[1])} K` : "未记录";
+  const datasetRows=datasets.map(dataset=>{
+    const conductivity=obj(dataset.conductivity_property),heatCapacity=obj(dataset.heat_capacity_property);
+    const source=obj(list(dataset.sources)[0]), manufacturing=obj(dataset.manufacturing_state);
+    const url=/^https:\/\//i.test(source.url || dataset.source_url || "") ? source.url || dataset.source_url : null;
+    const sourceLabel=source.title || dataset.source_title || "来源未记录";
+    return `<tr>${cell(title(dataset))}${cell(dataset.dataset_id || "未记录")}${cell(manufacturing.label || "未记录")}${cell(span(conductivity.range_K))}${cell(span(heatCapacity.range_K))}${cell(quantity(dataset.reference_density_kg_m3,"kg/m³"))}<td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(sourceLabel)}</a>` : esc(sourceLabel)}</td></tr>`;
+  });
+  const details=list(audit.cells).filter(raw=>obj(raw).status!=="within_range").map(raw=>{
+    const row=obj(raw),material=obj(row.material),range=row.actual_temperature_range_K || row.temperature_range_K || [row.min_temperature_K,row.max_temperature_K];
+    const action=({constant_endpoint_continuation:"端点常值续算（未扩展有效温区）",reject:"拒绝越界求值",none:"温区内，无需延拓"})[row.action || material.action] || row.handling || material.handling || "未记录";
+    return `<tr>${cell(fmt(row.cell_index))}${cell(fmt(row.x_m))}${cell(row.dataset_id || material.dataset_id || "未记录")}${cell(span(range))}${cell(span(row.data_temperature_range_K || row.data_range_K || material.data_range_K))}${cell(action)}</tr>`;
+  });
+  const counts=complete ? `${audit.out_of_range_cell_count} / ${audit.total_cells} 个热单元越界；实际材料温度 ${fmt(audit.min_temperature_K)}–${fmt(audit.max_temperature_K)} K。` : "本记录缺少完整的温区检查计数或实际温度范围。";
+  const limitState=({exceeded:"超过方案限值",within_limit:"未超过方案限值"})[audit.wall_temperature_limit_status] || "约束状态未记录";
+  const wallLimit=`本次方案热面壁温限值：${quantity(audit.wall_temperature_limit_K,"K")}；${limitState}。`;
+  return `<details class="cool-details cool-materials">${heading}<p class="cool-note">${esc(counts)} ${esc(match)}。温区检查覆盖壁面两侧及肋片参考温度；制造匹配只比较用户声明的类别，未验证批次或制造工艺资格。</p><p class="cool-note">${esc(wallLimit)} 导热率数据温区、方案壁温约束和材料结构使用资格分别判断。温区内不等于寿命或结构强度已验证；本稳态壁面求解使用导热率，登记比热与密度不代表已计算壁体储热瞬态。</p>${datasetRows.length ? table(["材料 / 数据集","数据版本","数据对应制造状态","导热率温区","比热温区（未启用）","参考密度（未启用）","来源"],datasetRows) : `<p class="cool-note">本记录未保存材料数据详情。数据集标识：${esc(list(audit.dataset_ids).join("；") || "未记录")}。</p>`}${details.length ? table(["热单元","轴向 x / m","数据集","实际温度区间","数据温区","越界处理"],details) : ""}</details>`;
+}
+
 function profileTables(profile) {
   const nodes=list(profile.nodes).map((raw,i)=>{
     const p=obj(raw);
@@ -169,5 +212,5 @@ export function renderCooling(result={}) {
     chart("壁面热流密度","MW/m²",channelCells,[["q_W_m2","热流密度",1e-6]]),
   ].join("");
   const warnings=state.warnings.length ? `<ul class="cool-warnings">${state.warnings.map(v=>`<li>${esc(v)}</li>`).join("")}</ul>` : "";
-  return `${start}<p class="cool-direction">${esc(direction)}。横轴统一采用沿冷却剂流向的弧长 s；缺失数据断线，不平滑、不补点。</p><p class="cool-notice">内核检查描述当前模型与离散方程的状态，不能替代换热关联式、通道几何和材料温限的独立验证。</p>${warnings}<div class="cool-chart-grid">${curves}</div><div class="cool-outlet-detail"><span>出口静焓 <b>${esc(quantity(scaled(summary.h_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>出口总焓 <b>${esc(quantity(scaled(summary.h0_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>记录最大热面壁温 <b>${esc(quantity(summary.T_wall_hot_max_K,"K"))}</b></span></div>${gasHeatTransferDetails(profile)}${diagnostics(profile)}${profileTables(profile)}</section>`;
+  return `${start}<p class="cool-direction">${esc(direction)}。横轴统一采用沿冷却剂流向的弧长 s；缺失数据断线，不平滑、不补点。</p><p class="cool-notice">内核检查描述当前模型与离散方程的状态，不能替代换热关联式、通道几何和材料温限的独立验证。</p>${warnings}${materialDetails(profile)}<div class="cool-chart-grid">${curves}</div><div class="cool-outlet-detail"><span>出口静焓 <b>${esc(quantity(scaled(summary.h_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>出口总焓 <b>${esc(quantity(scaled(summary.h0_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>记录最大热面壁温 <b>${esc(quantity(summary.T_wall_hot_max_K,"K"))}</b></span></div>${gasHeatTransferDetails(profile)}${diagnostics(profile)}${profileTables(profile)}</section>`;
 }

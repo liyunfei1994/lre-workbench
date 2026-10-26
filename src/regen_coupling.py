@@ -50,7 +50,10 @@ def cooling_arguments(model, material=None):
         hot_side_profile=trial.get("hot_side_profile"), expansion_ratio=i.expansion_ratio,
         bell_fraction=i.nozzle_bell_fraction, channel_table=i.cooling_channel_table_json or None,
         n_points=int(getattr(i,"cooling_grid_points",120)),
-        k_wall_func=material.thermal_conductivity_at if material else None,
+        wall_thermal_dataset_id=i.wall_thermal_dataset_id,
+        wall_manufacturing_state=i.wall_manufacturing_state,
+        wall_material_zones=i.wall_material_zones_json,
+        remap_hot_side_trial=True,
         gas_emissivity=i.cooling_gas_emissivity,wall_temp_limit_K=i.cooling_wall_temp_limit_K,
         film_fraction=i.film_cooling_fraction)
 
@@ -127,7 +130,8 @@ def close_regen_cycle(model,evaluator,*x):
                 keys=("T_static_K","T_aw_K","T0_K","p_Pa","M","cp_JkgK","mu_Pas","Pr","gamma")
                 vector_error=max(abs(a[k]-b[k])/max(abs(a[k]),1e-12) for a,b in zip(hot,used) for k in keys)
                 cell_heat=[c["Q_W"] for c in profile["cells"] if c["kind"]=="channel"]
-                cell_heat_error=max(abs(a-b)/max(abs(a),1.) for a,b in zip(cell_heat,old_cell_heat)) if old_cell_heat is not None else 1.
+                cell_heat_error=(max(abs(a-b)/max(abs(a),1.) for a,b in zip(cell_heat,old_cell_heat))
+                    if old_cell_heat is not None and len(cell_heat) == len(old_cell_heat) else 1.)
                 old_cell_heat=cell_heat
                 area_error=abs(nozzle.outputs["At_m2"]/comp.outputs["A_throat_m2"]-1)
                 if getattr(model,"_fixed_cooling_throat_area",None):

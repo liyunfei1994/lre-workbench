@@ -140,3 +140,41 @@ test("saved snapshot identity preserves legacy data without changing new partial
   assert.equal(savedInputDocument({format:"lre.workbench.inputs",schema_version:1,inputs:old}),true);
   assert.equal(savedInputDocument({project_name:"旧方案",base_revision:2,unsaved:false,inputs:old}),true);
 });
+
+test("wall dataset selection exposes source state while axial design fields are not numerical resolution",()=>{
+  const field={key:"wall_thermal_dataset_id",label:"内衬热物性数据集",default:"d84",role:"model_assumption",
+    choices:[{value:"d84",label:"GRCop-84"}],dataset_catalog:[{dataset_id:"d84",
+      manufacturing_state:{state_id:"extruded",label:"粉末冶金挤压态"},conductivity_property:{range_K:[80,1173]},
+      sources:[{title:"NASA 原始手册",url:"https://ntrs.nasa.gov/citations/20020070630"}]}]};
+  const group={id:"wall_thermal",title:"壁面材料与热物性",fields:[field,
+    {key:"wall_material_zones_json",label:"轴向材料分区",default:"",advanced:true,role:"design_input"}],
+    advanced_title:"轴向材料分区",advanced_help:"物理设计分区",
+    configuration_context:[{key:"chamber_outer_wall_material",label:"外套配置",labels:{i625:"Inconel 625"},note:"不串入当前热阻"}]};
+  const inputs={wall_thermal_dataset_id:"d84",wall_manufacturing_state:"unspecified",wall_material_zones_json:"",chamber_outer_wall_material:"i625"};
+  const before=structuredClone(inputs),html=renderParameterGroups([group],inputs);
+  assert.match(html,/80–1173 K/);
+  assert.match(html,/方案制造状态未确认/);
+  assert.match(html,/粉末冶金挤压态/);
+  assert.match(html,/高级设置 · 轴向材料分区/);
+  assert.match(html,/外套配置：Inconel 625/);
+  assert.doesNotMatch(html,/数值分辨率|迭代初值|data-input="chamber_outer_wall_material"/);
+  assert.match(renderParameterGroups([group],{...inputs,wall_manufacturing_state:"extruded"}),/方案制造状态与数据匹配/);
+  assert.match(renderParameterGroups([group],{...inputs,wall_manufacturing_state:"other"}),/方案制造状态与数据不匹配/);
+  assert.equal(parameterLayoutDependency("wall_thermal_dataset_id",[group]),true);
+  assert.equal(parameterLayoutDependency("wall_manufacturing_state",[group]),true);
+  assert.deepEqual(inputs,before);
+});
+
+test("legacy material import maps only evidenced curves and unsupported solids require an explicit choice",()=>{
+  const defaults={wall_thermal_dataset_id:"grcop84_ellis2000_extruded_high_fe_v1",chamber_inner_wall_material:"grcop84"};
+  assert.equal(mergeInputDefaults(defaults,{},true).wall_thermal_dataset_id,defaults.wall_thermal_dataset_id);
+  assert.equal(mergeInputDefaults(defaults,{chamber_inner_wall_material:"cuzr"},true).wall_thermal_dataset_id,"cuzr_qi2024_heat_treated_v1");
+  assert.equal(mergeInputDefaults(defaults,{chamber_inner_wall_material:"grcop42"},true).wall_thermal_dataset_id,"");
+  const selected={chamber_inner_wall_material:"grcop42",wall_thermal_dataset_id:"cuzr_qi2024_heat_treated_v1"};
+  assert.equal(mergeInputDefaults(defaults,selected,true).wall_thermal_dataset_id,selected.wall_thermal_dataset_id);
+  const field={key:"wall_thermal_dataset_id",label:"数据集",default:defaults.wall_thermal_dataset_id,
+    empty_choice_label:"请选择有来源的热物性数据集（历史材料无对应曲线）",choices:[{value:defaults.wall_thermal_dataset_id,label:"GRCop-84"}]};
+  const html=renderParameterGroups([{id:"wall",fields:[field]}],{wall_thermal_dataset_id:""});
+  assert.match(html,/value="" disabled selected>请选择有来源/);
+  assert.doesNotMatch(html,/value="grcop84_ellis2000_extruded_high_fe_v1" selected/);
+});

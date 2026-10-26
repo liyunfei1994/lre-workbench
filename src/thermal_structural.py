@@ -99,8 +99,10 @@ class WallField:
     t_wall_m: float = 0.0
     throat_index: int = 0
     peak_T_wg: float = 0.0
-    peak_sigma_eq: float = 0.0
-    min_SF: float = 0.0
+    peak_sigma_eq: Optional[float] = 0.0
+    min_SF: Optional[float] = 0.0
+    structural_status: str = "legacy_screening"
+    structural_reason: str = "历史材料简化筛查，未经结构验证"
     coolant_out_K: float = 0.0                            # 冷却剂出口温度 [K]
     coolant_in_K: float = float("nan")                   # 保存的入口端口温度
     coolant_in_Pa: float = float("nan")                  # 保存的入口端口压力
@@ -130,15 +132,17 @@ class ChamberLoadSet:
     q_peak_MW_m2: float = 0.0
     dT_wall_peak_K: float = 0.0
     T_wg_peak_K: float = 0.0
-    sigma_th_peak_MPa: float = 0.0
+    sigma_th_peak_MPa: Optional[float] = 0.0
     # 压力载荷
     p_gas_MPa: float = 0.0
     p_coolant_max_MPa: float = 0.0
     dP_liner_peak_MPa: float = 0.0
     sigma_p_peak_MPa: float = 0.0
     # 衬里综合
-    sigma_eq_peak_MPa: float = 0.0
-    liner_min_SF: float = 0.0
+    sigma_eq_peak_MPa: Optional[float] = 0.0
+    liner_min_SF: Optional[float] = 0.0
+    liner_structural_status: str = "legacy_screening"
+    liner_structural_reason: str = "历史材料简化筛查，未经结构验证"
     liner_thickness_mm: float = 0.0
     # 结构夹套
     jacket_thickness_mm: float = 0.0
@@ -149,10 +153,12 @@ class ChamberLoadSet:
 
     def to_rows(self):
         """返回载荷清单表行：(载荷, 作用对象, 量值, 产生的应力/裕度)。"""
+        def assessed(value, pattern):
+            return pattern.format(value) if value is not None else "未评估（材料结构数据未对应）"
         return [
             ("① 热载荷 ΔT_wall（穿壁温差）", f"热衬里 {self.liner_material}",
              f"{self.dT_wall_peak_K:.0f} K（热流峰 {self.q_peak_MW_m2:.0f} MW/m²）",
-             f"σ_th = {self.sigma_th_peak_MPa:.0f} MPa"),
+             assessed(self.sigma_th_peak_MPa, "σ_th = {:.0f} MPa")),
             ("② 衬里压差 ΔP=p_coolant−p_gas", f"热衬里 {self.liner_material}",
              f"{self.dP_liner_peak_MPa:.0f} MPa（肋跨弯曲）",
              f"σ_p = {self.sigma_p_peak_MPa:.0f} MPa"),
@@ -163,9 +169,49 @@ class ChamberLoadSet:
              f"F = {self.thrust_kN:.0f} kN",
              f"σ_axial ≈ {self.jacket_axial_MPa:.0f} MPa"),
             ("⑤ 衬里综合（①+②）", f"热衬里 {self.liner_material}",
-             f"σ_eq = {self.sigma_eq_peak_MPa:.0f} MPa",
-             f"min SF = {self.liner_min_SF:.2f}"),
+             assessed(self.sigma_eq_peak_MPa, "σ_eq = {:.0f} MPa"),
+             assessed(self.liner_min_SF, "min SF = {:.2f}")),
         ]
+
+
+def _liner_structural_scope(profile, inner_material_key):
+    """Prevent a new thermal assignment from silently inheriting old strength.
+
+    The only retained explicit compatibility is the historical GRCop-84
+    extruded data category with its corresponding legacy material model. Even
+    that remains an approximate screening calculation, not qualification.
+    Saved snapshots are inspected; the current data catalog is not substituted.
+    """
+    channels = [cell for cell in profile.get("cells", []) if cell.get("kind") == "channel"]
+    explicit = ("material_applicability" in profile or "material_assignment" in profile
+                or any("material" in cell for cell in channels))
+    if not explicit:
+        return "legacy_screening", "历史材料简化筛查；记录未保存独立材料热物性身份", ""
+    evidence = profile.get("material_applicability") or {}
+    snapshots = evidence.get("datasets") or []
+    snapshots = [row for row in snapshots if isinstance(row, dict)]
+    name = " / ".join(str(row.get("label") or row.get("material_id") or "未记录材料")
+                      for row in snapshots) or "保存的内衬材料（数据不完整）"
+    records = [cell.get("material") for cell in channels]
+    if not records or any(not isinstance(row, dict) for row in records):
+        return "not_assessed", "保存的逐单元材料证据不完整，未叠加历史材料强度", name
+    by_id = {row.get("dataset_id"): row for row in snapshots}
+    ids = {row.get("dataset_id") for row in records}
+    if None in ids or any(key not in by_id for key in ids):
+        return "not_assessed", "缺少与单元数据集对应的材料快照，未叠加历史材料强度", name
+    expected = "grcop84_ellis2000_extruded_high_fe_v1"
+    state = "powder_metallurgy_extruded_high_fe"
+    if inner_material_key != "grcop84" or ids != {expected} or any(
+            row.get("material_id") != "grcop84" or row.get("manufacturing_state_id") != state
+            for row in records) or by_id[expected].get("material_id") != "grcop84" or (
+                by_id[expected].get("manufacturing_state") or {}).get("state_id") != state:
+        return "not_assessed", "热物性材料或分区与历史结构材料不对应；缺少相应强度数据", name
+    if any(row.get("manufacturing_match") != "matched" for row in records):
+        return "not_assessed", "方案制造状态未对应文献试样状态，未叠加历史材料强度", name
+    if any(row.get("status") != "within_range" for row in records):
+        return "not_assessed", "材料热物性越界或记录不完整，未据此给出结构裕度", name
+    return ("screening_only", "仅对应历史 GRCop-84 挤压态类别的简化筛查；"
+            "制造类别相同与热物性温区内均不代表结构或寿命资格已验证", name)
 
 
 def compute_chamber_wall_field(
@@ -205,10 +251,9 @@ def wall_field_from_profile(
 
     domain
     ──────
-    "chamber" : 只取喷注面→喉部（主燃烧室段）。此段衬里材料统一为 GRCop-84、
-                外壳为 Inconel-718，单一材料的结构判据才成立——喷管下游内壁
-                材料/构型不同（可能另一牌号或辐射冷却延伸段），不在此域。
-    "full"    : 全程（喷注面→喷管出口），用于纯查看（材料按 chamber 牌号近似）。
+    "chamber" : 只取喷注面→喉部（主燃烧室段）。
+    "full"    : 保存的全冷却覆盖区域。显式材料数据与历史结构材料不对应时，
+                保留热流与流动载荷，结构材料相关指标显示未评估。
     """
     from materials import get_material
 
@@ -262,8 +307,13 @@ def wall_field_from_profile(
     dist_mode = bool(profile.get("dist_mode"))
 
     mat = get_material(inner_material_key)
+    structural_status, structural_reason, thermal_material_name = _liner_structural_scope(
+        profile, inner_material_key)
+    assess_liner = structural_status != "not_assessed"
     t_liner = max(float(profile.get("t_liner_m", 1e-3) or 1e-3), 0.3e-3)
-    wf = WallField(material_name=mat.display_name, t_wall_m=t_liner, source="saved-cooling-profile")
+    wf = WallField(material_name=thermal_material_name or mat.display_name, t_wall_m=t_liner,
+                   source="saved-cooling-profile", structural_status=structural_status,
+                   structural_reason=structural_reason)
 
     # 衬里压差弯曲的有效跨距：
     #   · 分布模式（V19，用户给了沿程通道表）：几何是真实设计，σ_p 直接用**局部**
@@ -283,26 +333,32 @@ def wall_field_from_profile(
             t_ln_j = t_ln_arr[j] if t_ln_arr[j] > 1e-5 else t_liner
         else:
             w_span_j, t_ln_j = w_struct_span, t_liner
-        s_th, s_p, s_eq, s_y, SF = _wall_stress(mat, T_wg[j], dT, dP, w_span_j, t_ln_j)
+        if assess_liner:
+            s_th, s_p, s_eq, s_y, SF = _wall_stress(mat, T_wg[j], dT, dP, w_span_j, t_ln_j)
+            wf.sigma_th.append(s_th); wf.sigma_eq.append(s_eq)
+            wf.sigma_y.append(s_y); wf.SF.append(SF)
+            if s_eq > peak_s: peak_s = s_eq
+            if SF < min_sf: min_sf = SF
+        else:
+            # This pressure-bending load depends only on pressure and geometry;
+            # do not invent E, expansion or yield strength for the saved alloy.
+            s_p = 0.5 * max(dP, 0.0) * (w_span_j/max(t_ln_j, 1e-4))**2 / 1e6
         wf.x.append(x[j]); wf.r.append(r[j]); wf.h_g.append(h_g[j]); wf.T_aw.append(T_aw[j])
         wf.q.append(q[j]); wf.q_conv.append(q_conv[j]); wf.q_rad.append(q_rad[j])
         wf.T_wg.append(T_wg[j]); wf.T_wc.append(T_wc[j]); wf.dT_wall.append(dT)
-        wf.sigma_th.append(s_th); wf.sigma_p.append(s_p); wf.sigma_hoop.append(0.0)
-        wf.sigma_eq.append(s_eq); wf.sigma_y.append(s_y); wf.SF.append(SF)
+        wf.sigma_p.append(s_p); wf.sigma_hoop.append(0.0)
         wf.h_c.append(h_c[j]); wf.T_coolant.append(T_co[j]); wf.p_coolant.append(p_co[j])
         wf.rho_coolant.append(rho_co[j]); wf.v_coolant.append(V_co[j])
         wf.p_gas.append(p_gas[j]); wf.w_chan.append(w_ch[j])
         wf.h_chan.append(h_ch_arr[j]); wf.n_chan.append(n_ch_arr[j])
         wf.t_liner.append(t_ln_j)
         if T_wg[j] > peak_T: peak_T = T_wg[j]
-        if s_eq > peak_s: peak_s = s_eq
-        if SF < min_sf: min_sf = SF
         if r[j] < min_r: min_r = r[j]; throat_i = j
 
     wf.throat_index = throat_i
     wf.peak_T_wg = peak_T
-    wf.peak_sigma_eq = peak_s
-    wf.min_SF = min_sf
+    wf.peak_sigma_eq = peak_s if assess_liner else None
+    wf.min_SF = min_sf if assess_liner else None
     recorded = profile.get("summary") or {}
     ports = profile.get("nodes") or []
     def saved_number(value):
@@ -313,7 +369,8 @@ def wall_field_from_profile(
     wf.coolant_in_Pa = saved_number(ports[0].get("p_Pa")) if ports else float("nan")
     wf.coolant_in_K = saved_number(ports[0].get("T_K")) if ports else float("nan")
     wf.coolant_flow_direction = str(profile.get("flow_direction") or "未记录")
-    wf.mat_T_max_use_K = mat.T_max_use_K
+    # New thermal records supply data intervals, not allowable-use temperatures.
+    wf.mat_T_max_use_K = mat.T_max_use_K if structural_status == "legacy_screening" else 0.0
     wf.q_rad_fraction = saved_number(recorded.get("Q_rad_fraction"))
 
     # ── 结构夹套（Inconel-718 外壳）载荷 ──────────────────────────────
@@ -338,14 +395,14 @@ def wall_field_from_profile(
 
     q_peak_MW = (max(wf.q) / 1e6) if wf.q else 0.0
     s_p_peak = (max(wf.sigma_p)) if wf.sigma_p else 0.0
-    s_th_peak = (max(abs(v) for v in wf.sigma_th)) if wf.sigma_th else 0.0
+    s_th_peak = (max(abs(v) for v in wf.sigma_th)) if wf.sigma_th else None
     dT_peak = (max(wf.dT_wall)) if wf.dT_wall else 0.0
     dP_peak = (max(p_co[j] - p_gas[j] for j in range(n)) / 1e6) if n else 0.0
 
     # ── 载荷清单（结构分析/后续 FEA 的边界条件输入）──
     wf.loads = ChamberLoadSet(
         domain=domain,
-        liner_material=mat.display_name,
+        liner_material=wf.material_name,
         jacket_material=jacket_name,
         q_peak_MW_m2=q_peak_MW,
         dT_wall_peak_K=dT_peak,
@@ -355,8 +412,10 @@ def wall_field_from_profile(
         p_coolant_max_MPa=p_co_chamber / 1e6,
         dP_liner_peak_MPa=dP_peak,
         sigma_p_peak_MPa=s_p_peak,
-        sigma_eq_peak_MPa=peak_s,
-        liner_min_SF=min_sf,
+        sigma_eq_peak_MPa=wf.peak_sigma_eq,
+        liner_min_SF=wf.min_SF,
+        liner_structural_status=structural_status,
+        liner_structural_reason=structural_reason,
         liner_thickness_mm=t_liner * 1000.0,
         jacket_thickness_mm=t_jacket * 1000.0,
         jacket_hoop_MPa=sigma_jacket_hoop,
@@ -365,10 +424,12 @@ def wall_field_from_profile(
         thrust_kN=thrust_N / 1e3,
     )
 
-    sf_flag = "  ⚠ 衬里塑性(SF<1)" if min_sf < 1.0 else ""
+    sf_flag = "  ⚠ 衬里塑性(SF<1)" if assess_liner and min_sf < 1.0 else ""
+    structural_peak = (f"σ_eq={peak_s:.0f} MPa · min SF={min_sf:.2f}{sf_flag}"
+                       if assess_liner else "内衬结构指标未评估")
     wf.notes = [
-        f"峰值：T_wg={peak_T:.0f} K · q={q_peak_MW:.0f} MW/m² · σ_eq={peak_s:.0f} MPa · "
-        f"min SF={min_sf:.2f}{sf_flag}",
+        f"峰值：T_wg={peak_T:.0f} K · q={q_peak_MW:.0f} MW/m² · {structural_peak}",
+        structural_reason,
         "数据源：当前循环保存的统一冷却沿程；这里不重新求解换热、压降或出口状态。",
         f"流向 {wf.coolant_flow_direction}；横轴为发动机轴向坐标 x。结构估计仅供载荷筛查，未经结构验证。",
     ]
@@ -428,7 +489,12 @@ def plot_wall_field(fig, wf: WallField) -> None:
                     color="#7c2d12", ha="center", va="bottom")
 
     _draw(ax_T, wf.T_wg, "① 燃气侧壁温 T_wg [K]", "inferno", "T_wg [K]", wf.peak_T_wg)
-    _draw(ax_S, wf.sigma_eq, "② 等效应力 σ_eq [MPa]", "viridis", "σ_eq [MPa]", wf.peak_sigma_eq)
+    if wf.sigma_eq:
+        _draw(ax_S, wf.sigma_eq, "② 等效应力 σ_eq [MPa]", "viridis", "σ_eq [MPa]", wf.peak_sigma_eq)
+    else:
+        ax_S.axis("off")
+        ax_S.text(.03, .9, "② 内衬结构指标未评估\n\n" + wf.structural_reason,
+                  transform=ax_S.transAxes, va="top", wrap=True, fontsize=9)
 
     # ③ 沿程安全系数 SF(x)
     sf = np.array(wf.SF) if wf.SF else np.array([])
@@ -457,24 +523,23 @@ def plot_wall_field(fig, wf: WallField) -> None:
 
     # SF 是什么 —— 文字说明 + 判定（替代原来拉满全宽的细长 SF 条）
     ax_exp.axis("off")
-    _minsf = wf.min_SF if wf.SF else 0.0
-    _plastic = _minsf < 1.0
+    _minsf = wf.min_SF if wf.SF else None
+    _plastic = _minsf is not None and _minsf < 1.0
     _exp = (
         "③ 内壁安全系数 SF(x) 是什么？\n\n"
         "SF = σ_y(T_wg) / σ_eq\n"
         "  = 材料在该处壁温的屈服强度\n"
         "    ÷ 该处等效应力(热应力+压差弯曲)\n\n"
-        "SF ≥ 1：应力低于屈服 → 弹性工作(安全)\n"
-        "SF < 1：应力超过屈服 → 衬里塑性\n"
-        "    每次点火-关机循环都塑性变形,\n"
-        "    低周疲劳(LCF)寿命受限(铜室核心瓶颈)。\n\n"
-        f"本工况 min SF = {_minsf:.2f} @ 喉部"
-        + ("   ⚠ <1 衬里塑性" if _plastic else "   ✓ ≥1 弹性")
+        "SF ≥ 1：简化模型未触及屈服\n"
+        "SF < 1：简化模型提示塑性风险\n"
+        "    该比值不构成结构、疲劳或寿命验证。\n\n"
+        + (f"本工况 min SF = {_minsf:.2f}" if _minsf is not None else
+           "本工况未评估：没有对应的结构材料数据。")
     )
     ax_exp.text(0.02, 0.98, _exp, transform=ax_exp.transAxes, va="top", ha="left",
                 fontsize=8.5, color="#374151", linespacing=1.5,
                 bbox=dict(boxstyle="round,pad=0.6",
-                          fc="#fef2f2" if _plastic else "#f0fdf4", ec="#cbd5e1"))
+                          fc="#fef2f2" if _plastic else "#f8fafc", ec="#cbd5e1"))
 
     _region = "主燃烧室内壁" if (wf.loads and getattr(wf.loads, "domain", "") == "chamber") else "推力室/喷管内壁"
     fig.suptitle(f"{_region} 沿程热-结构概览  ·  {wf.material_name}",
@@ -605,18 +670,21 @@ def plot_cooling_profiles(fig, wf: WallField) -> None:
     over = (float(Twg.max()) > T_max) if T_max > 0 else False
     dp = wf.coolant_dp_Pa / 1e6
     Vmax = float(v.max()) if v.size else 0.0
-    if wf.loads is not None and getattr(wf.loads, "liner_min_SF", 0.0):
+    if wf.loads is not None and getattr(wf.loads, "liner_min_SF", None) is not None:
         minSF = float(wf.loads.liner_min_SF)
     else:
-        minSF = float(min(wf.SF)) if wf.SF else 0.0
+        minSF = float(min(wf.SF)) if wf.SF else None
     def _m(ok): return "+" if ok else "!"
     rows = [
         ("·", "峰值热流 q", f"{q.max():.0f} MW/m²"),
-        (_m(not over), "峰值壁温 T_wg", f"{Twg.max():.0f} K / 上限{T_max:.0f}"),
+        (_m(not over) if T_max > 0 else "·", "峰值壁温 T_wg",
+         f"{Twg.max():.0f} K / 上限{T_max:.0f}" if T_max > 0 else
+         f"{Twg.max():.0f} K（未提供材料使用温度资格）"),
         ("·", "入口→出口温度", f"{wf.coolant_in_K:.0f}→{wf.coolant_out_K:.0f} K"),
         ("·", "保存的端口 Δp", f"{dp:.1f} MPa" if math.isfinite(dp) else "未记录"),
         ("·", "最大流速 V", f"{Vmax:.0f} m/s"),
-        (_m(minSF >= 1.0), "内壁 min SF 估计", f"{minSF:.2f}（非结构验证）"),
+        (_m(minSF >= 1.0) if minSF is not None else "·", "内壁 min SF 估计",
+         f"{minSF:.2f}（非结构验证）" if minSF is not None else "未评估（材料数据未对应）"),
     ]
     txt = "⑥ 诊断小结 / Scorecard\n" + "\n".join(
         f"{mk}  {name}：{val}" for mk, name, val in rows)

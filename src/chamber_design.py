@@ -540,7 +540,12 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
                 margin_text=f"{V_hard - V:+.0f} m/s",
                 status=_st(V <= 150.0, V <= V_hard)))
         # ④ 内壁结构 SF
-        if wf.SF:
+        if getattr(wf, "structural_status", "legacy_screening") == "not_assessed":
+            rows.append(dict(
+                zone=zkey, zone_label=zlabel, criterion="内壁安全系数 SF",
+                value="未评估", limit="需对应的结构材料与制造状态数据",
+                margin_text=getattr(wf, "structural_reason", "材料结构数据未对应"), status="na"))
+        elif wf.SF:
             i_sf = min(idx, key=lambda i: wf.SF[i])
             sf = wf.SF[i_sf]
             rows.append(dict(

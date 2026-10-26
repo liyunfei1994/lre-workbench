@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {coolingDisplayState,coolingCurveSegments,renderCooling} from "../webapp/static/cooling.js";
+import {coolingDisplayState,coolingCurveSegments,coolingMaterialState,renderCooling} from "../webapp/static/cooling.js";
 import {renderAnalysis} from "../webapp/static/results.js";
 
 function record(){
@@ -217,4 +217,57 @@ test("partial and unfamiliar Bartz metadata preserves gaps and escapes source te
   html=renderCooling(result);
   assert.match(html,/历史记录未保存 Bartz 曲率来源，需重新计算/);
   assert.match(html,/主室参考状态估算/);
+});
+
+test("wall material report uses saved data, separates manufacturing and temperature evidence",()=>{
+  const result=record(), profile=result.calculation.components.cooling_channel.profile;
+  result.calculation.inputs={wall_thermal_dataset_id:"CURRENT_DRAFT_MUST_NOT_APPEAR",wall_manufacturing_state:"other"};
+  profile.material_applicability={schema_version:1,status:"out_of_range",dataset_ids:["saved84"],out_of_range_cell_count:1,total_cells:2,
+    min_temperature_K:550,max_temperature_K:1200,manufacturing_match:"unknown",
+    datasets:[{dataset_id:"saved84",label:"GRCop-84 / 挤压态",manufacturing_state:{state_id:"extruded",label:"粉末冶金挤压态"},
+      conductivity_property:{range_K:[80,1173]},sources:[{title:"NASA 材料手册",url:"https://ntrs.nasa.gov/citations/20020070630"}]}],
+    cells:[{cell_index:1,x_m:.5,dataset_id:"saved84",status:"out_of_range",actual_temperature_range_K:[600,1200],
+      data_temperature_range_K:[80,1173],action:"constant_endpoint_continuation"}]};
+  const before=structuredClone(result),html=renderCooling(result);
+  assert.match(html,/1 \/ 2 个热单元越界/);
+  assert.match(html,/实际材料温度 550–1,200 K/);
+  assert.match(html,/制造状态未确认/);
+  assert.match(html,/导热率数据温区越界/);
+  assert.match(html,/端点常值续算（未扩展有效温区）/);
+  assert.match(html,/粉末冶金挤压态/);
+  assert.match(html,/href="https:\/\/ntrs.nasa.gov\/citations\/20020070630"/);
+  assert.doesNotMatch(html,/CURRENT_DRAFT_MUST_NOT_APPEAR|制造状态已匹配|材料已验证/);
+  assert.deepEqual(result,before);
+});
+
+test("historical or inconsistent wall evidence never gets backfilled or a positive data-range label",()=>{
+  const result=record(),profile=result.calculation.components.cooling_channel.profile;
+  result.calculation.inputs={wall_thermal_dataset_id:"current84"};
+  let html=renderCooling(result);
+  assert.match(html,/历史记录未保存逐单元材料数据与温区检查/);
+  assert.doesNotMatch(html,/current84|导热率数据温区内/);
+  for(const patch of [{schema_version:99},{total_cells:null},{out_of_range_cell_count:NaN},{max_temperature_K:Infinity},{dataset_ids:[]}]){
+    profile.material_applicability={schema_version:1,status:"within_range",dataset_ids:["saved"],total_cells:2,out_of_range_cell_count:0,
+      min_temperature_K:500,max_temperature_K:700,manufacturing_match:"matched",...patch};
+    assert.equal(coolingMaterialState(profile).kind,"unknown");
+    html=renderCooling(result);
+    assert.doesNotMatch(html,/导热率数据温区内|NaN|Infinity/);
+  }
+  profile.material_applicability={schema_version:1,status:"within_range",dataset_ids:["saved"],total_cells:2,out_of_range_cell_count:1,
+    min_temperature_K:500,max_temperature_K:1300,manufacturing_match:"mismatch"};
+  assert.equal(coolingMaterialState(profile).kind,"review");
+  assert.match(renderCooling(result),/制造状态不匹配/);
+});
+
+test("material data HTML escapes source text and rejects unsafe links",()=>{
+  const result=record(),profile=result.calculation.components.cooling_channel.profile;
+  profile.material_applicability={schema_version:1,status:"within_range",dataset_ids:["x"],total_cells:2,out_of_range_cell_count:0,
+    min_temperature_K:500,max_temperature_K:700,manufacturing_match:"matched",
+    datasets:[{dataset_id:"x",label:"<script>bad</script>",manufacturing_state:{label:"<img>"},
+      conductivity_property:{range_K:[80,1173]},sources:[{title:"<bad>",url:"javascript:alert(1)"}]}]};
+  const html=renderCooling(result);
+  assert.match(html,/导热率数据温区内/);
+  assert.match(html,/&lt;script&gt;bad&lt;\/script&gt;/);
+  assert.match(html,/&lt;img&gt;/);
+  assert.doesNotMatch(html,/<script>|<img>|javascript:/);
 });

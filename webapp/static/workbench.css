@@ -273,3 +273,8 @@ button:disabled { cursor: not-allowed; }
 @container analysis (max-width:950px){.workspace .steady-overview .summary-grid{grid-template-columns:minmax(0,1fr)}}
 @container analysis (max-width:600px){.workspace .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @container analysis (max-width:360px){.workspace .kpi-grid{grid-template-columns:minmax(0,1fr)}}
+.wall-dataset-evidence{font-size:11px;padding:7px 0;margin:0 0 10px;color:var(--muted,#78889c)}
+.wall-dataset-evidence summary{cursor:pointer;color:#536d87;font-weight:600}
+.wall-dataset-evidence a{color:#426e9c}
+.wall-dataset-summary,.wall-configuration-context{overflow-wrap:anywhere}
+.parameter-section[data-group="wall_thermal"] .field-help{overflow-wrap:anywhere}

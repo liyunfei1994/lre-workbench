@@ -122,6 +122,23 @@ class UiSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "nonlinear_solver"):
             input_values({"nonlinear_solver": "silently_fallback"})
 
+    def test_wall_thermal_editor_exposes_only_source_supported_equation_data(self):
+        from wall_materials import list_wall_datasets
+        group = next(g for g in self.schema["system_groups"] if g["id"] == "wall_thermal")
+        fields = {field["key"]: field for field in group["fields"]}
+        self.assertEqual(set(fields), {"wall_thermal_dataset_id", "wall_manufacturing_state", "wall_material_zones_json"})
+        catalog = fields["wall_thermal_dataset_id"]["dataset_catalog"]
+        self.assertEqual(catalog, [d.metadata() for d in list_wall_datasets()])
+        self.assertEqual({c["value"] for c in fields["wall_thermal_dataset_id"]["choices"]},
+                         {d.dataset_id for d in list_wall_datasets()})
+        self.assertTrue(fields["wall_material_zones_json"]["advanced"])
+        self.assertEqual(fields["wall_material_zones_json"]["role"], "design_input")
+        self.assertEqual({item["key"] for item in group["configuration_context"]},
+                         {"chamber_inner_wall_material", "chamber_outer_wall_material"})
+        for field in fields.values():
+            self.assertEqual(field["visibility"], {"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+        self.assertNotIn("CuCrZr", " ".join(c["label"] for c in fields["wall_thermal_dataset_id"]["choices"]))
+
 
 if __name__ == "__main__":
     unittest.main()

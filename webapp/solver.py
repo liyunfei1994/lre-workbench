@@ -52,6 +52,10 @@ def input_values(values, *, saved_snapshot=False):
     if unknown:
         raise ValueError("无法识别的参数：" + ", ".join(sorted(unknown)))
     merged = defaults | values
+    if "wall_thermal_dataset_id" not in values:
+        # Resolve a historical material explicitly in EngineInputs; do not let
+        # the current default silently replace a different saved copper alloy.
+        merged["wall_thermal_dataset_id"] = ""
     for key, default in defaults.items():
         value = merged[key]
         if isinstance(default, str):
