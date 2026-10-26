@@ -17,8 +17,8 @@ function pressureFixture() {
   network.pressure_contract={schema_version:1,pressure_link_status:"pass",
     pressure_convention:{kind:"lumped_absolute_pressure",label:"集总绝对压力 / Pa",detail:"未独立解析总压与静压。"},
     pump_capacity:{status:"not_verified",detail:"缺少固定泵扬程/效率图，未证明固定硬件可提供该压力。",pumps:[
-      {id:"ox",label:"液氧主泵",required_outlet_pressure_Pa:70e6,required_rise_Pa:69e6,pressure_residual_Pa:0,pressure_tolerance_Pa:1,pressure_link_status:"pass"},
-      {id:"fuel",label:"甲烷主泵",required_outlet_pressure_Pa:75e6,required_rise_Pa:74e6,pressure_residual_Pa:0,pressure_tolerance_Pa:1,pressure_link_status:"pass"}]},
+      {id:"ox",label:"液氧主泵",model_outlet_pressure_Pa:70e6,required_outlet_pressure_Pa:70e6,required_rise_Pa:69e6,pressure_residual_Pa:0,pressure_tolerance_Pa:1,pressure_link_status:"pass"},
+      {id:"fuel",label:"甲烷主泵",model_outlet_pressure_Pa:75e6,required_outlet_pressure_Pa:75e6,required_rise_Pa:74e6,pressure_residual_Pa:0,pressure_tolerance_Pa:1,pressure_link_status:"pass"}]},
     gas_paths:["富氧燃气","富燃燃气"].map((label,index)=>({id:String(index),label,preburner_pressure_Pa:60e6,turbine_inlet_pressure_Pa:60e6,turbine_outlet_pressure_Pa:40e6,chamber_pressure_Pa:32e6,turbine_pressure_ratio:1.5,preburner_chamber_pressure_ratio:1.875,hot_gas_drop_Pa:8e6,pressure_residual_Pa:0,pressure_tolerance_Pa:1,status:"pass",detail:"预燃室出口直接作为涡轮入口。"})),
     parameter_roles:[{key:"cooling_dp_pa",label:"再生冷却给定压降",value:5e6,unit:"Pa",role:"specified_design_budget",source_status:"unverified_engineering_assumption",detail:"直接影响泵压需求，不是初值。"}],
     branch_state_links:network.branches.map(branch=>({id:branch.id,label:branch.label,source_state_residual_Pa:0,preburner_state_residual_Pa:0,branch_outlet_state_residual_Pa:0,max_pressure_residual_Pa:0,pressure_tolerance_Pa:1,status:"pass"}))};
@@ -76,6 +76,34 @@ test("cooling hydraulic source uses only the saved mode and this calculation's p
   assert.match(html,/本次记录冷却压降：7\.25 MPa/);
   assert.doesNotMatch(html,/未证明与通道几何一致/);
   assert.equal(html,renderSteadyClosure(data.calculation));
+});
+
+test("unified profile overrides obsolete input flags and inactive pressure budgets",()=>{
+  const data=fixture();
+  data.calculation.inputs={cooling_dp_auto:0,cooling_dp_pa:5e6};
+  data.calculation.summary={cooling_dp_MPa:5};
+  data.calculation.components={cooling_channel:{outputs:{delta_P_MPa:14.2599466,delta_P_source:1},
+    profile:{version:1,model_id:"regen_quasi1d_ph_v1",summary:{dp_total_Pa:14.2599466e6}}}};
+  const before=structuredClone(data), html=renderSteadyClosure(data);
+  assert.match(html,/冷却水力来源：统一准一维沿程解/);
+  assert.match(html,/本次记录冷却压降：14\.2599 MPa/);
+  assert.doesNotMatch(html,/冷却水力来源：给定压降|本次记录冷却压降：5 MPa|同工况通道几何压降估算/);
+  assert.deepEqual(data,before);
+  assert.equal(html,renderSteadyClosure(data.calculation));
+  data.calculation.components.cooling_channel.outputs.delta_P_MPa=5;
+  assert.match(renderSteadyClosure(data),/保存的剖面与组件压降不一致/);
+});
+
+test("saved component pressure source takes precedence and unknown profiles stay unknown",()=>{
+  const data=fixture();
+  data.calculation.inputs={cooling_dp_auto:1};
+  data.calculation.components={cooling_channel:{outputs:{mode:0,delta_P_source:0,delta_P_MPa:5}}};
+  assert.match(renderSteadyClosure(data),/冷却水力来源：给定压降/);
+  data.calculation.components.cooling_channel.profile={version:2,model_id:"regen_quasi1d_ph_v1"};
+  const html=renderSteadyClosure(data);
+  assert.match(html,/冷却水力来源：未知/);
+  assert.match(html,/未识别版本的沿程数据/);
+  assert.doesNotMatch(html,/冷却水力来源：水力迭代计算|冷却水力来源：给定压降/);
 });
 
 test("missing hydraulic provenance and invalid drops remain unknown instead of using draft defaults",()=>{
@@ -238,7 +266,7 @@ test("saved turbine ratio, PB chamber ratio, and pump demand have distinct ident
   assert.match(html,/pPB\/pc/);
   assert.match(html,/<td>1\.5<\/td><td>1\.875<\/td><td>8<\/td>/);
   assert.match(html,/所需出口压力 \/ MPa/);
-  assert.match(html,/液氧主泵<\/td><td>70<\/td><td>69<\/td>/);
+  assert.match(html,/液氧主泵<\/td><td>70<\/td><td>70<\/td><td>69<\/td>/);
   assert.match(html,/压力关系闭合/);
   assert.match(html,/sc-unavailable">固定泵能力未验证/);
   assert.doesNotMatch(html,/sc-pass">固定泵能力/);
@@ -268,7 +296,7 @@ test("budget identity distinguishes inactive inputs and keeps missing demand val
   contract.pump_capacity.pumps[0].pressure_link_status="unavailable";
   html=renderSteadyClosure(data);
   assert.match(html,/当前不生效（采用水力模型）/);
-  assert.match(html,/液氧主泵<\/td><td>—<\/td><td>69/);
+  assert.match(html,/液氧主泵<\/td><td>70<\/td><td>—<\/td><td>69/);
   assert.match(html,/压力关系证据不足/);
   assert.doesNotMatch(html,/压力关系闭合/);
 });
@@ -283,6 +311,32 @@ test("pressure link failures cannot be hidden behind a saved pass flag",()=>{
   html=renderSteadyClosure(data);
   assert.match(html,/压力关系证据不足/);
   assert.doesNotMatch(html,/压力关系闭合/);
+});
+
+test("historical pump demand conflicts remain visible outside folded evidence without rewriting",()=>{
+  const data=pressureFixture(), contract=data.calculation.steady_closure.feed_network.pressure_contract;
+  data.calculation.components={cooling_channel:{profile:{version:1,model_id:"regen_quasi1d_ph_v1",summary:{dp_total_Pa:14.2599466e6}}}};
+  Object.assign(contract.pump_capacity.pumps[1],{model_outlet_pressure_Pa:87.7032811e6,required_outlet_pressure_Pa:78.4433345e6,required_rise_Pa:77.4933345e6});
+  const before=structuredClone(data), html=renderSteadyClosure(data), visible=html.replace(/<details\b[\s\S]*?<\/details>/g,"");
+  assert.match(visible,/保存的压力证据需复核/);
+  assert.match(visible,/甲烷主泵存在压力关系差异/);
+  assert.match(visible,/冷却压降身份报告与统一沿程模型不一致/);
+  assert.match(visible,/87\.7033<\/td><td>78\.4433/);
+  assert.match(visible,/历史记录未改写/);
+  assert.match(visible,/压力关系未闭合/);
+  assert.doesNotMatch(visible,/压力关系闭合/);
+  assert.match(html,/<details class="sc-diagnostics"><summary>查看热气压力链与压力定义/);
+  assert.deepEqual(data,before);
+});
+
+test("folded energy ledger retains failed check names and residuals in the visible summary",()=>{
+  const data=fixture();
+  data.calculation.steady_closure.energy_balance.checks[0].residual_W=501;
+  const html=renderSteadyClosure(data), visible=html.replace(/<details\b[\s\S]*?<\/details>/g,"");
+  assert.match(visible,/未闭合能量项/);
+  assert.match(visible,/集总循环能量（残差 \+501 W）/);
+  assert.match(html,/<details class="sc-diagnostics"><summary>查看能量收支明细/);
+  assert.doesNotMatch(html,/<details[^>]* open/);
 });
 
 test("pressure link closure also requires all four saved branch state cross-checks",()=>{

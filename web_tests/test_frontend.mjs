@@ -5,6 +5,7 @@ import {fileURLToPath} from "node:url";
 import vm from "node:vm";
 import test from "node:test";
 import * as parameterEditor from "../webapp/static/parameter-editor.js";
+import {mountSteadyWorkspace} from "../webapp/static/steady-workspace.js";
 
 const root = new URL("../", import.meta.url);
 const html = readFileSync(new URL("webapp/static/index.html", root), "utf8");
@@ -29,7 +30,7 @@ function element() {
   const classes = new Set();
   const listeners = new Map();
   return {value: "", textContent: "", innerHTML: "", hidden: false, disabled: false,
-    dataset: {}, className: "", inert: false, querySelectorAll: () => [],
+    dataset: {}, className: "", inert: false, querySelectorAll: () => [], querySelector: () => null,
     listeners,
     classList: {toggle(name, force) {const on = force ?? !classes.has(name); on ? classes.add(name) : classes.delete(name); return on;}},
     reportValidity: () => true, checkValidity: () => true, addEventListener(name, callback) {listeners.set(name, callback);},
@@ -54,6 +55,7 @@ function harness(fetcher) {
     mountComponentWorkspace() {},
     mountFlowWorkspace() {},
     mountCycleWorkspace() {},
+    mountSteadyWorkspace,
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, confirm: () => {confirmations++;return true;},
     FormData: class {}, console,
   });

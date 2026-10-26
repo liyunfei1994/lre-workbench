@@ -224,6 +224,48 @@ class PressureContractTests(unittest.TestCase):
         self.assertAlmostEqual(fuel["adopted_cooling_drop_Pa"], 2e6)
         self.assertAlmostEqual(fuel["cooling_budget_residual_Pa"], .3e6)
 
+    def test_unified_cooling_contract_uses_saved_profile_not_inactive_budget(self):
+        network, states, inputs = self.fixture()
+        inputs.update(cooling_dp_auto=0, cooling_dp_pa=5e6)
+        actual_drop = 14.259946618e6
+        states["fuel_after_pump"]["pressure"] = network["tap_pressures_Pa"]["fuel"] + actual_drop
+        cooling = dict(profile=dict(version=1, model_id="regen_quasi1d_ph_v1",
+                                    summary=dict(dp_total_Pa=actual_drop)),
+                       outputs=dict(delta_P_source=1, delta_P_MPa=actual_drop/1e6))
+        before = deepcopy((network, states, inputs, cooling))
+        report = pressure_contract(network, states, inputs, cooling_component=cooling)
+        fuel = report["pump_capacity"]["pumps"][1]
+        self.assertEqual(report["pressure_link_status"], "pass")
+        self.assertAlmostEqual(fuel["required_outlet_pressure_Pa"], states["fuel_after_pump"]["pressure"])
+        self.assertAlmostEqual(fuel["adopted_cooling_drop_Pa"], actual_drop)
+        self.assertEqual(fuel["cooling_drop_source"], "unified_cooling_profile")
+        self.assertIsNone(fuel["cooling_budget_residual_Pa"])
+        self.assertEqual(report["pump_capacity"]["status"], "not_verified")
+        roles = {row["key"]: row for row in report["parameter_roles"]}
+        self.assertEqual(roles["cooling_dp_pa"]["role"], "inactive_with_hydraulic_model")
+        self.assertEqual((network, states, inputs, cooling), before)
+        cooling["profile"]["summary"]["dp_total_Pa"] -= 1000
+        self.assertEqual(pressure_contract(network, states, inputs, cooling)["pressure_link_status"], "fail")
+
+    def test_unknown_or_incomplete_cooling_profile_never_falls_back_to_budget(self):
+        network, states, inputs = self.fixture()
+        for profile in ({"version": 2, "model_id": "regen_quasi1d_ph_v1"},
+                        {"version": 1, "model_id": "regen_quasi1d_ph_v1", "summary": {}}):
+            with self.subTest(profile=profile):
+                cooling = dict(profile=profile, outputs=dict(delta_P_source=0, delta_P_MPa=2))
+                report = pressure_contract(network, states, inputs, cooling)
+                self.assertEqual(report["pressure_link_status"], "unavailable")
+                self.assertIsNone(report["pump_capacity"]["pumps"][1]["required_outlet_pressure_Pa"])
+
+    def test_recorded_budget_component_does_not_become_hydraulic_from_legacy_flag(self):
+        network, states, inputs = self.fixture()
+        inputs["cooling_dp_auto"] = 1
+        cooling = dict(outputs=dict(mode=0, delta_P_source=0, delta_P_MPa=2))
+        report = pressure_contract(network, states, inputs, cooling)
+        self.assertEqual(report["pressure_link_status"], "pass")
+        self.assertEqual(report["pump_capacity"]["pumps"][1]["cooling_drop_source"], "specified_design_budget")
+        self.assertEqual(report["parameter_roles"][-1]["role"], "specified_design_budget")
+
     def test_frozen_loss_mode_does_not_relabel_input_ratios_as_active(self):
         args = self.fixture(fixed=True)
         report = pressure_contract(*args)

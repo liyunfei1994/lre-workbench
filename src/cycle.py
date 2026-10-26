@@ -1079,8 +1079,8 @@ class FFSCCycleModel:
             "fuel_turbine_exhaust_T_K": fuel_turbine_result.outputs["T_exhaust_K"],
         }
 
-        from steady_closure import audit_energy
-        network["pressure_contract"] = pressure_contract(network, states, self.inputs)
+        from steady_closure import audit_energy, regenerative_heat_assumption
+        network["pressure_contract"] = pressure_contract(network, states, self.inputs, cooling_component=cooling_result)
         if CANTERA_AVAILABLE and COOLPROP_AVAILABLE:
             for state in states.values():
                 if state.enthalpy is not None:
@@ -1092,7 +1092,7 @@ class FFSCCycleModel:
                 "模型流路假设：全部甲烷先冷却再分流；液氧在主泵后分流。并非 Raptor 实际管路的已验证数据。",
                 "设计点按两支路中较高需求确定共用取流压力，多余压头由非负调节阀压降消耗；不设置未计功补压泵。",
                 "最低供给压力闭合不等于具有抗扰动压力储备；主喷注器压降仍为指定预算。",
-                "再生吸热在燃气总焓上作等额集中扣项，包括喷管区；这是零维等效热回路，未验证沿程非绝热喷管。",
+                regenerative_heat_assumption(components),
                 "固定效率、理想混合气及冻结喷管假设仍在；方程闭合不等于试验验证。"],
             feed_network=network, energy_balance=audit_energy(states, components))
         return CycleResults(

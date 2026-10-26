@@ -972,6 +972,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
                        "cooling.js": "text/javascript", "cooling.css": "text/css",
                        "convergence.js": "text/javascript", "convergence.css": "text/css",
                        "steady-closure.js": "text/javascript", "steady-closure.css": "text/css",
+                       "steady-workspace.js": "text/javascript", "steady-workspace.css": "text/css",
                        "component-analysis.js": "text/javascript", "component-analysis.css": "text/css",
                        "cycle-model.js": "text/javascript", "cycle-schematic.js": "text/javascript", "cycle-schematic.css": "text/css",
                        "flow-model.js": "text/javascript", "flow-analysis.js": "text/javascript", "flow-analysis.css": "text/css",

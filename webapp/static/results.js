@@ -6,9 +6,10 @@ import {renderFlowWorkspace} from "./flow-analysis.js";
 import {buildCycleModel} from "./cycle-model.js";
 import {renderCycleWorkspace} from "./cycle-schematic.js";
 import {renderConvergence, numericalDisplayState} from "./convergence.js";
-import {renderSteadyClosure} from "./steady-closure.js";
-import {renderThermodynamicApplicability, thermoApplicabilityBadge} from "./thermo-applicability.js";
+import {renderSteadyClosure, closureDisplayState, pressureContractDisplayState} from "./steady-closure.js";
+import {renderThermodynamicApplicability, thermoApplicabilityBadge, thermodynamicDisplayState, thermoRangeDisplayState, pureFluidDisplayState} from "./thermo-applicability.js";
 import {renderCooling} from "./cooling.js";
+import {renderSteadyWorkspace} from "./steady-workspace.js";
 // Preferred engineering aliases first; a missing preferred value never hides a valid fallback.
 const COMPONENT_ALIASES = [
   ["rho_in_kgm3","rho_kgm3"],
@@ -315,13 +316,39 @@ function metricGroup(title, fields, summary, inputs, index, assessment) {
   const flow=available.some(([key])=>FLOW_KEYS.has(key)), power=available.some(([key])=>POWER_KEYS.has(key));
   const chart=flow ? flowVisual(summary,inputs) : power ? powerVisual(summary,inputs,assessment) : "";
   const header=`<span class="panel-index">${String(index+1).padStart(2,"0")}</span><h2>${escape(title)}</h2><span class="panel-caption">${diagnostic ? "求解器诊断" : "设计点结果"}</span>`;
-  const content=`${chart}${engineeringTable(available,summary,inputs)}`;
+  const values=engineeringTable(available,summary,inputs);
+  const content=chart ? `${chart}<details class="steady-table-details"><summary>查看${escape(title)}数值</summary>${values}</details>` : values;
   return diagnostic ? `<details class="panel engineering-panel diagnostics-panel"><summary class="engineering-panel-header diagnostics-title">${header}</summary>${content}</details>`
     : `<section class="panel engineering-panel"><div class="engineering-panel-header">${header}</div>${content}</section>`;
 }
 
+function steadyAttention(result) {
+  const assessment=assessmentDisplayState(result), numerical=numericalDisplayState(result), inputs=resultInputs(result);
+  const checks=Array.isArray(assessment.checks) ? assessment.checks : [];
+  const failed=checks.filter(check=>check.status === "fail"), uncertain=checks.filter(check=>!["pass","fail"].includes(check.status));
+  const lines=failed.map(check=>`<li><b>${escape(fuelLabel(check.label,inputs))}</b><span>${number(check.value)} ${escape(check.unit)} · 要求 ${check.criterion === "minimum" ? "≥" : "≤"} ${number(check.limit)} ${escape(check.unit)}</span></li>`);
+  if(numerical.status !== "pass") lines.unshift(`<li><b>${escape(numerical.label || "数值收敛待确认")}</b><span>本次性能仅用于诊断，需检查收敛过程。</span><button type="button" data-steady-open="convergence">查看收敛诊断 →</button></li>`);
+  const closure=closureDisplayState(result), pressure=pressureContractDisplayState(closure.closure?.feed_network?.pressure_contract);
+  const closureFailed=closure.feed === "fail" || closure.energy === "fail" || pressure === "fail";
+  if(closureFailed)
+    lines.push(`<li><b>${[closure.feed === "fail" ? "供给支路" : "",closure.energy === "fail" ? "能量收支" : "",pressure === "fail" ? "压力关系" : ""].filter(Boolean).join("、")}校核未通过</b><span>查看保存的分项残差与数据来源。</span></li>`);
+  if(!lines.length) lines.push(`<li>${escape(assessment.status === "pass" ? "本记录已检查的系统约束通过。" : assessment.label || "系统约束证据待确认。")}</li>`);
+  if(uncertain.length) lines.push(`<li>${uncertain.length} 项约束未判定，需查看缺失证据。</li>`);
+  const thermo=thermodynamicDisplayState(result), states=Array.isArray(thermo.evidence?.states) ? thermo.evidence.states : [], pure=Array.isArray(thermo.evidence?.pure_fluid_states) ? thermo.evidence.pure_fluid_states : [];
+  const extrapolated=states.filter(state=>thermoRangeDisplayState(state)==="extrapolated").length;
+  const invalid=pure.filter(state=>pureFluidDisplayState(state)==="invalid_or_unavailable").length;
+  const missing=states.filter(state=>thermoRangeDisplayState(state)==="unavailable").length+pure.filter(state=>pureFluidDisplayState(state)==="unavailable").length;
+  const evidence=[];
+  if(extrapolated) evidence.push(`${extrapolated} 个燃气节点发生温区外推`);
+  if(invalid) evidence.push(`${invalid} 个纯推进剂端口无效或物性查询失败`);
+  if(missing) evidence.push(`${missing} 个节点的适用性证据不足`);
+  if(!states.length || !pure.length) evidence.push(`${!states.length ? "燃气温区" : ""}${!states.length && !pure.length ? "及" : ""}${!pure.length ? "纯推进剂" : ""}检查未记录`);
+  if(!evidence.length) evidence.push("已记录节点未报告温区外推或纯流体域错误");
+  return `<div class="steady-attention"><section class="steady-attention-card${failed.length || closureFailed || numerical.status !== "pass" ? " has-issues" : ""}" aria-label="关键校核结论"><div class="steady-card-heading"><h2>约束与闭合</h2><button type="button" data-steady-open="checks">完整校核 →</button></div><ul>${lines.join("")}</ul><p class="fine">${inputs.cycle_type !== "gg" ? "所需泵压不等于固定泵能力；泵与涡轮特性仍待验证。" : "数值收敛与系统约束分别判定。"}</p></section><section class="steady-attention-card" aria-label="模型适用性摘要"><div class="steady-card-heading"><h2>模型适用性</h2><button type="button" data-steady-open="models">检查依据 →</button></div><p class="steady-model-state">${escape(thermo.label)}</p><ul>${evidence.map(text=>`<li>${escape(text)}。</li>`).join("")}</ul><p class="fine">高压燃气状态方程与换热关联式仍需独立验证。</p></section></div>`;
+}
+
 function overview(result) {
-  const s = result.calculation?.summary || {}, inputs = resultInputs(result), assessment = assessmentDisplayState(result), numerical = numericalDisplayState(result);
+  const s = result.calculation?.summary || {}, inputs = resultInputs(result), assessment = assessmentDisplayState(result);
   const gg = inputs.cycle_type === "gg";
   const conditions = [["燃烧室压力",scaled(inputs.pc,1e-6),"MPa"],["环境压力",scaled(inputs.ambient_pressure,1e-6),"MPa"],["设定 O/F",inputs.of_ratio,"—"],["喷管膨胀比",inputs.expansion_ratio,"—"]];
   const study = `<section class="steady-study" aria-label="稳态计算工况"><div class="steady-study-mode"><span>STEADY STATE</span><b>单工况 · 稳态设计点</b><small>本页显示稳态设计点；热态扰动见瞬态响应分析</small></div><dl>${conditions.map(([label,value,unit])=>`<div><dt>${label}</dt><dd>${number(value)} <small>${unit}</small></dd></div>`).join("")}</dl></section>`;
@@ -344,7 +371,16 @@ function overview(result) {
   const main=groups.filter(group=>!group.diagnostic && group.html),left=main.filter(group=>!group.power),right=main.filter(group=>group.power);
   const mainGroups=left.length && right.length ? `<div class="summary-column">${left.map(group=>group.html).join("")}</div><div class="summary-column">${right.map(group=>group.html).join("")}</div>` : main.map(group=>group.html).join("");
   const diagnostics=groups.filter(group=>group.diagnostic).map(group=>group.html).join("");
-  return `<div class="analysis-stack steady-overview">${study}${statusStrip(result)}${numerical.status !== "pass" ? '<div class="banner">本次结果尚未确认收敛，仅用于诊断。请先检查求解状态与警告。</div>' : ""}<div class="kpi-grid" aria-label="稳态性能摘要">${kpis}</div>${renderConvergence(result)}${renderThermodynamicApplicability(result)}<div class="summary-grid">${mainGroups}</div>${gg ? "" : renderSteadyClosure(result)}${renderCooling(result)}${engineering}${diagnostics}${panel("可行性警告",warningList(allWarnings(result)))}</div>`;
+  const warnings=allWarnings(result);
+  const warningDetails=warnings.length ? `<details class="panel steady-warnings"><summary>本次模型警告（${warnings.length} 项）</summary>${warningList(warnings)}</details>` : "";
+  const pages=[
+    {id:"overview",title:"性能总览",content:`<div class="kpi-grid" aria-label="稳态性能摘要">${kpis}</div>${steadyAttention(result)}<div class="summary-grid">${mainGroups}</div>${warningDetails}`},
+    {id:"checks",title:"系统校核",content:`${engineering}${gg ? "" : renderSteadyClosure(result)}`},
+    {id:"cooling",title:"再生冷却",content:renderCooling(result)},
+    {id:"convergence",title:"收敛诊断",content:`${renderConvergence(result)}${diagnostics}`},
+    {id:"models",title:"模型与物性",content:renderThermodynamicApplicability(result)},
+  ];
+  return `<div class="analysis-stack steady-overview">${study}${statusStrip(result)}${renderSteadyWorkspace(pages)}</div>`;
 }
 
 export function flowAnalysisModel(result) {

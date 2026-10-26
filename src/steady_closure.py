@@ -41,6 +41,29 @@ def _sum(values):
     return math.fsum(values)
 
 
+def regenerative_heat_assumption(components):
+    """Describe saved component identities without solving or changing heat terms."""
+    components = components if isinstance(components, Mapping) else {}
+    cooling = components.get("cooling_channel")
+    nozzle = components.get("nozzle")
+    cooling_profile = _get(cooling, "profile", {}) or {}
+    nozzle_profile = _get(nozzle, "profile", {}) or {}
+    unified = (_get(cooling_profile, "version") == 1
+               and _get(cooling_profile, "model_id") == "regen_quasi1d_ph_v1")
+    distributed = _get(nozzle_profile, "model_id") == "heated_frozen_quasi1d_v1"
+    if unified and distributed:
+        chamber_heat = _number(_get(_get(components.get("main_chamber"), "outputs", {}), "heat_loss_W"))
+        if chamber_heat != 0.0:
+            return "已记录统一冷却与沿程非绝热热侧模型，但主室集中再生热汇并非已确认的零值；需核查是否重复扣热，不能仅凭模型名称判定闭合。"
+        return "再生吸热、压降与出口状态来自统一准一维冷却剖面；燃气侧按同一组单元热量沿程扣热并冻结组成，主室不再重复集中扣除再生热。仍为系统级低阶模型，未获试验验证。"
+    if _get(_get(cooling, "outputs", {}), "mode") == 0 and not cooling_profile and not nozzle_profile:
+        flow = _get(_get(nozzle, "outputs", {}), "flow_model")
+        nozzle_description = ("冻结组成的等熵喷管" if flow == 0 else
+                              "定比热理想气体等熵喷管" if flow == -1 else "未确认的喷管模型")
+        return f"采用明确给定吸热量与压降的系统预算；再生吸热在主燃烧室作为集中热汇，喷管为{nozzle_description}。该模式不提供冷却沿程解，也未求解沿程非绝热热侧。"
+    return "冷却与热侧模型身份未完整记录或组合未识别；本报告不推断集中扣热或沿程传热假设，需核查组件记录。"
+
+
 def audit_energy(states, components):
     """Return a versioned-result-compatible ledger with independently recomputed checks.
 

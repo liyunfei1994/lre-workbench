@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from core import ComponentResult, FlowState
-from steady_closure import audit_energy
+from steady_closure import audit_energy, regenerative_heat_assumption
 
 
 def balanced_loop():
@@ -51,6 +51,26 @@ def by_id(ledger):
 
 
 class EnergyAuditTests(unittest.TestCase):
+    def test_regenerative_heat_description_follows_saved_component_models(self):
+        _, components = balanced_loop()
+        components["cooling_channel"]["outputs"]["mode"] = 0
+        components["nozzle"] = {"outputs": {"flow_model": 0}}
+        self.assertIn("明确给定吸热量与压降", regenerative_heat_assumption(components))
+        self.assertIn("集中热汇", regenerative_heat_assumption(components))
+        components["cooling_channel"]["profile"] = {"version": 1, "model_id": "regen_quasi1d_ph_v1"}
+        components["nozzle"]["profile"] = {"model_id": "heated_frozen_quasi1d_v1"}
+        components["main_chamber"]["outputs"]["heat_loss_W"] = 0
+        before = deepcopy(components)
+        description = regenerative_heat_assumption(components)
+        self.assertIn("按同一组单元热量沿程扣热", description)
+        self.assertIn("主室不再重复集中扣除", description)
+        self.assertNotIn("零维等效热回路", description)
+        self.assertEqual(components, before)
+        components["main_chamber"]["outputs"]["heat_loss_W"] = 600
+        self.assertIn("需核查是否重复扣热", regenerative_heat_assumption(components))
+        components["nozzle"]["profile"]["model_id"] = "unknown_future_model"
+        self.assertIn("组合未识别", regenerative_heat_assumption(components))
+
     def test_spatial_hot_gas_heat_removal_is_counted_once(self):
         states, components = balanced_loop()
         # Move the same 600 W from the chamber control volume to the nozzle.

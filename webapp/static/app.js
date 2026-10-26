@@ -1,4 +1,5 @@
 import {renderAnalysis, configureResultSchema} from "./results.js";
+import {mountSteadyWorkspace} from "./steady-workspace.js";
 import {mountValidation} from "./validation.js";
 import {mountThrottle} from "./throttle.js";
 import {mountTransient} from "./transient.js";
@@ -308,6 +309,7 @@ function renderView(){
   } else {
     if(analysisView!=="history") {
       $("analysis-content").innerHTML=renderAnalysis(analysisView,resultRecord);
+      if(analysisView==="overview") mountSteadyWorkspace($("analysis-content"),resultRecord?.id || "");
       if(analysisView==="components") mountComponentWorkspace($("analysis-content"),resultRecord?.id || "");
       if(analysisView==="states") mountFlowWorkspace($("analysis-content"),resultRecord?.id || "",{
         onComponent:id=>{
@@ -394,7 +396,7 @@ async function runDesign(){
 async function refreshMembers(){const members=await api("/members");$("members-list").innerHTML=members.map(m=>`<div class="member-row"><div><b>${escape(m.display_name)}</b><p>@${escape(m.username)}</p></div><span class="badge">${m.role==="admin"?"管理员":"成员"}</span></div>`).join("");}
 async function showResult(id){
   if(page==="project"){await loadRecord(id);$("result-selector").value=id;analysisView="overview";renderView();switchPage("project");return;}
-  modalRecord=await api("/jobs/"+id);$("result-title").textContent=`计算记录 · 方案 v${modalRecord.revision}`;$("result-content").innerHTML=renderAnalysis("overview",modalRecord);$("download-result").hidden=!modalRecord.result;$("result-dialog").showModal();
+  modalRecord=await api("/jobs/"+id);$("result-title").textContent=`计算记录 · 方案 v${modalRecord.revision}`;$("result-content").innerHTML=renderAnalysis("overview",modalRecord);mountSteadyWorkspace($("result-content"),modalRecord?.id || "");$("download-result").hidden=!modalRecord.result;$("result-dialog").showModal();
 }
 function newProject(){if(editorBusy||!mayLeave())return;$("new-error").textContent="";$("new-dialog").showModal();}
 $("auth-form").onsubmit=event=>{event.preventDefault();action($("auth-submit"),"auth-error",async()=>{const data={username:$("auth-username").value,password:$("auth-password").value};if(!initialized)data.display_name=$("auth-display").value;user=await api("/auth/"+(initialized?"login":"setup"),"POST",data);initialized=true;await enterWorkspace();});};

@@ -313,7 +313,7 @@ def audit_network(network, *, total_fuel, total_ox, mr_ox=None, mr_fuel=None):
                 "max_mass_residual_kg_s": None, "errors": [str(exc)]}
 
 
-def pressure_contract(network, states, inputs):
+def pressure_contract(network, states, inputs, cooling_component=None):
     """Expose pressure definitions and independently check saved state links.
 
     This report distinguishes an imposed loss budget, a solved pressure, and
@@ -376,8 +376,32 @@ def pressure_contract(network, states, inputs):
             detail="预燃室出口直接作为涡轮入口，未另计两者间管路压降；涡轮排气至主室为热气喷注段预算，固定四支路阻力扫描中仍沿用该预算。",
         ))
 
-    cooling_auto = bool(get(inputs, "cooling_dp_auto", False))
     cooling_budget = number(get(inputs, "cooling_dp_pa"), "inputs.cooling_dp_pa", nonnegative=True)
+    profile = get(cooling_component, "profile", {}) or {}
+    outputs = get(cooling_component, "outputs", {}) or {}
+    unified = get(profile, "version") == 1 and get(profile, "model_id") == "regen_quasi1d_ph_v1"
+    recorded_drop = None
+    if unified:
+        cooling_source = "unified_cooling_profile"
+        recorded_drop = number(get(get(profile, "summary", {}) or {}, "dp_total_Pa"),
+                               "cooling.profile.summary.dp_total_Pa", nonnegative=True)
+    elif profile:
+        cooling_source = "unavailable"
+        missing.append("cooling.profile.supported_model")
+    elif cooling_component is not None:
+        source = get(outputs, "delta_P_source")
+        cooling_source = ("current_hydraulic_model" if source == 1 else
+                          "specified_design_budget" if source == 0 else "unavailable")
+        if cooling_source != "unavailable":
+            recorded_mpa = number(get(outputs, "delta_P_MPa"), "cooling.outputs.delta_P_MPa", nonnegative=True)
+            recorded_drop = product(recorded_mpa, 1e6)
+        else:
+            missing.append("cooling.outputs.delta_P_source")
+    else:
+        # Compatibility for callers auditing old records without a component.
+        # New cycle records always pass the component actually used by the solve.
+        cooling_source = "current_hydraulic_model" if bool(get(inputs, "cooling_dp_auto", False)) else "specified_design_budget"
+    cooling_auto = cooling_source in ("unified_cooling_profile", "current_hydraulic_model")
     pumps = []
     for side, prefix, label in (("ox", "lox", "液氧主泵"), ("fuel", "fuel", "甲烷主泵")):
         p_in = pressure(f"{prefix}_pump_inlet")
@@ -386,7 +410,8 @@ def pressure_contract(network, states, inputs):
         tap_state = pressure(tap_key)
         tap_required = number((network.get("tap_pressures_Pa") or {}).get(side), f"network.tap_pressures_Pa.{side}", positive=True)
         cooling_drop = difference(p_out, tap_state) if side == "fuel" else 0.0
-        adopted_cooling_drop = (cooling_drop if cooling_auto else cooling_budget) if side == "fuel" else 0.0
+        adopted_cooling_drop = (recorded_drop if cooling_component is not None else
+                                cooling_drop if cooling_auto else cooling_budget) if side == "fuel" else 0.0
         required_out = tap_required + adopted_cooling_drop if None not in (tap_required, adopted_cooling_drop) else None
         residual = difference(p_out, required_out)
         tolerance = max(1.0, max(p_out, required_out) * 1e-9) if None not in (p_out, required_out) else None
@@ -395,8 +420,8 @@ def pressure_contract(network, states, inputs):
             model_outlet_pressure_Pa=p_out, source_tap_pressure_Pa=tap_state,
             required_tap_pressure_Pa=tap_required, cooling_drop_Pa=cooling_drop,
             adopted_cooling_drop_Pa=adopted_cooling_drop,
-            cooling_drop_source="current_hydraulic_model" if cooling_auto and side == "fuel" else "specified_design_budget" if side == "fuel" else "not_in_oxygen_path",
-            cooling_budget_residual_Pa=difference(cooling_drop, cooling_budget) if side == "fuel" and not cooling_auto else None,
+            cooling_drop_source=cooling_source if side == "fuel" else "not_in_oxygen_path",
+            cooling_budget_residual_Pa=difference(cooling_drop, cooling_budget) if side == "fuel" and cooling_source == "specified_design_budget" else None,
             pressure_residual_Pa=residual, pressure_tolerance_Pa=tolerance,
             pressure_link_status=status(residual, tolerance,
                 valid=None not in (p_in, p_out, cooling_drop) and p_out >= p_in and cooling_drop >= 0),
@@ -414,8 +439,8 @@ def pressure_contract(network, states, inputs):
          "富氧涡轮排气进入主室的热气侧预算，并非液氧直接进入主室的喷注损失。"),
         ("fuel_turbine_exhaust_dp_ratio", "富燃热气喷注段压降比 Δp/pc", "1", "specified_design_budget",
          "富燃涡轮排气进入主室的热气侧预算，并非液甲烷直接进入主室的喷注损失。"),
-        ("cooling_dp_pa", "给定再生冷却总压降", "Pa", "inactive_with_hydraulic_model" if cooling_auto else "specified_design_budget",
-         "给定模式直接改变燃料泵出口需求及冷却出口状态，不是初值；水力模式下该输入不生效。"),
+        ("cooling_dp_pa", "给定再生冷却总压降", "Pa", "inactive_with_hydraulic_model" if cooling_auto else "specified_design_budget" if cooling_source == "specified_design_budget" else "not_recorded",
+         "统一沿程模式采用本次冷却剖面的压降，该预算输入不生效；给定预算模式采用组件记录的压降，不是初值。"),
     ]
     for key, label, unit, role, detail in definitions:
         roles.append(dict(key=key, label=label, value=number(get(inputs, key), f"inputs.{key}", nonnegative=True),
@@ -437,7 +462,7 @@ def pressure_contract(network, states, inputs):
             pressure_tolerance_Pa=tolerance, status=status(max_error, tolerance)))
     link_states = ([r["status"] for r in gas_paths] + [r["pressure_link_status"] for r in pumps]
                    + [r["status"] for r in branch_links])
-    return dict(schema_version=1, mode=mode,
+    return dict(schema_version=1, cooling_audit_version=2, mode=mode,
         pressure_convention=dict(kind="lumped_absolute_pressure", label="集总绝对压力 / Pa",
             detail="内部流路宏观动能变化被忽略；涡轮压比使用模型入口/出口绝对压力。尚未独立解析各截面总压与静压，不能自动解释为实机总压压比。"),
         parameter_roles=roles, gas_paths=gas_paths, branch_state_links=branch_links,
