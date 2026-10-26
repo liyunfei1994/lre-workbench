@@ -16,6 +16,7 @@ from regen_geometry import build_regen_geometry
 from task_control import checkpoint
 
 MODEL_ID = "regen_quasi1d_ph_v1"
+BARTZ_GEOMETRY_ID = "bartz_upstream_contour_curvature_v2"
 _SIGMA_SB = 5.670374419e-8
 
 
@@ -64,7 +65,7 @@ def _hot_state(cell, *, gamma, T_c, pc, mu_g, cp_g, Pr_g, supplied=None):
 
 def _wall_heat(cell, bulk, hot, *, mdot_coolant, mdot_total, r_t, pc,
                wall_conductivity, k_wall_func, htc_enhancement, x_throat,
-               gas_emissivity, heat_transfer_enabled):
+               gas_emissivity, heat_transfer_enabled, throat_upstream_radius_m):
     """Bracketed wall balance, using bulk cold properties only."""
     rho, mu, k, cp = (bulk[key] for key in ("rho_kgm3", "mu_Pas", "k_WmK", "cp_JkgK"))
     velocity = mdot_coolant/(rho*cell["A_flow_m2"])
@@ -75,7 +76,12 @@ def _wall_heat(cell, bulk, hot, *, mdot_coolant, mdot_total, r_t, pc,
     hc_base = nu*k/cell["D_h_m"]
     enhancement = htc_enhancement if abs(cell["x_m"]-x_throat) < r_t else 1.0
     dt = 2*r_t
-    hg_base = (0.026/dt**0.2)*(hot["mu_Pas"]**0.2*hot["cp_JkgK"]/hot["Pr"]**0.6)*(mdot_total/(math.pi*r_t*r_t))**0.8*(1/0.35)**0.1
+    if not math.isfinite(throat_upstream_radius_m) or throat_upstream_radius_m <= 0:
+        raise ValueError("Bartz requires a positive actual upstream throat curvature radius")
+    # Effective Bartz curvature = the canonical UPSTREAM contour arc. It is
+    # neither the chamber radius r_c nor the downstream throat arc radius.
+    curvature_factor = (dt/throat_upstream_radius_m)**0.1
+    hg_base = (0.026/dt**0.2)*(hot["mu_Pas"]**0.2*hot["cp_JkgK"]/hot["Pr"]**0.6)*(mdot_total/(math.pi*r_t*r_t))**0.8*curvature_factor
     eps = gas_emissivity*min(hot["p_Pa"]/pc, 1.0)
     tb = bulk["T_K"]
     def values(tw):
@@ -125,7 +131,7 @@ def _fluid_node(raw, geom, mdot, offset, *, kind="channel"):
 
 
 def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
-        molar_mass, r_t, r_c, L_cyl, L_conv, expansion_ratio, cover_eps=0.0,
+        molar_mass, r_t, r_c, L_cyl, expansion_ratio, L_conv=None, cover_eps=0.0,
         n_channels=300, channel_width_m=1.5e-3, channel_height_m=5e-3,
         wall_thickness_m=0.5e-3, wall_conductivity=320.0, htc_enhancement=1.0,
         k_wall_func=None, rel_roughness=0.003, k_minor=3.0, counterflow=True,
@@ -168,6 +174,10 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         n_points=n_points,counterflow=counterflow,n_channels=n_channels,
         channel_width_m=channel_width_m,channel_height_m=channel_height_m,
         wall_thickness_m=wall_thickness_m,channel_table=channel_table)
+    # Legacy callers may supply a length, but cannot define a second contour.
+    if L_conv is not None and (not math.isfinite(L_conv) or
+            not math.isclose(L_conv, geom["L_conv_m"], rel_tol=1e-8, abs_tol=1e-10)):
+        raise ValueError("L_conv conflicts with the canonical convergent contour")
     if hot_side_profile is not None and len(hot_side_profile) != len(geom["cells"]):
         raise ValueError("hot-side states must align exactly with common geometric cells")
     inlet = state_tp("CH4",T_in,p_in,transport=True)
@@ -223,7 +233,8 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
                     mdot_total=mdot_total,r_t=r_t,pc=pc,wall_conductivity=wall_conductivity,
                     k_wall_func=k_wall_func,htc_enhancement=htc_enhancement,
                     x_throat=geom["x_throat_m"],gas_emissivity=gas_emissivity,
-                    heat_transfer_enabled=heat_transfer_enabled)
+                    heat_transfer_enabled=heat_transfer_enabled,
+                    throat_upstream_radius_m=geom["throat_upstream_radius_m"])
                 thermal.update(friction_factor=f,T_coolant_K=bulk["T_K"],
                     rho_coolant_kgm3=bulk["rho_kgm3"],velocity_ms=velocity,p_coolant_Pa=bulk["p_Pa"])
                 heat = thermal["q_W_m2"]*cell["dA_hot_m2"]
@@ -281,6 +292,7 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         warnings.append("部分热面壁温高于用户限值；热量闭合不代表壁温约束通过。")
     if any(2300 < c["Re"] < 3000 for c in channels):
         warnings.append("存在过渡雷诺数，换热采用连续插值，需独立验证。")
+    throat = min(geom["nodes"], key=lambda n: abs(n["x_m"]-geom["x_throat_m"]))
     summary = dict(Q_total_W=qtotal,Q_rad_W=sum(c["q_rad_W_m2"]*c["dA_hot_m2"] for c in channels),
         T_out_K=nodes[-1]["T_K"],p_out_Pa=nodes[-1]["p_Pa"],h_out_Jkg=nodes[-1]["h_Jkg"],
         h0_out_Jkg=nodes[-1]["h0_Jkg"],dp_total_Pa=dp,
@@ -293,11 +305,21 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         cover_eps=geom["cover_eps"],n_stations=len(channels),x_throat_m=geom["x_throat_m"],
         V_coolant_max_ms=max(n["velocity_ms"] for n in nodes),hydraulic_infeasible=False,
         pressure_floor_hit=False,film_on=False,film_mdot_kgs=0.,
-        A_flow_throat_m2=min(n["A_flow_m2"] for n in nodes if n["A_flow_m2"] is not None),
-        dist_mode=bool(channel_table),t_liner_throat_m=wall_thickness_m)
+        A_flow_throat_m2=throat["A_flow_m2"],
+        dist_mode=bool(channel_table),t_liner_throat_m=throat["wall_thickness_m"],
+        bartz_throat_curvature_radius_m=geom["throat_upstream_radius_m"],
+        bartz_curvature_factor=(2*r_t/geom["throat_upstream_radius_m"])**0.1)
     summary["Q_rad_fraction"] = summary["Q_rad_W"]/qtotal if qtotal else 0.
     profile = dict(version=1,model_id=MODEL_ID,flow_direction=geom["flow_direction"],
         nodes=nodes,cells=cells,geometry=geom,summary=summary,balance=balance,
+        gas_heat_transfer=dict(geometry_model_id=BARTZ_GEOMETRY_ID,
+            curvature_source="geometry.throat_upstream_radius_m",
+            curvature_definition="effective upstream throat contour arc radius",
+            throat_diameter_m=2*r_t,
+            curvature_radius_m=geom["throat_upstream_radius_m"],
+            curvature_factor=summary["bartz_curvature_factor"],
+            transport_reference="supplied_hot_side_state" if hot_side_profile is not None else "chamber_reference_estimate",
+            validation_status="geometry_consistent; transport_reference_and_sigma_require_validation"),
         validity=dict(status="review" if warnings else "pass",warnings=warnings,
             property_domain="within_HEOS_declared_single_phase_ranges",
             heat_transfer_validation="not_validated_for_hardware"),
@@ -305,6 +327,7 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
             "Trapezoidal 1D momentum; signed pressure recovery, Darcy friction and end-local K.",
             "Bulk-property coolant convection plus fin correction; no near-wall extrapolation.",
             "Single-phase CH4 without decomposition/deposition; wall limits are user assumptions.",
+            "Bartz curvature uses the actual upstream throat arc; transport reference and sigma remain unvalidated.",
             "Supplied hot-side states." if hot_side_profile is not None else
             "Constant-gamma isentropic gas reference; chamber transport properties."])
     ordered = sorted(channels,key=lambda c:c["x_m"])
@@ -318,7 +341,7 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
     profile.update({key:[c[field] for c in ordered] for key,field in aliases.items()})
     profile.update(M=[c["hot_side"]["M"] for c in ordered],
         T_aw_K=[c["hot_side"]["T_aw_K"] for c in ordered],p_gas_Pa=[c["hot_side"]["p_Pa"] for c in ordered],
-        film_eta=[0.]*len(ordered),x_throat_m=geom["x_throat_m"],t_liner_m=wall_thickness_m,
+        film_eta=[0.]*len(ordered),x_throat_m=geom["x_throat_m"],t_liner_m=throat["wall_thickness_m"],
         dist_mode=bool(channel_table))
     return dict(profile,**summary,stations=channels,profile=profile)
 

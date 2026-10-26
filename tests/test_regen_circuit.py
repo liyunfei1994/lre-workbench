@@ -13,7 +13,7 @@ from regen_geometry import build_regen_geometry
 
 BASE = dict(mdot_coolant=166.3, T_in=122.35, p_in=74.89e6,
     mdot_total=765., pc=33e6, T_c=3773.34, gamma=1.189, molar_mass=22.6866,
-    r_t=.11586, r_c=.18316, L_cyl=.25646, L_conv=.2097,
+    r_t=.11586, r_c=.18316, L_cyl=.25646,
     expansion_ratio=34.34, channel_height_m=.00805677, n_points=80)
 GEOM = {k: v for k, v in BASE.items() if k in (
     "r_t", "r_c", "L_cyl", "expansion_ratio", "channel_height_m", "n_points")}

@@ -71,6 +71,10 @@ def physical_source_fixture():
         momentum_integral_tolerance_Pa=max(.05,v["pc"]*2e-9),max_momentum_integral_residual_Pa=0.,
         critical_location_model="conservative_pchip_heat_and_log_area_regularity")
     profile = dict(version=1,model_id="regen_quasi1d_ph_v1",geometry=geometry,flow_direction="counterflow",
+        gas_heat_transfer=dict(geometry_model_id="bartz_upstream_contour_curvature_v2",
+            curvature_source="geometry.throat_upstream_radius_m",throat_diameter_m=2*rt,
+            curvature_radius_m=geometry["throat_upstream_radius_m"],
+            curvature_factor=(2*rt/geometry["throat_upstream_radius_m"])**.1),
         nodes=nodes,cells=cells,summary=dict(Q_total_W=600.,dp_total_Pa=nodes[0]["p_Pa"]-nodes[-1]["p_Pa"]),
         balance=dict(energy_residual_W=0.,pressure_sum_residual_Pa=0.,max_cell_energy_residual_W=0.,
                      max_cell_momentum_residual_Pa=0.,max_wall_residual_K=0.,mass_residual_kg_s=0.),
@@ -110,6 +114,10 @@ class ThrottleCoolingContractTests(unittest.TestCase):
         def profile(c):
             return c["components"]["cooling_channel"]["profile"]
         mutations = [
+            lambda c: profile(c).pop("gas_heat_transfer"),
+            lambda c: profile(c)["gas_heat_transfer"].update(curvature_radius_m=.35*2*profile(c)["geometry"]["r_t_m"]),
+            lambda c: profile(c)["gas_heat_transfer"].update(curvature_factor=1.1),
+            lambda c: profile(c)["geometry"].update(version=1),
             lambda c: profile(c).pop("geometry"),
             lambda c: profile(c)["geometry"].update(cover_eps=2),
             lambda c: c["inputs"].update(cooling_channel_width_m=.0016),

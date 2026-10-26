@@ -93,8 +93,11 @@ class ChannelRow:
         # 表格与标量对同一物理量必须同口径，否则表格能填出标量禁填的值）。
         if self.anchor not in ANCHORS:
             raise ValueError(f"anchor={self.anchor!r} 不在 {ANCHORS}")
-        if not (10 <= self.n <= 2000):
+        if (isinstance(self.n, bool) or not isinstance(self.n, (int, float))
+                or not math.isfinite(self.n) or int(self.n) != self.n or not (10 <= self.n <= 2000)):
             raise ValueError(f"通道数 n={self.n} 超范围 [10, 2000]")
+        if not math.isfinite(self.x_mm) or self.x_mm < 0:
+            raise ValueError("通道断点 x 必须为有限非负坐标。")
         if not (0.3 <= self.w_mm <= 12.0):
             raise ValueError(f"通道宽 w={self.w_mm} mm 超范围 [0.3, 12]")
         if not (0.5 <= self.h_mm <= 20.0):
@@ -117,7 +120,7 @@ def parse_channel_table(json_str: str) -> Optional[List[ChannelRow]]:
         row = ChannelRow(
             anchor=str(rr.get("anchor", "x_mm")),
             x_mm=float(rr.get("x_mm", 0.0) or 0.0),
-            n=int(rr.get("n", 300)),
+            n=rr.get("n", 300),
             w_mm=float(rr.get("w_mm", 1.5)),
             h_mm=float(rr.get("h_mm", 5.0)),
             t_mm=float(rr.get("t_mm", 0.5)),
@@ -139,20 +142,33 @@ def serialize_channel_table(rows: Optional[List[ChannelRow]]) -> str:
         ensure_ascii=False)
 
 
-def default_rows_from_inputs(inputs, cooling_outputs: Optional[Dict] = None) -> List[ChannelRow]:
-    """从当前单段标量生成等效单行表（工作区「从当前标量生成」按钮用）。"""
-    co = cooling_outputs or {}
-    n = int(co.get("n_channels", 0) or getattr(inputs, "cooling_n_channels", 300))
-    h_mm = float(co.get("channel_height_mm", 0.0) or 0.0)
-    if h_mm <= 0.1:
-        h_mm = float(getattr(inputs, "cooling_channel_height_m", 5.0e-3)) * 1000.0
-    return [ChannelRow(
-        anchor="throat",
-        n=n,
-        w_mm=float(getattr(inputs, "cooling_channel_width_m", 1.5e-3)) * 1000.0,
-        h_mm=h_mm,
-        t_mm=float(getattr(inputs, "cooling_wall_thickness_m", 0.5e-3)) * 1000.0,
-    )]
+def default_rows_from_inputs(inputs, cooling_outputs: Optional[Dict] = None,
+                             *, cooling_profile: Optional[Dict] = None) -> List[ChannelRow]:
+    """Snapshot the solved channel geometry as an explicit piecewise-linear table.
+
+    Every original node is retained. This freezes a sampled representation at
+    absolute x coordinates; it is not an analytic radius-proportional rule on
+    a different contour/grid. A throat-only row would silently change that rule
+    into constant width everywhere and is deliberately no longer generated.
+    """
+    if (not isinstance(cooling_profile, dict)
+            or cooling_profile.get("model_id") != "regen_quasi1d_ph_v1"):
+        raise ValueError("生成节点采样表需要完整的已解冷却剖面，请先运行当前设计点。")
+    nodes = (cooling_profile.get("geometry") or {}).get("nodes")
+    if not isinstance(nodes, list) or len(nodes) < 2:
+        raise ValueError("冷却剖面没有完整几何节点，不能从喉部标量假造全域通道。")
+    rows = []
+    previous_x = -math.inf
+    for node in sorted(nodes, key=lambda row: row["x_m"]):
+        if not math.isfinite(node["x_m"]) or node["x_m"] <= previous_x:
+            raise ValueError("冷却几何节点坐标必须有限且严格递增。")
+        previous_x = node["x_m"]
+        row = ChannelRow(anchor="x_mm", x_mm=1000 * node["x_m"],
+                         n=node["n_channels"], w_mm=1000 * node["width_m"],
+                         h_mm=1000 * node["height_m"], t_mm=1000 * node["wall_thickness_m"])
+        row.validate()
+        rows.append(row)
+    return rows
 
 
 def _resolve_anchor_x(row: ChannelRow, *, x_throat: float, L_cyl: float,
@@ -180,12 +196,19 @@ def resolve_channel_distribution(
     """
     if not rows:
         raise ValueError("分布表为空")
+    for row in rows:
+        row.validate()
+    if len(x_arr) != len(r_arr):
+        raise ValueError("通道插值坐标与半径数组长度不一致。")
     resolved = sorted(
         ((_resolve_anchor_x(r, x_throat=x_throat, L_cyl=L_cyl, x_exit=x_exit), r)
          for r in rows),
         key=lambda t: t[0])
     xs_bp = [t[0] for t in resolved]
     rws = [t[1] for t in resolved]
+    if (any(not math.isfinite(x) or x < 0 or x > x_exit + 1e-12 for x in xs_bp)
+            or any(b <= a for a, b in zip(xs_bp, xs_bp[1:]))):
+        raise ValueError("通道断点必须位于当前轮廓内，且不能重复或重合。")
 
     n_out: List[float] = []
     w_out: List[float] = []
@@ -323,6 +346,17 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
         At = float(noz.get("At_m2") or 0.0)
         if At <= 0:
             return None
+        cooling = comps.get("cooling_channel")
+        profile = getattr(cooling, "profile", None)
+        geometry = {}
+        if profile is not None:
+            if (not isinstance(profile, dict)
+                    or profile.get("model_id") != "regen_quasi1d_ph_v1"
+                    or not isinstance(profile.get("geometry"), dict)
+                    or not profile["geometry"].get("nodes")):
+                return None
+            geometry = profile["geometry"]
+            At = math.pi * float(geometry["r_t_m"]) ** 2
         fuel_pump_out = results.states.get("fuel_after_pump")
         fuel_cooled = results.states.get("fuel_after_cooling")
         inj_ox = results.states.get("ox_turbine_exhaust")
@@ -342,10 +376,11 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
             thrust_N=float(s.get("thrust_N", 0.0) or 0.0),
             isp_s=float(s.get("Isp_s", 0.0) or 0.0),
             r_t_m=math.sqrt(At / math.pi),
-            r_c_m=float(ch.get("cc_diameter_m", 0.0) or 0.0) / 2.0,
-            L_cyl_m=float(ch.get("cc_length_m", 0.0) or 0.0),
-            L_conv_m=float(ch.get("cc_convergent_length_mm", 0.0) or 0.0) / 1000.0,
-            expansion_ratio=float(getattr(results.inputs, "expansion_ratio", 0.0)),
+            r_c_m=float(geometry.get("r_c_m", float(ch.get("cc_diameter_m", 0.0) or 0.0) / 2.0)),
+            L_cyl_m=float(geometry.get("L_cyl_m", ch.get("cc_length_m", 0.0)) or 0.0),
+            L_conv_m=float(geometry.get("L_conv_m",
+                float(ch.get("cc_convergent_length_mm", 0.0) or 0.0) / 1000.0)),
+            expansion_ratio=float(geometry.get("expansion_ratio", getattr(results.inputs, "expansion_ratio", 0.0))),
             film_T_K=float(s.get("fuel_turbine_exhaust_T_K", 850.0) or 850.0),
         )
         if fuel_pump_out is not None:

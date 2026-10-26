@@ -40,7 +40,7 @@ views.ignition=["点火事件与建压分析","气相反应容腔 · 给定外�
 views.chilldown=["预冷与充填分析","壁面热惯性 · 真实流体气液库存、两相充填与初始状态快照"];
 views.feed=["供给网络动态","单相液体供给子系统 · 管路惯性、容腔库存、低速泵图与阀门执行器"];
 views.validation=["热力学校核","同条件热化学对比、系统守恒、真实流体物性与试验验证"];
-views.transient=["瞬态响应分析","热态工作点扰动 · 零维质量、能量与转子惯性积分"];
+views.transient=["瞬态响应分析","热态工作点附近的局部扰动 · 零维质量、能量与转子惯性积分"];
 views.throttle=["节流稳态性能分析","固定主喷管喉部 · 不同推力指令下的稳态工况扫描"];
 
 function toast(message) { $("toast").textContent=message; $("toast").hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$("toast").hidden=true,5500); }

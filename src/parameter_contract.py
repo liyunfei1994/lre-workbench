@@ -68,7 +68,7 @@ PARAMETER_CONTRACT = {
     "coolant_cp": _meta("legacy", "科学运行使用 Cantera / CoolProp 焓反算出口温度，此常数不控制温升；仅为旧模型兼容保留，仍需满足旧方案的有效性校验。", source=None, hidden=True),
     "cooling_wall_conductivity": _meta("legacy", "循环冷却使用所选内衬材料的温度相关导热函数；此手填常数被材料函数覆盖，仅保留旧方案兼容，不作为当前有效输入。", source=None, hidden=True),
     "cooling_dp_pa": _meta("model_assumption", "仅预算模式生效：给定 Δp 直接进入泵压需求与冷却出口状态；不是初值。准一维模式由动量方程计算压降，不使用此值。示例 5 MPa 未由几何或实测验证。", source="设计压降预算；非已核实实机数据", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]}),
-    "cooling_bartz_mode": _meta("model_assumption", "准一维模式统一几何、流向和覆盖范围，沿程求压力与焓，吸热、压降、出口状态与曲线同源。预算模式仅指定 Q 和 Δp，不生成沿程曲线。Bartz 与冷却侧相关式仍需验证。", source="模型选择"),
+    "cooling_bartz_mode": _meta("model_assumption", "准一维模式统一几何、流向和覆盖范围，沿程求压力与焓，吸热、压降、出口状态与曲线同源。Bartz 型热侧关联取规范内轮廓的上游喉部曲率半径；气侧与冷却侧相关式仍需验证。预算模式仅指定 Q 和 Δp，不生成沿程曲线。", source="模型选择"),
     "cooling_dp_auto": _meta("legacy", "历史兼容字段，不再选择另一套水力模型。准一维模式始终联立压力与焓；预算模式只使用给定 Δp。", source=None, hidden=True),
     "cooling_marching_enable": _meta("legacy", "仅为历史方案兼容保留；不再控制独立后处理或物理计算。准一维模式总是保存同源沿程结果。", source=None, hidden=True),
     "cooling_grid_points": _meta("solver_setting", "准一维冷却几何网格节点数；属于数值分辨率，不是物理设计输入。改变分辨率后应检查网格收敛，固定硬件工况沿用相同几何。", source=None, advanced=True, visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]}),
@@ -92,6 +92,7 @@ PARAMETER_CONTRACT["cooling_channel_auto_size"] = _meta("component_sizing", "额
 PARAMETER_CONTRACT["cooling_target_velocity_ms"] = _meta("component_sizing", "仅通道自动定深时使用的设计速度，不是对每个沿程节点施加固定流速。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}, {"key": "cooling_channel_auto_size", "op": "gt", "value": 0}]})
 for key in ("cooling_htc_enhancement", "cooling_channel_rel_roughness", "cooling_channel_k_minor"):
     PARAMETER_CONTRACT[key] = _meta("model_assumption", "准一维冷却的换热/阻力模型假设；影响吸热和压降，不是初值，也未标定为 Raptor 实机参数。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+PARAMETER_CONTRACT["cooling_htc_enhancement"]["help"] = "仅修正喉部轴向前后各一个喉半径范围内的冷却侧换热系数；1 表示不作额外修正。它不是 Bartz 气侧曲率项，不是初值，也未由实机数据标定。气侧曲率半径另从规范内轮廓的上游喉部圆弧取得。"
 PARAMETER_CONTRACT["cooling_wall_temp_limit_K"] = _meta("constraint", "方案给定的热面壁温验收限值；不等于已完成材料寿命或结构应力验证。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
 for key in ("turbine_efficiency_ox", "turbine_efficiency_fuel"):
     PARAMETER_CONTRACT[key] = _meta("model_assumption", "给定的涡轮效率假设，参与焓降和轴功计算；不是初值，需部件数据支持。")

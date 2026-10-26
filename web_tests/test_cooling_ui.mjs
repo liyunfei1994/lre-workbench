@@ -165,3 +165,56 @@ test("rejected pressure trials remain diagnostics and do not generate physical c
   assert.match(html,/&lt;bad&gt; state/);
   assert.doesNotMatch(html,/固定硬件喉部面积相对残差/);
 });
+
+test("Bartz details use only saved correlation values and stay collapsed",()=>{
+  const result=record(),profile=result.calculation.components.cooling_channel.profile;
+  profile.gas_heat_transfer={geometry_model_id:"bartz_upstream_contour_curvature_v2",
+    curvature_source:"geometry.throat_upstream_radius_m",curvature_definition:"effective upstream throat contour arc radius",
+    throat_diameter_m:.2,curvature_radius_m:.15,curvature_factor:1.02919,
+    transport_reference:"supplied_hot_side_state",
+    validation_status:"geometry_consistent; transport_reference_and_sigma_require_validation"};
+  profile.geometry={throat_upstream_radius_m:.999};
+  result.calculation.inputs={throat_upstream_radius_m:1.234};
+  const before=structuredClone(result),html=renderCooling(result);
+  const detail=html.match(/<details class="cool-details cool-bartz-geometry">[\s\S]*?<\/details>/)?.[0];
+  assert.ok(detail);
+  assert.match(detail,/<td>150 mm<\/td>/);
+  assert.match(detail,/<td>200 mm<\/td>/);
+  assert.match(detail,/<td>1.02919<\/td>/);
+  assert.match(detail,/规范内轮廓的上游喉部圆弧/);
+  assert.match(detail,/本次传入的热气侧状态/);
+  assert.match(detail,/几何来源一致不代表关联式已验证/);
+  assert.match(detail,/参考态与 σ 修正的适用性仍待校核/);
+  assert.doesNotMatch(detail,/<details[^>]*\bopen\b|999|1,234/);
+  assert.deepEqual(result,before);
+});
+
+test("old cooling records cannot acquire Bartz provenance from other geometry or current inputs",()=>{
+  const result=record(),profile=result.calculation.components.cooling_channel.profile;
+  profile.geometry={throat_upstream_radius_m:.789,throat_radius_m:.456};
+  result.calculation.inputs={throat_upstream_radius_m:.123};
+  const before=structuredClone(result),html=renderCooling(result);
+  const detail=html.match(/<details class="cool-details cool-bartz-geometry">[\s\S]*?<\/details>/)?.[0];
+  assert.ok(detail);
+  assert.match(detail,/历史记录未保存 Bartz 曲率来源，需重新计算/);
+  assert.doesNotMatch(detail,/123|456|789|<table/);
+  assert.match(html,/冷却剂压力/);
+  assert.deepEqual(result,before);
+});
+
+test("partial and unfamiliar Bartz metadata preserves gaps and escapes source text",()=>{
+  const result=record(),profile=result.calculation.components.cooling_channel.profile;
+  profile.gas_heat_transfer={geometry_model_id:"future_model",curvature_source:"<script>source</script>",
+    curvature_radius_m:NaN,throat_diameter_m:null,curvature_factor:null,transport_reference:"<img>"};
+  let html=renderCooling(result);
+  let detail=html.match(/<details class="cool-details cool-bartz-geometry">[\s\S]*?<\/details>/)?.[0];
+  assert.match(detail,/几何来源版本未识别/);
+  assert.match(detail,/&lt;script&gt;source&lt;\/script&gt;/);
+  assert.match(detail,/&lt;img&gt;/);
+  assert.match(detail,/<td>上游喉部曲率半径 Rᵤ<\/td><td>—<\/td>/);
+  assert.doesNotMatch(detail,/<script|<img|NaN|Infinity/);
+  profile.gas_heat_transfer={transport_reference:"chamber_reference_estimate"};
+  html=renderCooling(result);
+  assert.match(html,/历史记录未保存 Bartz 曲率来源，需重新计算/);
+  assert.match(html,/主室参考状态估算/);
+});

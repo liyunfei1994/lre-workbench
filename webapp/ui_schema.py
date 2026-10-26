@@ -144,18 +144,18 @@ def _system_groups(groups):
             group["description"] = "温度从贮箱侧给定；FFSC 与 GG 均计算增压泵焓升、短管压降后的主泵入口状态。效率为模型假设；主室损失模型单独选择，历史温升折减仅为兼容保留。"
         elif group["id"] == "cooling":
             group["title"] = "再生冷却·系统热平衡"
-            group["description"] = "物理模式只有一套准一维冷却模型：几何、流向、覆盖范围一致，沿程求压力与焓，并反馈热侧和主循环。端口、总量与曲线同源。给定 Q 与 Δp 仅为设计预算模式，没有沿程曲线。"
+            group["description"] = "准一维模式沿同一几何求压力与焓，并反馈热侧和主循环；端口、总量与曲线同源。Bartz 型热侧关联的曲率半径取规范轮廓的上游喉部圆弧，关联式适用性仍需校核。预算模式给定 Q 与 Δp，没有沿程曲线。"
             for field in group["fields"]:
                 if field["key"] == "cooling_bartz_mode":
                     field.update(label="冷却计算方式", type="select", choices=[
-                        {"value": 1, "label": "统一准一维：Bartz 换热与压力·焓守恒"},
+                        {"value": 1, "label": "统一准一维：Bartz 型关联与压力·焓守恒"},
                         {"value": 0, "label": "给定 Q 与 Δp 预算（无沿程曲线）"}])
         elif group["id"] == "pumps":
             group["title"] = "涡轮泵·概念选型与转速设定"
             group["description"] = "指定或按比转速估算转速；尚未依据泵 / 涡轮特性图匹配工作点。压头系数仅保留于完整参数中的概念几何估算，相关诊断待统一。"
         elif group["id"] == "chamber_contour":
             group["title"] = "冷却系统几何·型面与覆盖"
-            group["description"] = "准一维热侧、冷却通道长度与面积使用同一内轮廓。冷却覆盖按出口面积比指定；计算结果记录实际起止位置。属于系统级几何，不代表 CFD 或结构校核。"
+            group["description"] = "准一维热侧、冷却通道长度与面积使用同一规范内轮廓；Bartz 型关联读取该轮廓的上游喉部曲率半径。冷却覆盖按出口面积比指定，结果记录实际起止位置。这里提供系统级几何，部件详细流动与结构另行分析。"
         elif group["id"] == "chamber_channels":
             group["title"] = "冷却系统几何·通道与壁面"
             group["description"] = "额定设计点可按入口流速估算通道深度；固定硬件节流沿用设计点几何。压降由流量、密度及截面积沿程求解，不能单独指定另一套水力长度。"
@@ -191,8 +191,8 @@ def design_ui_schema():
         "parameter_role_labels": dict(ROLE_LABELS),
         "propellant_models": propellant_models(),
         "system_groups": _system_groups(groups),
-        "scope": {"id": "engine_system", "label": "系统仿真 · 总体设计",
-                  "description": "当前支持稳态设计点循环匹配；完整方案参数保留用于兼容与追溯。"},
+        "scope": {"id": "engine_system", "label": "系统设计 · 运行仿真",
+                  "description": "支持稳态循环匹配与适用范围明确的瞬态研究；热态扰动及预冷、点火、关机等模型分别说明边界，尚未形成经验证的整机全过程仿真。完整方案参数保留用于兼容与追溯。"},
         "overview_groups": {"ffsc": _overview(OVERVIEW_GROUPS), "gg": _overview(OVERVIEW_GROUPS_GG)},
         "component_labels": dict(COMPONENT_LABELS), "key_labels": dict(KEY_LABELS),
         "state_labels": dict(STATE_LABELS),

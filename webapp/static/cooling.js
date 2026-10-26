@@ -121,6 +121,24 @@ function diagnostics(profile) {
   return `<details class="cool-details"><summary>守恒残差与热气侧耦合</summary>${table(["检查量","有符号值 / 最大绝对值"],rows)}<p class="cool-note">残差按本次内核记录展示；界面不重新计算热量或压力损失，也不另设通过阈值。</p>${couplingRows}</details>`;
 }
 
+function gasHeatTransferDetails(profile) {
+  const gas=obj(profile.gas_heat_transfer);
+  const heading='<summary>Bartz 型热侧关联：几何来源与适用范围</summary>';
+  if(!Object.keys(gas).length)
+    return `<details class="cool-details cool-bartz-geometry">${heading}<p class="cool-note">历史记录未保存 Bartz 曲率来源，需重新计算。不会从当前参数或其他几何字段补写本次关联实际使用的值。</p></details>`;
+  const known=gas.geometry_model_id==="bartz_upstream_contour_curvature_v2" && gas.curvature_source==="geometry.throat_upstream_radius_m";
+  const reference=({supplied_hot_side_state:"本次传入的热气侧状态",chamber_reference_estimate:"主室参考状态估算"})[gas.transport_reference] || gas.transport_reference || "未记录";
+  const rows=[
+    ["上游喉部曲率半径 Rᵤ",quantity(scaled(gas.curvature_radius_m,1e3),"mm")],
+    ["喉部直径 Dₜ",quantity(scaled(gas.throat_diameter_m,1e3),"mm")],
+    ["曲率因子（本次保存值）",fmt(gas.curvature_factor)],
+    ["曲率来源",known ? "规范内轮廓的上游喉部圆弧" : gas.curvature_source || "未记录"],
+    ["输运物性取值参考",reference],
+  ].map(([label,value])=>`<tr>${cell(label)}${cell(value)}</tr>`);
+  const missing=!gas.curvature_source ? "历史记录未保存 Bartz 曲率来源，需重新计算。" : "本记录的几何来源版本未识别；下表仅展示保存值，不能据此确认与规范轮廓一致。";
+  return `<details class="cool-details cool-bartz-geometry">${heading}${known ? "" : `<p class="cool-note">${missing}</p>`}${table(["项目","本次记录"],rows)}<p class="cool-note">几何来源一致不代表关联式已验证；输运物性取值参考态与 σ 修正的适用性仍待校核。此处只读取本次记录，不重新计算曲率因子或补齐缺失值。</p></details>`;
+}
+
 function profileTables(profile) {
   const nodes=list(profile.nodes).map((raw,i)=>{
     const p=obj(raw);
@@ -151,5 +169,5 @@ export function renderCooling(result={}) {
     chart("壁面热流密度","MW/m²",channelCells,[["q_W_m2","热流密度",1e-6]]),
   ].join("");
   const warnings=state.warnings.length ? `<ul class="cool-warnings">${state.warnings.map(v=>`<li>${esc(v)}</li>`).join("")}</ul>` : "";
-  return `${start}<p class="cool-direction">${esc(direction)}。横轴统一采用沿冷却剂流向的弧长 s；缺失数据断线，不平滑、不补点。</p><p class="cool-notice">内核检查描述当前模型与离散方程的状态，不能替代换热关联式、通道几何和材料温限的独立验证。</p>${warnings}<div class="cool-chart-grid">${curves}</div><div class="cool-outlet-detail"><span>出口静焓 <b>${esc(quantity(scaled(summary.h_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>出口总焓 <b>${esc(quantity(scaled(summary.h0_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>记录最大热面壁温 <b>${esc(quantity(summary.T_wall_hot_max_K,"K"))}</b></span></div>${diagnostics(profile)}${profileTables(profile)}</section>`;
+  return `${start}<p class="cool-direction">${esc(direction)}。横轴统一采用沿冷却剂流向的弧长 s；缺失数据断线，不平滑、不补点。</p><p class="cool-notice">内核检查描述当前模型与离散方程的状态，不能替代换热关联式、通道几何和材料温限的独立验证。</p>${warnings}<div class="cool-chart-grid">${curves}</div><div class="cool-outlet-detail"><span>出口静焓 <b>${esc(quantity(scaled(summary.h_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>出口总焓 <b>${esc(quantity(scaled(summary.h0_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>记录最大热面壁温 <b>${esc(quantity(summary.T_wall_hot_max_K,"K"))}</b></span></div>${gasHeatTransferDetails(profile)}${diagnostics(profile)}${profileTables(profile)}</section>`;
 }

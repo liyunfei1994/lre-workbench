@@ -2,8 +2,8 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="可重复使用火箭发动机数字化平台：系统仿真、总体设计与方案追溯。">
-  <title>火箭动力工作台 · 系统仿真</title>
+  <meta name="description" content="火箭发动机系统设计与运行仿真：稳态循环匹配、适用范围明确的瞬态研究与方案追溯。">
+  <title>火箭动力工作台 · 系统设计与运行仿真</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/workbench.css">
   <link rel="stylesheet" href="/static/component-analysis.css">
@@ -31,9 +31,9 @@
     <div class="auth-story">
       <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>LRE WORKBENCH / WEB</small></div></div>
       <span class="eyebrow">可重复使用火箭发动机数字化平台</span>
-      <h1>从循环方案，<br>到稳态性能。</h1>
-      <p>聚焦发动机系统仿真与总体设计。<br>设置设计点、匹配循环、检查系统平衡，并追溯每次计算。</p>
-      <div class="story-flow"><span>01<br><b>设计参数</b></span><i>→</i><span>02<br><b>循环匹配</b></span><i>→</i><span>03<br><b>稳态性能</b></span></div>
+      <h1>从系统设计，<br>到运行仿真。</h1>
+      <p>建立稳态设计点、匹配循环，并开展适用范围内的瞬态研究。<br>各分析页说明模型边界，每次计算保留可追溯记录。</p>
+      <div class="story-flow"><span>01<br><b>设计参数</b></span><i>→</i><span>02<br><b>稳态匹配</b></span><i>→</i><span>03<br><b>运行研究</b></span></div>
       <div class="local-note"><span class="dot"></span>本机试用版 · 当前仅此电脑可访问</div>
     </div>
     <div class="auth-panel">
@@ -55,14 +55,14 @@
   </section>
   <div id="workspace" class="workspace" hidden>
     <header class="app-header">
-      <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>系统仿真 · 总体设计</small></div></div>
+      <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>系统设计 · 运行仿真</small></div></div>
       <div class="document-heading"><b id="document-title">工作区</b><span id="document-meta"></span></div>
       <div class="actions header-actions"><button data-nav="projects">打开方案</button><button id="header-save" form="project-form" type="submit" hidden>保存方案</button><button id="export-inputs" hidden>导出方案</button><button id="header-run" class="primary" hidden>运行设计点</button><button id="header-cancel" hidden>取消计算</button></div>
       <div class="user-area"><span id="user-label"></span><button class="text-btn" id="logout">退出</button></div>
     </header>
     <div id="connection-banner" class="connection-banner" role="status" hidden><span id="connection-message"></span><button id="retry-connection">重新连接</button></div>
     <aside class="sidebar">
-      <nav class="design-nav" aria-label="系统仿真与总体设计">
+      <nav class="design-nav" aria-label="系统设计与运行仿真">
         <div class="nav-section"><span>01</span>系统仿真</div>
         <button data-view="overview">稳态性能分析</button>
         <button data-view="throttle">节流稳态性能分析</button>

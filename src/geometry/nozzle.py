@@ -71,10 +71,13 @@ def _rao_bell_contour(
     ────
     (xs, rs, L_nozzle, L_conv, theta_n_deg, theta_e_deg, Ru, Rd)
     """
-    theta_conv = math.radians(theta_conv_deg)
-
-    # 喉部圆弧半径
-    Ru = 1.5 * rt      # 上游（收缩侧）
+    if not all(math.isfinite(v) and v > 0 for v in (rt, re, rc, expansion_ratio, bell_fraction)):
+        raise ValueError("nozzle dimensions must be finite and positive")
+    if rc <= rt or expansion_ratio <= 1 or not math.isclose((re/rt)**2, expansion_ratio, rel_tol=1e-10):
+        raise ValueError("nozzle radii and area ratios are inconsistent")
+    # 喉部上游半径必须读取规范轮廓的实际值；低收缩比时会按几何容许量缩小。
+    from chamber_contour import convergent_contour, convergent_geometry
+    Ru = convergent_geometry(rc, rt, theta_conv_deg)["Ru_m"]
     Rd = 0.382 * rt     # 下游（膨胀侧，Rao TOP 标准值）
 
     # 15° 锥形喷管长度（参考基准）
@@ -92,7 +95,6 @@ def _rao_bell_contour(
     # 收缩段——那是 V16 以前两套定义并存、且圆筒接口处有 C¹ 折点的根源）。
     # 坐标系：本模块喉部在 x=0、收缩段位于负 x；chamber_contour 给出 x∈[0,L_conv]
     # （rc→rt），整体减 L_conv 即把喉部平移到 x=0。
-    from chamber_contour import convergent_contour
     n_conv = max(n_points // 4, 18)
     cvx, cvr, L_conv = convergent_contour(
         rc, rt, conv_half_angle_deg=theta_conv_deg, x0=0.0,
@@ -151,7 +153,7 @@ def _rao_bell_contour(
     return (xs, rs, L_nozzle, L_conv, theta_n_deg, theta_e_deg, Ru, Rd)
 
 
-def full_hot_gas_contour(
+def full_hot_gas_geometry(
     rt: float,
     re: float,
     rc: float,
@@ -173,7 +175,7 @@ def full_hot_gas_contour(
     "marching 自建轮廓（无 Rd 弧）vs 几何模块 Rao 轮廓"两套并存的口径分裂。
 
     坐标系：x=0 在喷注面，x 单调增至喷管出口。
-    返回 (xs, rs, x_throat)。
+    返回轮廓及其实际几何元数据；上游喉部曲率从构造圆弧读取，不从网格差分估计。
     """
     xs_r, rs_r, _L_noz, L_conv, _tn, _te, _Ru, _Rd = _rao_bell_contour(
         rt, re, rc, expansion_ratio,
@@ -192,7 +194,21 @@ def full_hot_gas_contour(
     for xr, rr in zip(xs_r, rs_r):
         xs.append(xr + shift)
         rs.append(rr)
-    return xs, rs, L_cyl + L_conv
+    return dict(contour_x=xs, contour_r=rs, x_throat_m=L_cyl + L_conv,
+                L_conv_m=L_conv, L_nozzle_m=_L_noz,
+                throat_upstream_radius_m=_Ru, throat_downstream_radius_m=_Rd,
+                conv_half_angle_deg=theta_conv_deg, bell_fraction=bell_fraction,
+                source="geometry.nozzle.full_hot_gas_geometry")
+
+
+def full_hot_gas_contour(rt, re, rc, expansion_ratio, L_cyl, *,
+                         bell_fraction=0.80, theta_conv_deg=30.0,
+                         n_points=300, n_cyl=14):
+    """Compatibility tuple view of the canonical geometry, without recomputing a contour."""
+    geom = full_hot_gas_geometry(rt, re, rc, expansion_ratio, L_cyl,
+        bell_fraction=bell_fraction, theta_conv_deg=theta_conv_deg,
+        n_points=n_points, n_cyl=n_cyl)
+    return geom["contour_x"], geom["contour_r"], geom["x_throat_m"]
 
 
 def compute_nozzle(

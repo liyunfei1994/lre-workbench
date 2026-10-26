@@ -59,7 +59,12 @@ def _cooling_baseline(calculation, values, throat_area, height):
     require(isinstance(profile, dict) and profile.get("version") == 1 and profile.get("model_id") == "regen_quasi1d_ph_v1",
             "记录缺失或来自旧模型")
     geometry = profile.get("geometry")
-    require(isinstance(geometry, dict) and geometry.get("version") == 1, "几何快照缺失")
+    require(isinstance(geometry, dict) and geometry.get("version") == 2, "几何快照缺失或曲率来源版本过旧")
+    from cooling_marching import BARTZ_GEOMETRY_ID
+    gas_heat = profile.get("gas_heat_transfer")
+    require(isinstance(gas_heat, dict) and gas_heat.get("geometry_model_id") == BARTZ_GEOMETRY_ID
+            and gas_heat.get("curvature_source") == "geometry.throat_upstream_radius_m",
+            "缺少当前 Bartz 曲率来源")
     outputs = cooling.get("outputs") or {}
     close(outputs.get("A_throat_m2"), throat_area, "喉面积", rtol=2e-8)
     rt = number(geometry.get("r_t_m"), "几何喉半径", positive=True)
@@ -99,6 +104,9 @@ def _cooling_baseline(calculation, values, throat_area, height):
         else:
             require(saved == rebuilt, f"{path}不一致")
     compare_geometry(geometry, expected)
+    close(gas_heat.get("throat_diameter_m"), 2*rt, "Bartz 喉径")
+    close(gas_heat.get("curvature_radius_m"), expected["throat_upstream_radius_m"], "Bartz 曲率半径")
+    close(gas_heat.get("curvature_factor"), (2*rt/expected["throat_upstream_radius_m"])**.1, "Bartz 曲率因子")
     require(profile.get("flow_direction") == geometry["flow_direction"], "流向不一致")
 
     nodes, cells = profile.get("nodes"), profile.get("cells")

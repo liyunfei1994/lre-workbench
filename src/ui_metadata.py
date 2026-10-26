@@ -729,7 +729,7 @@ CHAMBER_INPUTS = {
     'cooling_channel_width_m': ('通道宽 w（喉部）', 'mm', ''),
     'cooling_channel_height_m': ('通道深 h', 'mm', ''),
     'cooling_wall_thickness_m': ('内衬热壁厚 t', 'mm', ''),
-    'cooling_htc_enhancement': ('喉部曲率换热强化因子', '—', ''),
+    'cooling_htc_enhancement': ('喉部附近冷却侧换热修正因子', '—', '乘于喉部轴向前后各一个喉半径范围的冷却侧换热系数；不是 Bartz 气侧曲率项。气侧曲率半径取自规范内轮廓的上游喉部圆弧。'),
     'cooling_channel_rel_roughness': ('相对粗糙度 ε/D_h', '—', ''),
     'cooling_channel_k_minor': ('集流环/弯头局部损失（动压头数）', '—', ''),
     'cooling_wall_temp_limit_K': ('热面壁温限值', 'K', ''),

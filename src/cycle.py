@@ -791,7 +791,7 @@ class FFSCCycleModel:
         # 室直径/容积、圆筒长[扣收缩段锥台]、长径比、室截面马赫数），并对经验区间
         # 软校核。详见 chamber_sizing.size_combustion_chamber（教材设计方法）。
         _cc = size_combustion_chamber(
-            At=nozzle_result.outputs["At_m2"],
+            At=cooling_result.outputs.get("A_throat_m2", nozzle_result.outputs["At_m2"]),
             pc=self.inputs.pc,
             mdot_total=mdot_total,
             T_c=chamber_state.temperature,
@@ -805,7 +805,7 @@ class FFSCCycleModel:
 
         # ── 壁厚（V19 口径统一）：直接用 geometry/chamber.py 的 V12 分层定厚 ──
         # 旧版此处还留着一套"单壁 Barlow(0.25·pc)+4mm"估算（5–25mm 钳位），与几何
-        # 模块的分层壁厚（内衬传热限 + 通道深 + 外壳 Barlow 对冷却剂压力）同时对外
+        # 模块的分层壁厚（已给内衬 + 已给通道深 + 外壳薄壁设计估算）同时对外
         # 展示、数字互相矛盾。现删除旧算法，部件卡与几何页显示**同一个**分层总厚。
         _cc_notes      = _cc.pop("_notes", [])
         _cc_validation = _cc.pop("_validation", [])
@@ -834,6 +834,8 @@ class FFSCCycleModel:
                 channel_height_mm=float(cooling_result.outputs.get("channel_height_mm", 0.0) or 0.0),
                 n_channels=int(cooling_result.outputs.get("n_channels", 0) or 0),
                 channel_width_mm=float(getattr(self.inputs, "cooling_channel_width_m", 0.0) or 0.0) * 1000.0,
+                liner_thickness_mm=self.inputs.cooling_wall_thickness_m*1000.0,
+                cooling_profile=getattr(cooling_result, "profile", None),
                 conv_half_angle_deg=getattr(self.inputs, "chamber_conv_half_angle_deg", 30.0),
             )
             _cc["cc_wall_thickness_mm"] = _ch_geo.wall_thickness_mm
@@ -842,12 +844,12 @@ class FFSCCycleModel:
             _cc["cc_wall_jacket_mm"] = _ch_geo.outer_wall_thickness_mm
             chamber_result.notes.append(
                 f"  分层壁厚 t_wall ≈ {_ch_geo.wall_thickness_mm:.1f} mm = "
-                f"内衬 {_ch_geo.inner_wall_thickness_mm:.1f}（传热限）+ "
+                f"内衬 {_ch_geo.inner_wall_thickness_mm:.1f}（输入几何）+ "
                 f"通道 {_ch_geo.cooling_channel_height_mm:.1f} + "
                 f"外壳 {_ch_geo.outer_wall_thickness_mm:.1f}（Barlow 对冷却剂压力）"
-                "（与几何估算页同口径，V19 起唯一壁厚）")
-        except Exception:
-            pass   # 分层定厚失败不影响主结果（壁厚仅信息量输出）
+                "（内衬与通道采用已解尺寸；外壳仅为当前压力下的设计估算）")
+        except Exception as exc:
+            chamber_result.notes.append(f"分层几何信息未生成：{exc}")
         chamber_result.outputs.update(_cc)
         chamber_result.notes.extend(_cc_notes)
         chamber_result.notes.extend(_cc_validation)

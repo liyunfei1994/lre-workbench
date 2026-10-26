@@ -412,25 +412,44 @@ def _station_boundary(wf, geometry: Dict[str, Any],
     def _at(arr, default):
         return float(arr[ti]) if arr and len(arr) > ti else default
 
+    def _geometry_at(name):
+        arr = getattr(wf, name, None)
+        if arr is None or len(arr) == 0:
+            return None
+        if ti >= len(arr):
+            raise ValueError(f"FEA所需沿程几何 {name} 缺少当前站位，不能回退估算。")
+        value = float(arr[ti])
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"FEA沿程几何 {name} 必须为有限正数，不能回退估算。")
+        return value
+
     # 通道几何：优先 wf 沿程数组（分布模式），回退 geometry 标量
-    n_chan = int(_at(getattr(wf, "n_chan", None), 0.0) or 0)
+    n_value = _geometry_at("n_chan")
+    if n_value is not None and int(n_value) != n_value:
+        raise ValueError("FEA沿程通道数必须为整数，不能截断小数部分。")
+    n_chan = int(n_value or 0)
     if n_chan <= 0:
         n_chan = int(g_ch.get("num_cooling_channels", 0) or 0)
     if n_chan <= 0:
         n_chan = max(int(round(2 * math.pi * rt / 4.0e-3)), 60)
-    pitch = 2.0 * math.pi * max(r_loc, 1e-6) / max(n_chan, 1)
-    w_chan = _at(getattr(wf, "w_chan", None), 0.0)
-    if w_chan <= 0:
+    if not math.isfinite(r_loc) or r_loc <= 0:
+        raise ValueError("FEA实际截面半径必须为有限正数。")
+    pitch = 2.0 * math.pi * r_loc / n_chan
+    w_chan = _geometry_at("w_chan")
+    if w_chan is None:
         w_chan = float(g_ch.get("cooling_channel_width_mm", 0.0) or 0.0) / 1e3
     if w_chan <= 0:
         w_chan = min(0.55 * pitch, 0.8 * pitch)
-    w_chan = min(w_chan, 0.9 * pitch)          # 半节距网格要求 w < pitch
-    h_chan = _at(getattr(wf, "h_chan", None), 0.0)
-    if h_chan <= 0:
+    if not math.isfinite(w_chan) or not 0 < w_chan < pitch:
+        raise ValueError("FEA通道宽度必须介于零与实际节距之间；不能裁窄已解几何。")
+    h_chan = _geometry_at("h_chan")
+    if h_chan is None:
         h_chan = float(g_ch.get("cooling_channel_height_mm", 4.0) or 4.0) / 1e3
-    t_liner = _at(getattr(wf, "t_liner", None), 0.0)
-    if t_liner <= 0:
+    t_liner = _geometry_at("t_liner")
+    if t_liner is None:
         t_liner = float(wf.t_wall_m or 0.5e-3)
+    if not all(math.isfinite(v) and v > 0 for v in (h_chan, t_liner)):
+        raise ValueError("FEA通道深度与内衬厚度必须为有限正数。")
 
     # 燃气静压：V19 marching 剖面带局部静压；旧剖面回退 0.55·pc 喉部近似
     p_gas = _at(getattr(wf, "p_gas", None), 0.0)

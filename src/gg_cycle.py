@@ -614,7 +614,7 @@ class GGCycleModel:
 
         # ── 燃烧室几何 + 分层壁厚（与 FFSC 同口径）──────────────────
         _cc = size_combustion_chamber(
-            At=nozzle_result.outputs["At_m2"],
+            At=cooling_result.outputs.get("A_throat_m2", nozzle_result.outputs["At_m2"]),
             pc=self.inputs.pc,
             mdot_total=mdot_main,
             T_c=t_chamber,
@@ -652,14 +652,16 @@ class GGCycleModel:
                 channel_height_mm=float(cooling_result.outputs.get("channel_height_mm", 0.0) or 0.0),
                 n_channels=int(cooling_result.outputs.get("n_channels", 0) or 0),
                 channel_width_mm=float(getattr(self.inputs, "cooling_channel_width_m", 0.0) or 0.0) * 1000.0,
+                liner_thickness_mm=self.inputs.cooling_wall_thickness_m*1000.0,
+                cooling_profile=getattr(cooling_result, "profile", None),
                 conv_half_angle_deg=getattr(self.inputs, "chamber_conv_half_angle_deg", 30.0),
             )
             _cc["cc_wall_thickness_mm"] = _ch_geo.wall_thickness_mm
             _cc["cc_wall_liner_mm"] = _ch_geo.inner_wall_thickness_mm
             _cc["cc_wall_channel_mm"] = _ch_geo.cooling_channel_height_mm
             _cc["cc_wall_jacket_mm"] = _ch_geo.outer_wall_thickness_mm
-        except Exception:
-            pass
+        except Exception as exc:
+            chamber_result.notes.append(f"分层几何信息未生成：{exc}")
         chamber_result.outputs.update(_cc)
         chamber_result.notes.extend(_cc_notes)
         chamber_result.notes.extend(_cc_validation)

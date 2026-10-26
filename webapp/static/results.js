@@ -202,7 +202,7 @@ const assessmentDisplayState = result => {
     ? {...saved,status:"unknown",label:"历史系统约束范围，需重算"} : saved;
 };
 const scopeNotice = result => result.calculation_scope?.id === "engine_system"
-  ? '<p class="fine">系统仿真 · 稳态设计点，用于发动机循环匹配与总体设计。</p>' + (legacySystemLimits(result) ? '<div class="banner">历史系统校核未覆盖统一冷却剖面的沿程壁温限值；保留原校核表，需重新计算后按当前范围判定。</div>' : '')
+  ? '<p class="fine">系统设计 · 稳态设计点，用于循环匹配与设计约束检查。</p>' + (legacySystemLimits(result) ? '<div class="banner">历史系统校核未覆盖统一冷却剖面的沿程壁温限值；保留原校核表，需重新计算后按当前范围判定。</div>' : '')
   : '<div class="banner">历史记录：保留原计算与完整工程校核，尚未按当前系统范围重新运行。下方系统量展示不会改变原校核结论。</div>';
 
 function welcome() {
@@ -412,7 +412,7 @@ export function componentAnalysisItems(result) {
       // Keep the pressure label and actual unit consistent even if a future result omits MPa aliases.
       const scale = {injector_dp_Pa:1e-6,preburner_pressure_Pa:1e-6,...COMPONENT_VALUE_SCALE}[key];
       if (finite(value) && scale != null) value *= scale;
-      if (key === "mode" && finite(value)) value = value >= .5 ? "Bartz 热流估算" : "固定热载荷";
+      if (key === "mode" && finite(value)) value = value >= .5 ? "Bartz 型热流估算" : "固定热载荷";
       if (key === "delta_P_source" && finite(value)) value = value >= .5 ? "水力模型压降" : "给定压降";
       if (key === "flow_model" && finite(value)) value = value < 0 ? "理想气体" : value >= .5 ? "平衡流" : name === "nozzle" ? "主室组成冻结流" : "喷管入口组成冻结流";
       const matched = fuelLabel(label,inputs).match(/^(.*?)\s*\[([^\]]*)\]\s*$/);

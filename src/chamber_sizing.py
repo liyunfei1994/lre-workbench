@@ -91,7 +91,11 @@ def size_combustion_chamber(
     dict：cc_* 几何/特性参数 + "_notes"(list[str]) + "_validation"(list[str])
     """
     pi = math.pi
-    eps_c = max(contraction_ratio, 1.0001)
+    if not math.isfinite(contraction_ratio) or contraction_ratio <= 1:
+        raise ValueError("chamber contraction ratio must exceed one")
+    if not all(math.isfinite(v) and v > 0 for v in (At, l_star)):
+        raise ValueError("throat area and characteristic length must be finite and positive")
+    eps_c = contraction_ratio
 
     # ── 燃气状态：室内燃气密度 ρ_c = pc·MW/(Ru·T_c) ──────────────
     R_spec = _R_UNIVERSAL / max(molar_mass, 1e-9)
@@ -116,10 +120,8 @@ def size_combustion_chamber(
 
     V_cyl = Vc - V_conv
     cyl_clamped = False
-    if V_cyl < 0.0:
-        # L* 太小 / ε_c·β 组合使收缩段已占满特征容积 → 无圆筒段
-        V_cyl = 0.0
-        cyl_clamped = True
+    if V_cyl <= 0.0:
+        raise ValueError("指定特征容积不足以容纳收缩段，不能将圆筒长度裁成零。")
     L_cyl = V_cyl / Ac
     L_total = L_cyl + L_conv                                    # 喷注面→喉部"表观室长"
 
@@ -150,7 +152,7 @@ def size_combustion_chamber(
         f"  特征长度 L* = {l_star:.3f} m → 室容积 V_c = L*·A_t = {Vc*1e3:.2f} L",
         f"  收缩比 ε_c = {eps_c:.2f} → 室截面 A_c = {Ac*1e4:.1f} cm²，室直径 D_c = {D_c*1e3:.1f} mm",
         f"  喉部 D_t = {D_t*1e3:.1f} mm（A_t = {At*1e4:.2f} cm²）",
-        f"  收缩段 L_conv = {L_conv*1e3:.1f} mm（入口弧 R1 + 直锥 β={conv_half_angle_deg:.0f}° + 喉部圆弧 Ru=1.5·Rt），"
+        f"  收缩段 L_conv = {L_conv*1e3:.1f} mm（入口弧 R1 + 直锥 β={conv_half_angle_deg:.0f}° + 实际喉部圆弧 Ru={_cg['Ru_m']*1e3:.2f} mm），"
         f"体积 V_conv = {V_conv*1e3:.2f} L（占 V_c 的 {100.0*V_conv/max(Vc,1e-12):.0f}%）",
         f"  圆筒段 L_cyl = {L_cyl*1e3:.1f} mm（V_cyl = V_c − V_conv = {V_cyl*1e3:.2f} L）"
         + ("  ⚠ 收缩段已占满 V_c，无圆筒段：建议增大 L* 或减小 ε_c/β" if cyl_clamped else ""),

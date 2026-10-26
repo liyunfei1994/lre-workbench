@@ -74,7 +74,7 @@ def compute_geometry(
     参数
     ────
     cycle_results       : CycleResults 对象（来自 cycle.py 的求解结果）
-    contraction_ratio   : 燃烧室/喉部面积比（Raptor ~2.5）
+    contraction_ratio   : 燃烧室/喉部面积比（缺少 inputs 对应字段时的后备值）
     l_star              : 特征长度 [m]（LOX/CH₄ 典型 0.8–1.2）
     theta_conv_deg      : 收缩段半角 [°]
     bell_fraction       : 钟形长度比（0.80 = 80% bell，TOP 喷管）
@@ -91,12 +91,31 @@ def compute_geometry(
     # 喷管轮廓/CSV 不一致。现统一：两处用同一个 β、同一个 bell_fraction。
     theta_conv_deg = float(getattr(inputs, "chamber_conv_half_angle_deg", theta_conv_deg))
     bell_fraction = float(getattr(inputs, "nozzle_bell_fraction", bell_fraction))
+    contraction_ratio = float(getattr(inputs, "chamber_contraction_ratio", contraction_ratio))
+    l_star = float(getattr(inputs, "chamber_l_star_m", l_star))
 
     # ── 基本尺寸（从喷管热力学结果）──────────────────
     At = comps["nozzle"].outputs["At_m2"]
     Ae = comps["nozzle"].outputs["Ae_m2"]
     eps = inputs.expansion_ratio
     pc = inputs.pc
+    cooling_component = comps.get("cooling_channel")
+    cooling_profile = getattr(cooling_component, "profile", None)
+    if cooling_profile is not None:
+        if not isinstance(cooling_profile, dict):
+            raise ValueError("已给冷却剖面必须为包含实际几何的记录。")
+        cg = cooling_profile.get("geometry", {})
+        if (cooling_profile.get("model_id") != "regen_quasi1d_ph_v1"
+                or not isinstance(cg, dict) or not cg.get("nodes")):
+            raise ValueError("冷却剖面缺少实际几何，不能用喷管所需面积重新生成展示轮廓。")
+        # Off-design nozzle At is a required area being matched by an outer
+        # solve. The physical fixed hardware is the area already used by cooling.
+        At = pi * float(cg["r_t_m"]) ** 2
+        eps = float(cg["expansion_ratio"])
+        Ae = At * eps
+        contraction_ratio = (float(cg["r_c_m"]) / float(cg["r_t_m"])) ** 2
+        theta_conv_deg = float(cg.get("conv_half_angle_deg", theta_conv_deg))
+        bell_fraction = float(cg.get("bell_fraction", bell_fraction))
 
     rt = math.sqrt(At / pi)
     re = math.sqrt(Ae / pi)
@@ -105,8 +124,7 @@ def compute_geometry(
     safety = getattr(inputs, "chamber_wall_safety_factor", 1.5)
 
     # ── 燃烧室 ────────────────────────────────────────
-    # V12：把喉部热流(冷却模块)、冷却剂压力(燃料泵出口)、内衬/外壳材料物性传入，
-    # 让内衬按"传热限"、外壳按"高压冷却剂环向应力"分别定厚（对标 Raptor 通道壁）。
+    # 内衬与通道优先保持已解剖面尺寸；外壳仅报告当前压力下的薄壁设计估算。
     _cool = comps["cooling_channel"].outputs if "cooling_channel" in comps else {}
     _q_throat_W = float(_cool.get("q_throat_MW_m2", 0.0) or 0.0) * 1.0e6
     _p_coolant = float(s.get("fuel_pump_out_pressure_Pa", pc) or pc)
@@ -114,7 +132,7 @@ def compute_geometry(
     # 通道宽来自冷却输入；几何估算/3D 图/FEA 由此与再生冷却物理一致，不再各算各的。
     _n_ch = int(_cool.get("n_channels", 0) or 0)
     _ch_h_mm = float(_cool.get("channel_height_mm", 0.0) or 0.0)
-    _ch_w_mm = float(getattr(inputs, "cooling_channel_width_m", 0.0) or 0.0) * 1000.0
+    _ch_w_mm = float(getattr(inputs, "cooling_channel_width_m", 0.0) or 0.0) * 1000.0 * math.sqrt(contraction_ratio)
     # V19 审查修复：材料按**用户所选**（inputs.chamber_inner/outer_wall_material）解析，
     # 与 cycle.py 的分层壁厚计算完全同口径——旧版此处恒查 DEFAULT 表，用户改选
     # GRCop-42/Hastelloy X 时几何页壁厚与部件卡壁厚会再度分裂。
@@ -135,6 +153,8 @@ def compute_geometry(
         channel_height_mm=_ch_h_mm,
         n_channels=_n_ch, channel_width_mm=_ch_w_mm,
         conv_half_angle_deg=theta_conv_deg,
+        liner_thickness_mm=float(getattr(inputs, "cooling_wall_thickness_m", 0.5e-3)) * 1000.,
+        cooling_profile=cooling_profile,
     )
     rc = chamber.radius_m
 

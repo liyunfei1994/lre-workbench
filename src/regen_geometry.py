@@ -28,7 +28,7 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
     divergent area ratio, interpolated on the common contour. Inlet/outlet
     manifold transitions are added by the flow solver, not this geometry.
     """
-    from geometry.nozzle import full_hot_gas_contour
+    from geometry.nozzle import full_hot_gas_geometry
 
     r_t, r_c = _positive("r_t", r_t), _positive("r_c", r_c)
     L_cyl = _positive("L_cyl", L_cyl)
@@ -51,10 +51,11 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
 
     # n_cyl changes with refinement; the former fixed 14 cells prevented a
     # meaningful complete-domain grid-convergence check.
-    xs, rs, x_throat = full_hot_gas_contour(
+    contour = full_hot_gas_geometry(
         r_t, r_t * math.sqrt(eps), r_c, eps, L_cyl,
         bell_fraction=bell_fraction, theta_conv_deg=conv_half_angle_deg,
         n_points=int(n_points), n_cyl=max(6, int(n_points) // 8))
+    xs, rs, x_throat = (contour[k] for k in ("contour_x", "contour_r", "x_throat_m"))
     full_exit = xs[-1]
     clipped = []
     r_end = r_t * math.sqrt(cover)
@@ -130,10 +131,15 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                     area_ratio=(cell["r_m"]/r_t)**2,
                     n_channels=a["n_channels"], supersonic=cell["x_m"] > x_throat)
         cells.append(cell)
-    return dict(version=1, source="geometry.nozzle.full_hot_gas_contour",
+    return dict(version=2, source=contour["source"],
                 flow_direction="counterflow" if counterflow else "coflow",
                 nodes=nodes, cells=cells, x_throat_m=x_throat,
                 r_t_m=r_t, r_c_m=r_c, L_cyl_m=L_cyl,
+                L_conv_m=contour["L_conv_m"],
+                throat_upstream_radius_m=contour["throat_upstream_radius_m"],
+                throat_downstream_radius_m=contour["throat_downstream_radius_m"],
+                conv_half_angle_deg=contour["conv_half_angle_deg"],
+                bell_fraction=contour["bell_fraction"],
                 full_nodes=full_nodes, full_nodes_direction="gas_flow",
                 full_exit_x_m=full_exit, coverage_end_x_m=points[-1][0],
                 cover_eps=cover, expansion_ratio=eps,

@@ -499,7 +499,7 @@ class ChamberDesignPanel(QWidget):
         for text, slot in [
             ("＋ 添加断点行", self._table_add_row),
             ("－ 删除选中行", self._table_del_row),
-            ("从当前标量生成单行", self._table_from_scalars),
+            ("从已解剖面生成节点表", self._table_from_scalars),
             ("清空（回退单段模式）", self._table_clear),
         ]:
             b = QPushButton(text)
@@ -568,7 +568,7 @@ class ChamberDesignPanel(QWidget):
             rows.append(cd.ChannelRow(
                 anchor=anchor or "x_mm",
                 x_mm=_num(1, 0.0),
-                n=int(_num(2, 300)),
+                n=_num(2, 300),
                 w_mm=_num(3, 1.5),
                 h_mm=_num(4, 5.0),
                 t_mm=_num(5, 0.5),
@@ -594,8 +594,8 @@ class ChamberDesignPanel(QWidget):
                               if row.anchor in cd.ANCHORS else 4)
         combo.currentIndexChanged.connect(lambda *_: self._on_table_edited(None))
         self.chan_table.setCellWidget(r, 0, combo)
-        for col, val in ((1, f"{row.x_mm:g}"), (2, str(row.n)), (3, f"{row.w_mm:g}"),
-                         (4, f"{row.h_mm:g}"), (5, f"{row.t_mm:g}")):
+        for col, val in ((1, f"{row.x_mm:.17g}"), (2, str(int(row.n))), (3, f"{row.w_mm:.17g}"),
+                         (4, f"{row.h_mm:.17g}"), (5, f"{row.t_mm:.17g}")):
             self.chan_table.setItem(r, col, QTableWidgetItem(val))
 
     def _table_add_row(self):
@@ -615,10 +615,24 @@ class ChamberDesignPanel(QWidget):
             return
         res = getattr(self.main, "last_results", None)
         co = None
+        profile = None
         if res is not None and "cooling_channel" in res.components:
             co = res.components["cooling_channel"].outputs
-        self._table_set_rows(cd.default_rows_from_inputs(inp, co))
+            profile = getattr(res.components["cooling_channel"], "profile", None)
+        if res is None or cd.snapshot_stale_fields(
+                cd.BoundarySnapshot(inputs_fingerprint=vars(res.inputs)), inp):
+            QMessageBox.warning(self, "需要当前结果", "参数已修改或尚无计算结果；请先运行当前设计点再生成节点采样表。")
+            return
+        try:
+            rows = cd.default_rows_from_inputs(inp, co, cooling_profile=profile)
+        except (ValueError, KeyError, TypeError) as exc:
+            QMessageBox.warning(self, "无法生成节点采样表", str(exc))
+            return
+        self._table_set_rows(rows)
         self._on_table_edited(None)
+        QMessageBox.information(self, "已生成节点采样表",
+            "已保留当前已解剖面的全部几何节点，按绝对轴向坐标分段线性插值。\n"
+            "这是当前几何的节点采样表示，不是跨网格或新轮廓下的解析等效规则；修改后需重算完整循环。")
 
     def _table_clear(self):
         self._table_set_rows([])

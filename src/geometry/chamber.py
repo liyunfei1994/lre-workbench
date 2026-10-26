@@ -32,6 +32,8 @@ def compute_chamber(
     conv_half_angle_deg: float = 30.0,
     n_channels: int = 0,
     channel_width_mm: float = 0.0,
+    liner_thickness_mm: float | None = None,
+    cooling_profile: dict | None = None,
 ) -> ChamberGeometry:
     """
     参数
@@ -43,16 +45,54 @@ def compute_chamber(
     sigma_allow       : （保留兼容）内壁材料许用应力 [Pa]，V12 已不用于定厚
     safety            : 壁厚安全系数（用于外壳环向应力）
 
-    V12 新增（按各层真实失效模式分别定厚，对标 Raptor 通道壁构造）
+    保存几何与概念设计估算
     ────
-    q_throat_W_m2       : 喉部热流 [W/m²]（来自冷却模块）；定内衬传热限厚度
-    coolant_pressure_pa : 冷却剂压力 [Pa]（≈燃料泵出口，约 2×pc）；定外壳环向应力
-    k_liner_WmK         : 内衬导热系数 [W/(m·K)]（GRCop-84 ≈303）
-    sigma_jacket_pa     : 外壳屈服强度 [Pa]（Inconel 718 热态 ≈950 MPa）
-    channel_height_mm   : 冷却通道径向深 [mm]；0=经验默认
-    dT_cond_allow_K     : 内衬允许导热温降 [K]（铜衬典型 200–300 K）
+    cooling_profile    : 已解冷却剖面；提供时优先采用其实际尺寸，不再次定尺寸。
+                         返回通道标量代表喷注面端截面，完整分布仍由剖面保存。
+    liner_thickness_mm : 指定内衬厚度 [mm]；不裁切。没有剖面且未指定时，
+                         才使用 k·ΔT/q 的历史估算，缺热流时为 1 mm。
+    channel_height_mm  : 指定通道深 [mm]；不裁切。无剖面且为零时估算为 4 mm。
+    q_throat_W_m2, k_liner_WmK, dT_cond_allow_K : 仅供上述未定内衬厚度的估算。
+    coolant_pressure_pa, sigma_jacket_pa : 与 pc、安全系数共同估算薄壁外壳厚度。
+                         该值不是已冻结的硬件厚度，也不代替结构强度或寿命校核。
     """
     pi = math.pi
+    for name, value in (("At", At), ("contraction_ratio", contraction_ratio),
+                        ("l_star", l_star), ("pc", pc), ("safety", safety),
+                        ("sigma_jacket_pa", sigma_jacket_pa)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} 必须为有限正数。")
+    if contraction_ratio <= 1:
+        raise ValueError("燃烧室收缩比必须大于1。")
+
+    # A solved cooling profile is physical geometry, not a suggestion for a
+    # second sizing pass. Chamber scalars represent its injector-end section;
+    # the full axial distribution remains in the saved profile.
+    profile_geometry = None
+    if cooling_profile is not None:
+        if not isinstance(cooling_profile, dict):
+            raise ValueError("已给冷却剖面必须为包含实际几何的记录。")
+        profile_geometry = cooling_profile.get("geometry")
+        if (cooling_profile.get("model_id") != "regen_quasi1d_ph_v1"
+                or not isinstance(profile_geometry, dict)
+                or not profile_geometry.get("nodes")):
+            raise ValueError("已给冷却剖面缺少可识别的实际几何，不能回退重建。")
+        node = min(profile_geometry["nodes"], key=lambda row: row["x_m"])
+        for key in ("width_m", "height_m", "wall_thickness_m", "n_channels"):
+            if not math.isfinite(node[key]) or node[key] <= 0:
+                raise ValueError(f"冷却剖面的实际通道几何 {key} 无效，不能回退估算。")
+        for key in ("r_t_m", "r_c_m", "L_cyl_m"):
+            if not math.isfinite(profile_geometry[key]) or profile_geometry[key] <= 0:
+                raise ValueError(f"冷却剖面几何 {key} 无效。")
+        At = pi * profile_geometry["r_t_m"] ** 2
+        contraction_ratio = (profile_geometry["r_c_m"] / profile_geometry["r_t_m"]) ** 2
+        if contraction_ratio <= 1:
+            raise ValueError("冷却剖面的燃烧室半径必须大于喉部半径。")
+        conv_half_angle_deg = float(profile_geometry.get("conv_half_angle_deg", conv_half_angle_deg))
+        n_channels = node["n_channels"]
+        channel_width_mm = 1000 * node["width_m"]
+        channel_height_mm = 1000 * node["height_m"]
+        liner_thickness_mm = 1000 * node["wall_thickness_m"]
 
     Ac = contraction_ratio * At
     rc = math.sqrt(Ac / pi)
@@ -62,50 +102,54 @@ def compute_chamber(
     rt = math.sqrt(At / pi)
     from chamber_contour import convergent_geometry
     _cg = convergent_geometry(rc, rt, conv_half_angle_deg)
-    L_conv = _cg["L_conv_m"]
     V_conv = _cg["V_conv_m3"]
-    Lc = max(Vc - V_conv, 0.0) / Ac
+    if profile_geometry is not None:
+        Lc = profile_geometry["L_cyl_m"]
+        Vc = Ac * Lc + V_conv
+        l_star = Vc / At
+    else:
+        if Vc <= V_conv:
+            raise ValueError("指定特征容积不足以容纳收缩段，不能将圆筒长度裁成零。")
+        Lc = (Vc - V_conv) / Ac
 
-    # ── 分层壁厚（V12：按各层真实失效模式分别定厚，对标 Raptor 通道壁）──
-    #
-    # 真实再生冷却"通道壁"是三明治：薄铜内衬 + 铣槽冷却通道 + 镍基承力外壳，
-    # 三层定厚判据完全不同：
-    #   ① 内衬(铜)   —— 传热限：热流要"穿过"内衬进冷却剂，越厚热侧越烫。
-    #        ΔT_导 = q·t/k  →  t = k·ΔT_允许 / q     （Raptor 喉部 ≈0.5–1 mm）
-    #   ② 通道深     —— 冷却需求（冷却剂流速/吸热），取冷却模块值或经验 4 mm。
-    #   ③ 外壳(镍基) —— 环向应力限，包容的是 *高压冷却剂*（≈泵出口压，约 2×pc），
-    #        不是 pc！   t = SF·P_冷却剂·rc / σ_外壳   （薄壁 Barlow）
-    #
-    # 旧版(V7)用"单一 Barlow(0.25pc, 铜的弱强度) + 15/25/60% 切分"——载荷与材料
-    # 都张冠李戴：巧合凑出 ~24 mm 总厚，但内衬虚高 3–4 倍、外壳对冷却剂压力反而偏薄。
-
-    # ① 内衬：传热限  t = k·ΔT / q
-    if q_throat_W_m2 > 1.0e3:
+    # 内衬与通道保持已给几何；只有缺少几何时才使用历史概念设计估算。
+    if liner_thickness_mm is not None:
+        t_inner_mm = float(liner_thickness_mm)
+    elif q_throat_W_m2 > 1.0e3:
         t_inner_mm = k_liner_WmK * dT_cond_allow_K / q_throat_W_m2 * 1000.0
     else:
-        t_inner_mm = 1.0   # 无热流数据时的 Raptor 量级默认
-    t_inner_mm = max(0.5, min(1.5, t_inner_mm))
+        t_inner_mm = 1.0   # 无热流和厚度数据时的工程估算，不是实机参数。
+    if not math.isfinite(t_inner_mm) or t_inner_mm <= 0:
+        raise ValueError("内衬厚度必须为有限正数；不能隐性裁切给定几何。")
 
     # ② 通道深：优先用冷却模块解出的实际通道高（与再生冷却物理同口径），缺则经验 4 mm
-    t_chan_mm = channel_height_mm if channel_height_mm > 0.1 else 4.0
-    t_chan_mm = max(2.0, min(15.0, t_chan_mm))
+    if not math.isfinite(channel_height_mm) or channel_height_mm < 0:
+        raise ValueError("通道深度必须非负；零仅表示未提供设计估算输入。")
+    t_chan_mm = channel_height_mm if channel_height_mm > 0 else 4.0
 
     # ③ 外壳：环向应力限（包容高压冷却剂，非 pc）
     p_struct = coolant_pressure_pa if coolant_pressure_pa > pc else pc
     t_outer_mm = safety * p_struct * rc / sigma_jacket_pa * 1000.0
-    t_outer_mm = max(3.0, min(40.0, t_outer_mm))
+    if not math.isfinite(t_outer_mm) or t_outer_mm <= 0:
+        raise ValueError("外壳设计厚度必须为有限正数。")
 
     t_wall_mm = t_inner_mm + t_chan_mm + t_outer_mm
 
     # 冷却通道周向分布:优先用冷却模块的设计值（通道数 N、通道宽），保证几何估算/3D 图/
     # FEA 与再生冷却物理**同一口径**；缺失时回退到"目标节距 ~4 mm"的几何估算。
     circumference_mm = 2.0 * pi * rc * 1000.0
+    if not math.isfinite(n_channels) or n_channels < 0 or int(n_channels) != n_channels:
+        raise ValueError("通道数必须为非负整数；零表示未提供设计估算输入。")
     if n_channels and n_channels > 0:
         n_cool = int(n_channels)
     else:
         n_cool = max(40, int(round(circumference_mm / 4.0)))
     actual_pitch_mm = circumference_mm / max(n_cool, 1)
-    ch_width_mm = channel_width_mm if channel_width_mm > 0.05 else 0.55 * actual_pitch_mm
+    if not math.isfinite(channel_width_mm) or channel_width_mm < 0:
+        raise ValueError("通道宽度必须非负。")
+    ch_width_mm = channel_width_mm if channel_width_mm > 0 else 0.55 * actual_pitch_mm
+    if ch_width_mm >= actual_pitch_mm:
+        raise ValueError("通道宽度必须小于实际节距；不能裁窄后继续展示。")
     ch_height_mm = t_chan_mm
 
     # 燃烧室内表面积 (圆柱段;不含 dome / 收缩段)
