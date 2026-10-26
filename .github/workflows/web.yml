@@ -13,7 +13,10 @@ jobs:
   web:
     name: Web Python 3.14 / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # Real FFSC/GG worker cases include coupled regenerative cooling. The full
+    # suite on hosted Linux reaches those cases after about 13 minutes; retain
+    # all numerical checks and allow them to finish on shared runner hardware.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

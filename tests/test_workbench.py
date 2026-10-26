@@ -149,6 +149,14 @@ class DesktopTests(unittest.TestCase):
     def test_actual_gg_worker_and_result_staleness(self):
         w = self.window
         w._apply_engine_preset("tq12a_gg")
+        # This integration test covers real GG solving, UI unlock and result
+        # identity/staleness. Use an explicit system-budget case, also used by
+        # the real-library GG feed-state tests, rather than making worker/UI
+        # correctness depend on nested quasi-1D cooling convergence time.
+        values = preset_input_values("tq12a_gg")
+        values.update(cooling_bartz_mode=0., cooling_heat_load=10e6,
+                      cooling_dp_pa=2e6)
+        w._write_input_values(values)
         w.last_results = None
         error_messages = []
         modal_guard = patch.object(QMessageBox, "critical", side_effect=lambda parent, title, message: error_messages.append(message))
@@ -160,6 +168,9 @@ class DesktopTests(unittest.TestCase):
         self.wait_for_worker(75)
         self.assertIsNotNone(w.last_results, " | ".join(error_messages))
         self.assertEqual(w.last_results.inputs.cycle_type, "gg")
+        self.assertEqual(w.last_results.inputs.cooling_bartz_mode, 0.)
+        self.assertEqual(w.last_results.summary["numerical_converged"], 1.)
+        self.assertFalse(error_messages)
         self.assertTrue(w.header_run.isEnabled())
         self.assertEqual(w._result_signature, w._signature())
         self.assertGreater(w.last_results.summary["thrust_N"], 0)
