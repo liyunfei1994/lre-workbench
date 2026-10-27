@@ -58,6 +58,16 @@ def preburner_temperature_constraint(inputs, side: str) -> dict:
             "limit_K": read(prefix) if active else None}
 
 
+def wall_temperature_constraint(inputs) -> dict:
+    """Resolve the optional project wall limit, independently of material data."""
+    read = inputs.get if isinstance(inputs, dict) else lambda key, default=None: getattr(inputs, key, default)
+    status = read("cooling_wall_temp_limit_status", "provisional")
+    basis = read("cooling_wall_temp_limit_basis", "")
+    basis = basis.strip() if isinstance(basis, str) else ""
+    return {"status": status, "basis": basis,
+            "limit_K": read("cooling_wall_temp_limit_K") if status in ("provisional", "documented") else None}
+
+
 def _check_range(
     name: str,
     value: float,
@@ -173,15 +183,16 @@ class EngineInputs:
     # ---------- 再生冷却通道几何（V14：正式纳入，之前用 getattr 读但未定义 → 锁死）----------
     # 几何、换热系数和材料常数均为设计假设。自动定尺寸与水力估算是低阶模型，
     # 启用后也不代表通道几何、热量积分范围与压降模型已获得试验验证。
-    cooling_n_channels: float = 300.0        # 冷却通道数（周向，受室周长约束；典型 150–400）
+    cooling_n_channels: float = 300.0        # 可编辑的示例初选数量；非推荐值或优化结果
     cooling_channel_width_m: float = 1.5e-3  # 通道周向宽 [m]
-    cooling_channel_height_m: float = 5.0e-3 # 通道径向深 [m]（auto_size=1 时被反算覆盖）
+    cooling_channel_height_m: float = 8.0e-3 # 示例起始通道径向深 [m]，非推荐值
     cooling_wall_thickness_m: float = 0.5e-3 # 内衬热壁厚 [m]（GRCop ~0.5–1 mm）
     cooling_wall_conductivity: float = 320.0 # 内衬导热 [W/(m·K)]（GRCop-84 @600K）
     cooling_htc_enhancement: float = 1.0     # 喉部弯曲/入口段换热强化因子（1.0–1.5）
     # 固定通道数与宽度，用目标流速作概念尺寸约束，反算通道深度。
-    cooling_channel_auto_size: float = 1.0   # 1=按目标流速反算通道深度（默认），0=用上面固定几何
-    cooling_target_velocity_ms: float = 100.0  # 目标冷却剂流速 [m/s]（再生通道典型 40–150）
+    cooling_channel_auto_size: float = 0.0   # 1=指定截面速度定深，0=给定几何；不是整体方案优化
+    cooling_sizing_reference: str = "coolant_inlet_velocity"
+    cooling_target_velocity_ms: float = 100.0  # 指定参考截面速度 [m/s]；只在定深模式参与
     # 旧方案兼容字段，不再控制物理模型。准一维模式同时求解热量与压降。
     cooling_dp_auto: float = 0.0
     cooling_channel_rel_roughness: float = 0.003  # 通道相对粗糙度 ε/D_h（AM 打印态 ~3e-3）
@@ -191,7 +202,9 @@ class EngineInputs:
     cooling_marching_enable: float = 1.0     # 旧方案兼容字段；统一内核始终返回沿程结果
     cooling_grid_points: float = 120.0      # 唯一准一维网格分辨率；不改变冷却物理模式
     cooling_cover_eps: float = 0.0           # 再生冷却覆盖到的面积比（0=全喷管 ε；如填 8 表示只冷到 ε=8）
-    cooling_wall_temp_limit_K: float = 800.0 # 用户给定热面壁温限值 [K]；不替代材料寿命校核
+    cooling_wall_temp_limit_K: float = 800.0 # 保留的示例存值；仅启用约束时参与验收
+    cooling_wall_temp_limit_status: str = "unset"
+    cooling_wall_temp_limit_basis: str = ""
     # 燃气辐射发射率 ε_g（灰气体一阶代理，marching 辐射热流用；V19 起为正式输入字段，
     # 之前 marching 用 getattr 读取但字段不存在 → 永远只能用 0.20 默认值）
     cooling_gas_emissivity: float = 0.20
@@ -422,9 +435,13 @@ class EngineInputs:
 
     @classmethod
     def from_dict(cls, values):
-        """Load saved input documents without changing the historical contour."""
+        """Load old input documents without silently changing their geometry or limits."""
         copied = dict(values)
         copied.setdefault("nozzle_contour_method", "legacy_log_v1")
+        copied.setdefault("cooling_channel_auto_size", 1.0)
+        copied.setdefault("cooling_channel_height_m", 5.0e-3)
+        copied.setdefault("cooling_sizing_reference", "legacy_inlet_density_throat_width")
+        copied.setdefault("cooling_wall_temp_limit_status", "provisional")
         return cls(**copied)
 
     def __post_init__(self):
@@ -526,7 +543,6 @@ class EngineInputs:
         _check_range("cooling_htc_enhancement（换热强化因子）", self.cooling_htc_enhancement, lo=0.5, hi=2.0)
         _check_range("cooling_channel_auto_size（自动定尺寸开关）", self.cooling_channel_auto_size, lo=0.0, hi=1.0)
         _check_range("cooling_target_velocity_ms（目标冷却剂流速）", self.cooling_target_velocity_ms, lo=10.0, hi=300.0)
-        _warn_range("cooling_target_velocity_ms（目标冷却剂流速）", self.cooling_target_velocity_ms, 40.0, 150.0)
         _check_range("cooling_dp_auto（水力压降耦合开关）", self.cooling_dp_auto, lo=0.0, hi=1.0)
         _check_range("cooling_channel_rel_roughness（通道相对粗糙度）", self.cooling_channel_rel_roughness, lo=0.0, hi=0.05)
         _check_range("cooling_channel_k_minor（局部损失动压头数）", self.cooling_channel_k_minor, lo=0.0, hi=20.0)
@@ -563,7 +579,17 @@ class EngineInputs:
             raise ValidationError("cooling_grid_points 必须为整数。")
         if self.cooling_cover_eps != 0.0:
             _check_range("cooling_cover_eps（再生冷却覆盖面积比）", self.cooling_cover_eps, lo=1.5, hi=400.0)
-        _check_range("cooling_wall_temp_limit_K（热面壁温限值）", self.cooling_wall_temp_limit_K, lo=400.0, hi=1500.0)
+        if self.cooling_sizing_reference not in ("coolant_inlet_velocity", "legacy_inlet_density_throat_width"):
+            raise ValidationError("cooling_sizing_reference 必须为 coolant_inlet_velocity 或 legacy_inlet_density_throat_width。")
+        wall_constraint = wall_temperature_constraint(self)
+        if wall_constraint["status"] not in PREBURNER_LIMIT_STATUSES:
+            raise ValidationError("cooling_wall_temp_limit_status 必须是 unset、provisional 或 documented。")
+        if wall_constraint["status"] == "documented" and not wall_constraint["basis"]:
+            raise ValidationError("cooling_wall_temp_limit_basis：已有依据状态必须填写该限值的适用条件和来源。")
+        if wall_constraint["status"] != "unset":
+            limit = wall_constraint["limit_K"]
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
+                raise ValidationError("cooling_wall_temp_limit_K 必须是大于 0 K 的有限数值；数值有效不代表材料许可。")
         _check_range("film_cooling_fraction（膜冷却流量比例）", self.film_cooling_fraction, lo=0.0, hi=0.15)
         _check_range("film_effectiveness_initial（膜初始效能）", self.film_effectiveness_initial, lo=0.1, hi=1.0)
         _check_range("film_decay_length_m（膜效能衰减长）", self.film_decay_length_m, lo=0.0, hi=3.0)

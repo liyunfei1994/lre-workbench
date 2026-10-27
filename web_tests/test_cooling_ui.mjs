@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {coolingDisplayState,coolingCurveSegments,coolingMaterialState,coolingModelSummaryState,renderCooling} from "../webapp/static/cooling.js";
+import {coolingDisplayState,coolingCurveSegments,coolingMaterialState,coolingModelSummaryState,coolingChannelDesignState,coolingWallConstraintState,renderCooling} from "../webapp/static/cooling.js";
 import {renderAnalysis} from "../webapp/static/results.js";
 
 function record(){
@@ -389,4 +389,96 @@ test("saved budget records keep their recorded totals and never receive a quasi-
   assert.match(html,/20 <small>MW/);
   assert.doesNotMatch(html,/本次模型与计算范围|冷却剂流向|统一准一维 · 保存记录|<svg/);
   assert.deepEqual(result,before);
+});
+
+test("wall constraint states keep inactive values and provisional checks separate from documented limits",()=>{
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  const audit=profile.material_applicability;
+  Object.assign(audit,{wall_temperature_constraint_status:"unset",wall_temperature_limit_K:null,
+    wall_temperature_limit_declared_K:800,wall_temperature_limit_status:"not_evaluated",wall_temperature_limit_basis:""});
+  let state=coolingWallConstraintState(profile),html=renderCooling(result);
+  assert.equal(state.kind,"unknown");assert.equal(state.limit,null);
+  assert.match(html,/壁温约束尚未评估/);
+  assert.match(html,/保留数值 800 K 未启用，不参与验收/);
+  assert.doesNotMatch(html,/本次方案限值：800 K/);
+  Object.assign(audit,{wall_temperature_constraint_status:"provisional",wall_temperature_limit_K:800,
+    wall_temperature_limit_status:"provisional_within_limit"});
+  state=coolingWallConstraintState(profile);html=renderCooling(result);
+  assert.equal(state.kind,"review");assert.match(html,/暂定限值内 · 依据待核实/);
+  Object.assign(audit,{wall_temperature_constraint_status:"documented",wall_temperature_limit_basis:"Req A / aged specimen / mission X",
+    wall_temperature_limit_status:"within_limit"});
+  state=coolingWallConstraintState(profile);html=renderCooling(result);
+  assert.equal(state.kind,"pass");assert.match(html,/未超过有依据的方案限值/);
+  assert.match(html,/Req A \/ aged specimen \/ mission X/);
+  assert.match(html,/导热率数据温区越界/); // A wall allowance does not repair the dataset range.
+  audit.wall_temperature_limit_basis=" ";
+  assert.equal(coolingWallConstraintState(profile).kind,"unknown");
+});
+
+test("legacy wall comparisons cannot acquire new constraint evidence from current inputs",()=>{
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  profile.material_applicability.wall_temperature_limit_status="within_limit";
+  result.calculation.inputs={cooling_wall_temp_limit_status:"documented",cooling_wall_temp_limit_basis:"NEW BASIS"};
+  const html=renderCooling(result);
+  assert.equal(coolingWallConstraintState(profile).kind,"review");
+  assert.match(html,/历史数值未超限 · 限值依据未记录/);
+  assert.doesNotMatch(html,/NEW BASIS|未超过有依据的方案限值/);
+});
+
+function channelDesignRecord(){
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  const section=(x,v)=>({kind:"channel",x_m:x,velocity_ms:v,rho_kgm3:400,A_flow_m2:.005,
+    width_m:.0015,height_m:.008,pitch_m:.0024,rib_m:.0009});
+  profile.channel_sizing={version:1,mode:"legacy_reference",reference:"legacy_inlet_density_throat_width",
+    status:"historical_mixed_reference",target_velocity_ms:100,actual_velocity_ms:null,velocity_residual_ms:null};
+  profile.channel_design_summary={version:1,inlet:section(1,17.07),throat:section(.5,131.75),
+    maximum_velocity_node:section(.4,150),geometry_ranges:{pitch_m:[.0024,.014],rib_m:[.0009,.005]},
+    maximum_cell_velocity_ms:149.7};
+  return result;
+}
+
+test("saved channel diagnostics distinguish reference speed from actual inlet throat and maximum",()=>{
+  const result=channelDesignRecord(),profile=result.calculation.components.cooling_channel.profile;
+  result.calculation.inputs={cooling_target_velocity_ms:999,cooling_channel_height_m:99};
+  const before=structuredClone(result),state=coolingChannelDesignState(profile),html=renderCooling(result);
+  assert.equal(state.inlet.velocity_ms,17.07);assert.equal(state.pitch,"2.4–14");
+  for(const text of ["实际通道入口速度","17.07 m/s","实际喉部节点速度","131.75 m/s","沿程最大节点速度",
+    "150 m/s","历史定深参数：100 m/s","参考速度不是入口速度，也不是喉部速度","肋宽范围 0.9–5 mm"])
+    assert.ok(html.includes(text),text);
+  assert.doesNotMatch(html,/999 m\/s/);
+  const details=html.match(/<details class="cool-details cool-channel-detail">[\s\S]*?<\/details>/)?.[0];
+  assert.ok(details);assert.doesNotMatch(details,/<details[^>]*\bopen\b/);
+  assert.deepEqual(result,before);
+});
+
+test("actual inlet sizing and fixed hardware use saved mode and verification only",()=>{
+  const result=channelDesignRecord(),profile=result.calculation.components.cooling_channel.profile;
+  Object.assign(profile.channel_sizing,{mode:"coolant_inlet_velocity",status:"converged_and_march_verified",
+    target_velocity_ms:17.07,actual_velocity_ms:17.07,velocity_residual_ms:0});
+  let html=renderCooling(result);
+  assert.match(html,/实际通道入口速度定深/);assert.match(html,/入口定深已收敛，并由完整沿程解复核/);
+  assert.match(html,/入口目标速度：17.07 m\/s；速度残差：0 m\/s/);
+  Object.assign(profile.channel_sizing,{mode:"fixed_geometry",status:"prescribed_geometry"});
+  html=renderCooling(result);
+  assert.match(html,/通道尺寸已给定/);assert.doesNotMatch(html,/入口目标速度：|历史定深参数：/);
+});
+
+test("missing channel diagnostics remain missing rather than rederived from profile geometry",()=>{
+  const result=channelDesignRecord(),profile=result.calculation.components.cooling_channel.profile;
+  delete profile.channel_sizing;profile.channel_design_summary.version=999;
+  const state=coolingChannelDesignState(profile),html=renderCooling(result);
+  assert.equal(state.pitch,"未记录");assert.equal(state.inlet.velocity_ms,undefined);
+  assert.match(html,/定深方式未记录/);assert.match(html,/实际截面读数未记录，不由当前几何重建/);
+  assert.doesNotMatch(html,/17.07 m\/s|131.75 m\/s|历史定深参数：100/);
+});
+
+test("constraint basis is escaped and malformed saved channel values never produce NaN readings",()=>{
+  const result=channelDesignRecord(),profile=result.calculation.components.cooling_channel.profile;
+  Object.assign(profile.material_applicability,{wall_temperature_constraint_status:"documented",wall_temperature_limit_basis:"<script>alert(1)</script>",
+    wall_temperature_limit_status:"within_limit"});
+  profile.channel_design_summary.inlet.velocity_ms=NaN;
+  profile.channel_design_summary.geometry_ranges.rib_m=[.005, .001];
+  const html=renderCooling(result);
+  assert.match(html,/&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html,/<script>|NaN m\/s|肋宽范围 5–1/);
 });

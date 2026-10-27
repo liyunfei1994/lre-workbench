@@ -14,6 +14,8 @@ export function savedInputDocument(value) {
 
 export function mergeInputDefaults(defaults, inputs, savedSnapshot = false) {
   const result = {...defaults, ...inputs};
+  for(const [key,legacy] of Object.entries({cooling_sizing_reference:"legacy_inlet_density_throat_width",cooling_wall_temp_limit_status:"provisional",cooling_channel_auto_size:1,cooling_channel_height_m:0.005}))
+    if(Object.hasOwn(defaults,key) && !Object.hasOwn(inputs,key))result[key]=legacy;
   if(Object.hasOwn(defaults,"nozzle_contour_method") && !Object.hasOwn(inputs,"nozzle_contour_method")) result.nozzle_contour_method="legacy_log_v1";
   if (savedSnapshot && Object.hasOwn(defaults, "methane_thermo_dataset") && !Object.hasOwn(inputs, "methane_thermo_dataset")) result.methane_thermo_dataset = "gri30";
   if(Object.hasOwn(defaults,"wall_thermal_dataset_id") && !Object.hasOwn(inputs,"wall_thermal_dataset_id") &&

@@ -64,13 +64,34 @@ def audit_cell(cell, dataset, manufacturing_state):
     return report
 
 
-def material_summary(channels, wall_limit):
+def wall_limit_assessment(temperatures, wall_limit, constraint_status="provisional", basis=""):
+    """Compare calculated wall temperatures; never limit the thermal solution."""
+    basis = basis.strip() if isinstance(basis, str) else ""
+    active = constraint_status in ("provisional", "documented")
+    numeric = (not isinstance(wall_limit, bool) and isinstance(wall_limit, (int, float))
+               and math.isfinite(wall_limit) and wall_limit > 0)
+    complete = bool(temperatures) and all(isinstance(t, (int, float)) and not isinstance(t, bool)
+        and math.isfinite(t) and t > 0 for t in temperatures)
+    over = sum(t > wall_limit for t in temperatures) if active and numeric and complete else None
+    status = ("not_evaluated" if constraint_status == "unset" else "invalid_constraint"
+              if not active or not numeric or (constraint_status == "documented" and not basis)
+              else "not_evaluated" if not complete else "exceeded" if over else
+              "provisional_within_limit" if constraint_status == "provisional" else "within_limit")
+    return dict(wall_temperature_constraint_status=constraint_status,
+        wall_temperature_limit_basis=basis, wall_temperature_limit_declared_K=wall_limit,
+        wall_temperature_limit_K=wall_limit if active else None,
+        wall_temperature_limit_status=status,
+        wall_over_limit_cell_count=over,
+        wall_over_limit_fraction=over / len(temperatures) if over is not None else None)
+
+
+def material_summary(channels, wall_limit, constraint_status=None, basis=""):
     rows = [c.get("material") for c in channels]
     complete = bool(rows) and all(isinstance(row, dict) for row in rows)
     rows = [row for row in rows if isinstance(row, dict)]
     outside = sum(row["status"] == "out_of_range" for row in rows)
     ids = sorted({row["dataset_id"] for row in rows})
-    return dict(schema_version=1,
+    result = dict(schema_version=1,
         status="missing_evidence" if not complete else "out_of_range" if outside else "within_range",
         dataset_ids=ids, datasets=[get_wall_dataset(key).metadata() for key in ids],
         total_cells=len(channels), audited_cells=len(rows), out_of_range_cell_count=outside,
@@ -80,9 +101,15 @@ def material_summary(channels, wall_limit):
             else "unknown" if not complete or any(r["manufacturing_match"] == "unknown" for r in rows) else "matched",
         manufacturing_match_basis="user_declared_process_category_not_specimen_or_hardware_qualification",
         cells=rows, wall_temperature_limit_K=wall_limit,
-        wall_temperature_limit_status="exceeded" if any(c["T_wall_hot_K"] > wall_limit for c in channels) else "within_limit",
+        wall_temperature_limit_status=("exceeded" if any(c["T_wall_hot_K"] > wall_limit for c in channels) else "within_limit") if constraint_status is None else None,
         active_properties=["conductivity"], inactive_properties=["heat_capacity", "reference_density"],
         out_of_range_policy="constant_endpoint_continuation_for_diagnostics_not_validated",
         conduction_model="integral_k_dT=q_wall_times_thickness",
         fin_model="straight_fin_with_k_at_mean_of_bulk_and_hot_wall_temperatures",
         outer_wall_model="not_in_series_with_liner; no_outer_shell_thermal_capacity_or_strength_validation")
+    # No status argument reproduces historical material summaries exactly.
+    # New calculations must explicitly pass the input constraint status.
+    if constraint_status is not None:
+        result.update(wall_limit_assessment([c.get("T_wall_hot_K") for c in channels],
+                                           wall_limit, constraint_status, basis))
+    return result

@@ -84,11 +84,21 @@ def _wall_material_binding(profile, values):
         require(all(cell["material"].get(key) == value for key, value in audit.items()),
                 "单元数据集、实际温区或制造状态记录不一致")
     require(set(by_id) == used_ids, "快照与实际使用的数据集不一致")
-    checked = material_summary(channels, values["cooling_wall_temp_limit_K"])
+    # Older records stored only the numeric comparison. Recheck that original
+    # contract without upgrading or rewriting their saved acceptance status.
+    has_constraint_contract = "wall_temperature_constraint_status" in saved
+    checked = material_summary(channels, values["cooling_wall_temp_limit_K"],
+        values.get("cooling_wall_temp_limit_status", "provisional") if has_constraint_contract else None,
+        values.get("cooling_wall_temp_limit_basis", ""))
     for key in ("status", "dataset_ids", "total_cells", "audited_cells", "out_of_range_cell_count",
                 "min_temperature_K", "max_temperature_K", "manufacturing_match",
                 "wall_temperature_limit_K", "wall_temperature_limit_status"):
         require(saved.get(key) == checked[key], "适用性汇总与逐单元证据不一致")
+    if has_constraint_contract:
+        for key in ("wall_temperature_constraint_status", "wall_temperature_limit_basis",
+                    "wall_temperature_limit_declared_K", "wall_over_limit_cell_count",
+                    "wall_over_limit_fraction"):
+            require(saved.get(key) == checked[key], "壁温方案约束与保存输入不一致")
     return dict(schema_version=1, assignment=deepcopy(expected_assignment),
         material_boundaries_m=sorted({z[k] for z in zones for k in ("x_start_m", "x_end_m")}),
         datasets=deepcopy(snapshots), status="saved_dataset_identity_checked",

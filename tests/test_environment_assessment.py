@@ -22,7 +22,8 @@ from runtime_environment import environment_fingerprint, environment_report, req
 
 
 def example_result():
-    inputs = EngineInputs()
+    inputs = EngineInputs(cooling_wall_temp_limit_status="documented",
+                          cooling_wall_temp_limit_basis="Synthetic test requirement: 800 K")
     inputs.turb_ox_rotor_material = "inconel718"
     summary = {"solver_residual_norm": 1e-5, "solver_iterations": 8,
                "crossflow_fuel_to_oxpb_margin_MPa": 0.4, "crossflow_lox_to_fuelpb_margin_MPa": 0.3,

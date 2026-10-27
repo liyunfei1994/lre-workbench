@@ -104,9 +104,17 @@ for key in ("cooling_cover_eps", "cooling_n_channels", "cooling_channel_width_m"
     PARAMETER_CONTRACT[key] = _meta("design_input", "准一维冷却的几何输入；只在物理冷却模式生效。沿程面积、热面积和长度由同一轮廓与通道规则生成。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
 PARAMETER_CONTRACT["cooling_cover_eps"]["help"] = "主喷管轮廓上冷却终点的局部截面积 / 喉部面积；0 表示覆盖至主喷管出口。用于确定同一型面的冷却范围，不改变主喷管出口面积比；结果记录实际覆盖位置。"
 PARAMETER_CONTRACT["cooling_channel_height_m"]["visibility"]["all"].append({"key": "cooling_channel_auto_size", "op": "lte", "value": 0})
-PARAMETER_CONTRACT["cooling_channel_auto_size"] = _meta("component_sizing", "额定点按指定入口速度估算通道深度；固定硬件节流沿用该设计深度，不逐点重新设计。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
-PARAMETER_CONTRACT["cooling_target_velocity_ms"] = _meta("component_sizing", "仅通道自动定深时使用的设计速度，不是对每个沿程节点施加固定流速。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}, {"key": "cooling_channel_auto_size", "op": "gt", "value": 0}]})
-for key in ("cooling_channel_auto_size", "cooling_target_velocity_ms", "cooling_n_channels",
+PARAMETER_CONTRACT["cooling_n_channels"]["help"] = "周向通道数量是离散设计变量；300 仅为示例初选值。应与宽度、深度、肋宽和壁厚共同进行热水力候选方案计算，不能由质量守恒唯一反求，也未证明可制造。"
+PARAMETER_CONTRACT["cooling_channel_auto_size"] = _meta("component_sizing", "仅反算给定通道数量和宽度下的深度，不是整体冷却方案自动设计。默认使用给定几何；指定参考截面速度定深后仍需检查沿程热水力结果，固定硬件变工况保留该深度。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+PARAMETER_CONTRACT["cooling_channel_auto_size"].update(type="select", choices=[
+    {"value": 0.0, "label": "给定起始几何 · 计算后筛选候选"},
+    {"value": 1.0, "label": "指定截面速度 · 仅反算通道深度"}])
+PARAMETER_CONTRACT["cooling_sizing_reference"] = _meta("component_sizing", "实际入口方式以冷却通道入口（集流腔之后）的流量、密度和流通面积满足目标速度。历史方式仅复现入口密度与喉部宽度组合，不能解释为任一实际截面速度。", type="select", choices=[
+    {"value": "coolant_inlet_velocity", "label": "实际通道入口速度定深"},
+    {"value": "legacy_inlet_density_throat_width", "label": "历史入口密度与喉宽组合 · 旧记录"}],
+    visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}, {"key": "cooling_channel_auto_size", "op": "gt", "value": 0}]})
+PARAMETER_CONTRACT["cooling_target_velocity_ms"] = _meta("component_sizing", "仅指定截面速度定深时生效。实际入口模式指集流腔之后的通道入口速度；历史模式仅是入口密度与喉宽组合的尺寸参数。100 m/s 为示例存值，非推荐流速，也不控制沿程速度。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}, {"key": "cooling_channel_auto_size", "op": "gt", "value": 0}]})
+for key in ("cooling_channel_auto_size", "cooling_sizing_reference", "cooling_target_velocity_ms", "cooling_n_channels",
             "cooling_channel_width_m", "cooling_channel_height_m", "cooling_wall_thickness_m"):
     # A saved distribution table controls all four dimensions and disables
     # automatic sizing. Keep the inactive scalar inputs in the saved case.
@@ -115,7 +123,19 @@ for key in ("cooling_channel_auto_size", "cooling_target_velocity_ms", "cooling_
 for key in ("cooling_htc_enhancement", "cooling_channel_rel_roughness", "cooling_channel_k_minor"):
     PARAMETER_CONTRACT[key] = _meta("model_assumption", "准一维冷却的换热/阻力模型假设；影响吸热和压降，不是初值，也未标定为 Raptor 实机参数。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
 PARAMETER_CONTRACT["cooling_htc_enhancement"]["help"] = "仅修正喉部轴向前后各一个喉半径范围内的冷却侧换热系数；1 表示不作额外修正。它不是 Bartz 气侧曲率项，不是初值，也未由实机数据标定。气侧曲率半径另从规范内轮廓的上游喉部圆弧取得。"
-PARAMETER_CONTRACT["cooling_wall_temp_limit_K"] = _meta("constraint", "方案给定的热面壁温验收限值；不等于已完成材料寿命或结构应力验证。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+PARAMETER_CONTRACT["cooling_wall_temp_limit_status"] = _meta("constraint", "未设定时该项尚未评估；暂定限值内仍需核实依据；已有依据仅表示按登记的方案条件比较，不代表材料、结构或寿命认证。", source=None, type="select", choices=[
+    {"value": "unset", "label": "未设定 / 尚未评估"},
+    {"value": "provisional", "label": "示例暂定 / 待补依据"},
+    {"value": "documented", "label": "已有依据 / 用户登记"}],
+    visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+for key, help_text in (
+        ("cooling_wall_temp_limit_K", "启用后的方案热面壁温验收上限；不会截断计算壁温。800 K 是未验证的历史示例，不是铜合金通用允许温度，亦不同于导热率数据温区上限。"),
+        ("cooling_wall_temp_limit_basis", "记录限值来源及适用的材料牌号、制造状态、工况、任务持续时间或复用要求。已有依据必须填写；资料登记不等于平台完成结构或寿命验证。")):
+    PARAMETER_CONTRACT[key] = _meta("constraint", help_text, source=None,
+        **({"multiline": True} if key.endswith("basis") else {}),
+        visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}], "any": [
+            {"key": "cooling_wall_temp_limit_status", "op": "eq", "value": "provisional"},
+            {"key": "cooling_wall_temp_limit_status", "op": "eq", "value": "documented"}]})
 for key in ("turbine_efficiency_ox", "turbine_efficiency_fuel"):
     PARAMETER_CONTRACT[key] = _meta("model_assumption", "给定的涡轮效率假设，参与焓降和轴功计算；不是初值，需部件数据支持。")
 

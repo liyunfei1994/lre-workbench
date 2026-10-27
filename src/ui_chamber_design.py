@@ -760,7 +760,7 @@ class ChamberDesignPanel(QWidget):
                     ls="--", label="节距")
             ax.plot(x_mm, [v * 1e3 for v in dist["h_m"]], color="#059669", lw=1.2,
                     ls="-.", label="通道深 h")
-            ax.axhline(cd.RIB_MIN_SOFT_MM, color="#dc2626", ls=":", lw=0.9)
+            ax.axhline(0., color="#dc2626", ls=":", lw=0.9, label="几何重叠边界")
             ax.axvline(x_t * 1e3, color="#7c2d12", ls=":", lw=0.9)
             ax.set_ylabel("[mm]", fontsize=8)
             ax.set_xlabel("x [mm]", fontsize=8)

@@ -169,6 +169,7 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         channel_table=None, bell_fraction=0.8, film_fraction=0.0, film_T_K=850.0,
         film_eta0=0.9, film_decay_length_m=0.0, gas_emissivity=0.20,
         conv_half_angle_deg=30.0, wall_temp_limit_K=800.0, n_points=120,
+        wall_temp_limit_status="provisional", wall_temp_limit_basis="",
         hot_side_profile=None, inlet_enthalpy_Jkg=None, k_minor_inlet=None,
         k_minor_outlet=None, heat_transfer_enabled=True, friction_enabled=True,
         strict=True, wall_thermal_dataset_id=None, wall_manufacturing_state="unspecified",
@@ -353,9 +354,9 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         raise ValueError("coolant overall energy ledger did not close")
     imax = max(channels,key=lambda c:c["T_wall_hot_K"])
     qmax = max(channels,key=lambda c:c["q_W_m2"])
-    over = sum(c["T_wall_hot_K"] > wall_temp_limit_K for c in channels)
     warnings = []
-    materials = material_summary(channels, wall_temp_limit_K)
+    materials = material_summary(channels, wall_temp_limit_K, wall_temp_limit_status, wall_temp_limit_basis)
+    over = materials["wall_over_limit_cell_count"]
     if materials["status"] == "out_of_range":
         warnings.append(f"壁面导热率数据越界：{materials['out_of_range_cell_count']}/{len(channels)} 个单元；端点常值延用仅保留诊断解，适用性未通过。")
     elif materials["status"] == "missing_evidence":
@@ -364,6 +365,10 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         warnings.append("壁面制造状态未声明或与所用热物性试样状态不匹配；不能据此验证硬件性能。")
     if over:
         warnings.append("部分热面壁温高于用户限值；热量闭合不代表壁温约束通过。")
+    elif materials["wall_temperature_limit_status"] == "provisional_within_limit":
+        warnings.append("热面壁温处于方案暂定限值内；限值依据待核实，不能据此判为工程验收通过。")
+    elif materials["wall_temperature_limit_status"] in ("not_evaluated", "invalid_constraint"):
+        warnings.append("热面壁温约束尚未评估：未启用有效且有明确状态的方案限值。")
     if any(2300 < c["Re"] < 3000 for c in channels):
         warnings.append("存在过渡雷诺数，换热采用连续插值，需独立验证。")
     throat = min(geom["nodes"], key=lambda n: abs(n["x_m"]-geom["x_throat_m"]))
@@ -375,7 +380,11 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         dp_minor_Pa=sum(c["dp_local_Pa"] for c in cells),
         T_wall_hot_max_K=imax["T_wall_hot_K"],T_wall_cold_max_K=max(c["T_wall_cold_K"] for c in channels),
         x_T_wall_max_m=imax["x_m"],x_q_max_m=qmax["x_m"],q_max_MW_m2=qmax["q_W_m2"]/1e6,
-        wall_over_limit_fraction=over/len(channels),wall_temp_limit_K=wall_temp_limit_K,
+        wall_over_limit_fraction=materials["wall_over_limit_fraction"],
+        wall_temp_limit_K=materials["wall_temperature_limit_K"],
+        wall_temp_limit_declared_K=wall_temp_limit_K,
+        wall_temp_limit_status=wall_temp_limit_status,wall_temp_limit_basis=materials["wall_temperature_limit_basis"],
+        wall_temperature_limit_status=materials["wall_temperature_limit_status"],
         cover_eps=geom["cover_eps"],n_stations=len(channels),x_throat_m=geom["x_throat_m"],
         V_coolant_max_ms=max(n["velocity_ms"] for n in nodes),hydraulic_infeasible=False,
         pressure_floor_hit=False,film_on=False,film_mdot_kgs=0.,

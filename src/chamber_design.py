@@ -245,12 +245,6 @@ def resolve_channel_distribution(
             "pitch_m": pitch_out, "rib_m": rib_out}
 
 
-# 制造可行性阈值（AM 打印铜合金通道的工程量级）
-RIB_MIN_HARD_MM = 0.3    # 肋宽硬下限：低于此无法成形/强度不足
-RIB_MIN_SOFT_MM = 0.8    # 肋宽软下限：AM 打印态建议 ≥0.8 mm
-ASPECT_MAX = 8.0         # 通道深宽比上限（高深宽比铣削/打印难度大）
-
-
 def channel_feasibility(dist: Dict[str, List[float]],
                         x_arr: List[float], x_throat: float) -> List[Tuple[str, str]]:
     """通道分布可行性清单。返回 [(级别 'ok'/'warn'/'fail', 消息)]。"""
@@ -266,21 +260,13 @@ def channel_feasibility(dist: Dict[str, List[float]],
     if rib_min_mm <= 0.0:
         out.append(("fail", f"通道宽 > 节距（x={x_min_mm:.0f} mm 处肋宽 {rib_min_mm:.2f} mm ≤ 0）"
                             "——周向排布不可能，需减少 N 或减小宽度"))
-    elif rib_min_mm < RIB_MIN_HARD_MM:
-        out.append(("fail", f"最小肋宽 {rib_min_mm:.2f} mm @ x={x_min_mm:.0f} mm "
-                            f"< 硬下限 {RIB_MIN_HARD_MM} mm（无法制造）"))
-    elif rib_min_mm < RIB_MIN_SOFT_MM:
-        out.append(("warn", f"最小肋宽 {rib_min_mm:.2f} mm @ x={x_min_mm:.0f} mm "
-                            f"< AM 打印建议值 {RIB_MIN_SOFT_MM} mm"))
     else:
-        out.append(("ok", f"最小肋宽 {rib_min_mm:.2f} mm @ x={x_min_mm:.0f} mm ✓"))
+        out.append(("ok", f"最小肋宽 {rib_min_mm:.2f} mm @ x={x_min_mm:.0f} mm；周向几何未重叠"))
+        out.append(("warn", "肋宽制造适用性尚未评估；需要具体工艺、材料状态及供应方可实现尺寸依据。"))
     # 深宽比
     aspects = [h / max(w, 1e-9) for h, w in zip(hs, ws)]
     a_max = max(aspects)
-    if a_max > ASPECT_MAX:
-        out.append(("warn", f"最大深宽比 h/w = {a_max:.1f} > {ASPECT_MAX:.0f}（制造难度大）"))
-    else:
-        out.append(("ok", f"最大深宽比 h/w = {a_max:.1f} ✓"))
+    out.append(("warn", f"最大深宽比 h/w = {a_max:.1f}；制造适用性尚未评估，未采用通用深宽比上限。"))
     # 喉部通道数（信息）
     i_thr = min(range(len(x_arr)), key=lambda i: abs(x_arr[i] - x_throat))
     out.append(("ok", f"喉部：N={int(dist['n'][i_thr])}，w={ws[i_thr]*1e3:.2f} mm，"
@@ -479,9 +465,11 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
     if wf is None or not getattr(wf, "x", None):
         return rows
     s = results.summary if results is not None else {}
-    T_limit = float(getattr(inputs, "cooling_wall_temp_limit_K", 800.0))
-    T_coking = 950.0
-    V_hard = 300.0
+    from core import wall_temperature_constraint
+    constraint = wall_temperature_constraint(inputs)
+    T_limit = constraint["limit_K"]
+    valid_limit = (isinstance(T_limit, (int, float)) and math.isfinite(T_limit) and T_limit > 0
+                   and (constraint["status"] != "documented" or bool(constraint["basis"])))
     x = wf.x
     r_t = min(wf.r) if wf.r else 0.0
     x_t = x[wf.throat_index] if wf.x else 0.0
@@ -517,18 +505,19 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
         rows.append(dict(
             zone=zkey, zone_label=zlabel, criterion="热面壁温 T_wg",
             value=f"{T_max:.0f} K @ x={x[i_T]*1e3:.0f} mm",
-            limit=f"≤ {T_limit:.0f} K",
-            margin_text=f"{T_limit - T_max:+.0f} K",
-            status=_st(T_max <= T_limit, T_max <= T_limit * 1.10)))
-        # ② 冷面壁温（结焦）
+            limit=f"≤ {T_limit:.0f} K" if valid_limit else "未设定有效方案上限",
+            margin_text=((f"{T_limit - T_max:+.0f} K" + (" · 暂定限值待依据" if constraint["status"] == "provisional" else ""))
+                         if valid_limit else "该项尚未评估"),
+            status=("na" if not valid_limit else "fail" if T_max > T_limit else
+                    "warn" if constraint["status"] == "provisional" else "ok")))
+        # ② Report cold-wall temperature without inventing a coking threshold.
         i_Tc = max(idx, key=lambda i: wf.T_wc[i])
         Twc = wf.T_wc[i_Tc]
         rows.append(dict(
             zone=zkey, zone_label=zlabel, criterion="冷面壁温 T_wc（甲烷结焦）",
             value=f"{Twc:.0f} K",
-            limit=f"≤ {T_coking:.0f} K",
-            margin_text=f"{T_coking - Twc:+.0f} K",
-            status=_st(Twc <= T_coking, Twc <= T_coking + 50.0)))
+            limit="未建立适用本燃料、压力及停留时间的结焦判据",
+            margin_text="结焦尚未评估；当前温度不代表积碳预测", status="na"))
         # ③ 冷却剂流速
         if wf.v_coolant:
             i_V = max(idx, key=lambda i: wf.v_coolant[i])
@@ -536,9 +525,8 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
             rows.append(dict(
                 zone=zkey, zone_label=zlabel, criterion="冷却剂流速 V",
                 value=f"{V:.0f} m/s",
-                limit=f"≤ {V_hard:.0f}（宜 ≤150）",
-                margin_text=f"{V_hard - V:+.0f} m/s",
-                status=_st(V <= 150.0, V <= V_hard)))
+                limit="未设定本方案的流速约束",
+                margin_text="需结合压降、换热及具体制造条件判断", status="na"))
         # ④ 内壁结构 SF
         if getattr(wf, "structural_status", "legacy_screening") == "not_assessed":
             rows.append(dict(
@@ -566,10 +554,9 @@ def compute_scorecard(wf, results, inputs) -> List[Dict[str, Any]]:
                 rows.append(dict(
                     zone=zkey, zone_label=zlabel, criterion="最小肋宽",
                     value=f"{rib_min*1e3:.2f} mm @ x={x[i_rib]*1e3:.0f} mm",
-                    limit=f"≥ {RIB_MIN_SOFT_MM} mm（AM）",
-                    margin_text=f"{(rib_min - RIB_MIN_SOFT_MM*1e-3)*1e3:+.2f} mm",
-                    status=_st(rib_min >= RIB_MIN_SOFT_MM * 1e-3,
-                               rib_min >= RIB_MIN_HARD_MM * 1e-3)))
+                    limit="几何非重叠要求 > 0；制造最小肋宽未设定",
+                    margin_text="周向几何重叠" if rib_min <= 0 else "几何未重叠；制造适用性尚未评估",
+                    status="fail" if rib_min <= 0 else "na"))
 
     # 全程判据（不分区）
     cool = results.components.get("cooling_channel") if results is not None else None

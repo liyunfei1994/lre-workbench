@@ -66,7 +66,7 @@ function harness(fetcher,{storage=memoryStorage()}={}) {
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, confirm: () => {confirmations++;return true;},
     FormData: class {}, console,
   });
-  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyInputDocument,buildInputBackup,validateDraft,loadRecord,chooseView,navigate,openProject,
+  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyInputDocument,buildInputBackup,validateDraft,loadRecord,chooseView,navigate,openProject,adoptCoolingCandidate,
     reset(){user=null;initialized=false;info=null;page="projects";analysisView="overview";current=null;draft=null;dirty=false;resultRecord=null;selectedJobId=null;projectJobs=[];workspaceUserId=null;},
     seed(value){({current,draft,dirty,user,info,groups,fields,page,projectJobs,connected}=value);referenceKey=value.referenceKey||"";presetUndo=value.presetUndo||null;},
     state(){return JSON.parse(JSON.stringify({current,draft,dirty,user,page,analysisView,projectJobs,connected,editorBusy,resultRecord,selectedJobId,referenceKey,presetUndo}));}};`, context,
@@ -1201,4 +1201,26 @@ test("cooling upgrade creates a draft and revision without changing the selected
   assert.equal(saved.length,1);assert.equal(saved[0].revision,1);
   assert.equal(state.current.revision,2);assert.equal(state.current.inputs.cooling_bartz_mode,1);
   assert.deepEqual(copy(state.resultRecord),record);assert.equal(oldProject.inputs.cooling_bartz_mode,0);
+});
+
+test("cooling candidate adoption changes only a draft and keeps unrelated edits and the saved record",async()=>{
+  const patch={cooling_n_channels:280,cooling_channel_height_m:.007,cooling_channel_auto_size:0,cooling_wall_temp_limit_status:"unset"};
+  const calls=[];
+  const h=harness(async(url,options)=>{calls.push(url);assert.equal(options.method,"GET");return response({project_id:project.id,input_patch:patch});});
+  const inputs={...defaults,propellant_pair:"lox_methane",cooling_bartz_mode:1,cooling_channel_table_json:"",pc:42e6};
+  h.app.seed(copy({current:project,draft:inputs,dirty:true,user,info,groups:schema.groups,fields,page:"project",projectJobs:[],connected:true}));
+  await h.app.adoptCoolingCandidate({studyId:"study1",candidateId:2});
+  const state=h.app.state();assert.equal(state.draft.pc,42e6);assert.equal(state.draft.cooling_channel_height_m,.007);
+  assert.equal(state.dirty,true);assert.deepEqual(copy(state.current),project);assert.equal(state.resultRecord,null);
+  assert.deepEqual(calls,["/api/cooling-designs/study1/candidates/2/draft"]);
+});
+
+test("cooling candidate adoption rejects a different project and an active axial channel table",async()=>{
+  for(const scenario of [{returnedProject:"different",table:""},{returnedProject:project.id,table:'[{"x_m":0}]'}]){
+    const h=harness(async()=>response({project_id:scenario.returnedProject,input_patch:{cooling_n_channels:280}}));
+    const inputs={...defaults,propellant_pair:"lox_methane",cooling_bartz_mode:1,cooling_channel_table_json:scenario.table};
+    h.app.seed(copy({current:project,draft:inputs,dirty:true,user,info,groups:schema.groups,fields,page:"project",projectJobs:[],connected:true}));
+    await assert.rejects(h.app.adoptCoolingCandidate({studyId:"s",candidateId:1}));
+    assert.deepEqual(copy(h.app.state().draft),inputs);
+  }
 });

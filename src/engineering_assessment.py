@@ -10,7 +10,7 @@ import math
 
 from materials import material_evidence
 from convergence import numerical_convergence
-from core import preburner_temperature_constraint
+from core import preburner_temperature_constraint, wall_temperature_constraint
 
 
 def _finite(value):
@@ -220,8 +220,22 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0, *, scope: 
 
     hydraulic, wall, cooling_detail = _cooling_profile_evidence(components.get("cooling_channel"), inputs)
     check("cooling_hydraulics", "冷却通道水力可行性", hydraulic, 0.0, "", "maximum", cooling_detail)
+    wall_constraint = wall_temperature_constraint(inputs)
     check("wall_temperature", "沿程热面壁温峰值", wall,
-          getattr(inputs, "cooling_wall_temp_limit_K", None), "K", "maximum", cooling_detail)
+          wall_constraint["limit_K"], "K", "maximum", cooling_detail)
+    row = checks[-1]
+    row.update(limit_status=wall_constraint["status"], limit_basis=wall_constraint["basis"])
+    if wall_constraint["status"] == "unset":
+        row["detail"] += " 该项尚未评估：未设定方案壁温上限，保留的示例数值不参与判断。"
+    elif wall_constraint["status"] == "provisional":
+        if row["status"] == "pass":
+            row["status"] = "review"
+        row["detail"] += " 仅与方案暂定上限比较，限值依据待核实；它不是材料数据温区上限。"
+    elif wall_constraint["status"] == "documented" and wall_constraint["basis"]:
+        row["detail"] += " 与登记了来源和适用条件的方案壁温上限比较；不代表材料、结构或寿命认证。"
+    else:
+        row["status"] = "unknown"
+        row["detail"] += " 温度约束状态无效或缺少依据，该项尚未评估。"
 
     material_records = {}
     for name in (vars(inputs) if scope == "engineering" else ()):

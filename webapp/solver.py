@@ -53,6 +53,14 @@ def input_values(values, *, saved_snapshot=False):
     if unknown:
         raise ValueError("无法识别的参数：" + ", ".join(sorted(unknown)))
     merged = defaults | values
+    # Omitted fields identify the earlier sizing/constraint contract, not a
+    # request to reinterpret a stored 100 m/s value at a different section.
+    for key, legacy in {"cooling_sizing_reference": "legacy_inlet_density_throat_width",
+                        "cooling_wall_temp_limit_status": "provisional",
+                        "cooling_channel_auto_size": 1.0,
+                        "cooling_channel_height_m": 0.005}.items():
+        if key not in values:
+            merged[key] = legacy
     if "nozzle_contour_method" not in values:
         # An older parameter document must not acquire new wall angles on load.
         merged["nozzle_contour_method"] = "legacy_log_v1"

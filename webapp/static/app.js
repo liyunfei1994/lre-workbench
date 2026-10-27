@@ -1,5 +1,6 @@
 import {renderAnalysis, configureResultSchema} from "./results.js";
 import {mountSteadyWorkspace} from "./steady-workspace.js";
+import {mountCoolingDesign} from "./cooling-design.js";
 import {mountValidation} from "./validation.js";
 import {mountThrottle} from "./throttle.js";
 import {mountTransient} from "./transient.js";
@@ -38,6 +39,7 @@ let ignitionView=null;
 let shutdownView=null;
 let workspaceUserId=null;
 let nozzleGeometryCleanup=null;
+let coolingDesignView=null;
 views.geometry=["推力室与喷管几何","系统级内轮廓 · 几何尺寸、二维剖面与三维曲面"];
 views.shutdown=["关机与再启动分析","连续状态 · 关阀、残余库存、壁面余热、轴系惰转与再次供给"];
 views.ignition=["点火事件与建压分析","气相反应容腔 · 给定外部点火热脉冲、阀门响应与压力建立"];
@@ -118,6 +120,7 @@ function setDirty(value=true) {
   if(analysisView==="chilldown") chilldownView?.sync();
   if(analysisView==="ignition") ignitionView?.sync();
   if(analysisView==="shutdown") shutdownView?.sync();
+  coolingDesignView?.sync();
 }
 function mayLeave(){return !dirty || confirm("当前编辑尚未保存。确定放弃这些编辑？");}
 function updateActionState(){
@@ -336,6 +339,7 @@ async function chooseView(view){
 }
 function renderView(){
   if(nozzleGeometryCleanup){nozzleGeometryCleanup();nozzleGeometryCleanup=null;}
+  coolingDesignView?.dispose();coolingDesignView=null;
   $("analysis-title").textContent=views[analysisView][0];$("analysis-subtitle").textContent=views[analysisView][1];
   const history=analysisView==="history";
   document.querySelector(".workbench-layout").classList.toggle("history-view",history);
@@ -383,7 +387,16 @@ function renderView(){
   } else {
     if(analysisView!=="history") {
       $("analysis-content").innerHTML=renderAnalysis(analysisView,resultRecord);
-      if(analysisView==="overview") mountSteadyWorkspace($("analysis-content"),resultRecord?.id || "");
+      if(analysisView==="overview") {
+        mountSteadyWorkspace($("analysis-content"),resultRecord?.id || "");
+        const coolingPanel=$("analysis-content").querySelector('[data-steady-panel="cooling"]');
+        if(coolingPanel && resultRecord?.status==="succeeded") {
+          const host=document.createElement("section");
+          host.dataset.coolingDesignHost="";coolingPanel.prepend(host);
+          coolingDesignView=mountCoolingDesign(host,{api,getContext:()=>({project:current,draft,dirty,record:resultRecord}),notify:toast,onAdopt:adoptCoolingCandidate});
+          Promise.resolve(coolingDesignView.refresh()).catch(error=>toast(error.message));
+        }
+      }
       if(analysisView==="components") mountComponentWorkspace($("analysis-content"),resultRecord?.id || "");
       if(analysisView==="states") mountFlowWorkspace($("analysis-content"),resultRecord?.id || "",{
         onComponent:id=>{
@@ -407,6 +420,19 @@ function renderView(){
     }
   }
   updateResultContext();
+}
+
+async function adoptCoolingCandidate({studyId,candidateId}) {
+  if(editorBusy || !current)throw new Error("请等待当前编辑操作完成。");
+  const projectId=current.id;
+  const candidate=await api(`/cooling-designs/${studyId}/candidates/${candidateId}/draft`);
+  if(current?.id!==projectId || candidate.project_id!==projectId)throw new Error("当前方案已改变，请重新选择候选。");
+  if(editorBusy)throw new Error("方案正在保存，请稍后采纳。");
+  if(draft.propellant_pair!=="lox_methane" || Number(draft.cooling_bartz_mode)<=0 || String(draft.cooling_channel_table_json||"").trim())
+    throw new Error("当前草稿需采用甲烷准一维模型且没有沿程通道表；候选几何不能覆盖不同的通道定义。");
+  draft={...draft,...candidate.input_patch};
+  clearPresetUndo();setEditorError("");syncPresetSelection();renderFields();setDirty();
+  toast("已将候选几何写入草稿，其他参数保留。请运行设计点重新闭合整机，并使用新记录复核筛选约束。");
 }
 function updateResultContext(){
   if(!current)return;const old=resultRecord&&(dirty||resultRecord.revision!==current.revision);

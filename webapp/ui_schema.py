@@ -33,10 +33,11 @@ CHAMBER_GROUPS = (
         "nozzle_bell_fraction", "nozzle_contour_method", "nozzle_initial_angle_deg",
         "nozzle_exit_angle_deg", "cooling_cover_eps")),
     ("chamber_channels", "推力室·冷却通道", (
-        "cooling_channel_auto_size", "cooling_target_velocity_ms", "cooling_n_channels",
+        "cooling_channel_auto_size", "cooling_sizing_reference", "cooling_target_velocity_ms", "cooling_n_channels",
         "cooling_channel_width_m", "cooling_channel_height_m", "cooling_wall_thickness_m",
         "cooling_htc_enhancement", "cooling_channel_rel_roughness",
-        "cooling_channel_k_minor", "cooling_wall_temp_limit_K")),
+        "cooling_channel_k_minor", "cooling_wall_temp_limit_status", "cooling_wall_temp_limit_K",
+        "cooling_wall_temp_limit_basis")),
     ("chamber_film", "推力室·膜冷却与辐射", (
         "film_cooling_fraction", "film_effectiveness_initial", "film_decay_length_m",
         "cooling_gas_emissivity")),
@@ -224,8 +225,13 @@ def _system_groups(groups):
         elif group["id"] == "chamber_contour":
             group["description"] = "抛物线钟形喷管采用相切圆弧和二次 Bézier 曲线，属于系统级工程近似；指定端点角度不代表已完成推力优化。循环、热侧与冷却共用同一轮廓，尺寸和图示见左侧“推力室与喷管几何”。旧方案保留历史角度方法，切换后保存为新版本。"
         elif group["id"] == "chamber_channels":
-            group["title"] = "冷却系统几何·通道与壁面"
-            group["description"] = "额定设计点可按入口流速估算通道深度；固定硬件节流沿用设计点几何。压降由流量、密度及截面积沿程求解，不能单独指定另一套水力长度。"
+            group["title"] = "冷却通道与设计约束"
+            group["description"] = "尺寸为可编辑的起始方案，300 条通道和给定深度均不是推荐最优值。运行设计点后，在结果区“再生冷却”比较候选几何；采纳后重新计算整机。固定硬件变工况沿用已定几何。"
+            group["sections"] = [
+                {"id": "geometry", "title": "起始通道几何", "keys": ["cooling_channel_auto_size", "cooling_sizing_reference", "cooling_target_velocity_ms", "cooling_n_channels", "cooling_channel_width_m", "cooling_channel_height_m", "cooling_wall_thickness_m"]},
+                {"id": "models", "title": "换热与阻力假设", "keys": ["cooling_htc_enhancement", "cooling_channel_rel_roughness", "cooling_channel_k_minor"]},
+                {"id": "limits", "title": "方案壁温约束", "description": "实际计算壁温、材料热物性的数据温区和方案允许温度分别检查。", "keys": ["cooling_wall_temp_limit_status", "cooling_wall_temp_limit_K", "cooling_wall_temp_limit_basis"]},
+            ]
             group["geometry_source_key"] = "cooling_channel_table_json"
         result.append(group)
     return result
@@ -262,7 +268,7 @@ def design_ui_schema():
                    for key, label, unit in EXTRA_FIELDS],
     })
     return {
-        "version": 13, "defaults": defaults, "groups": groups,
+        "version": 14, "defaults": defaults, "groups": groups,
         "parameter_role_labels": dict(ROLE_LABELS),
         "propellant_models": propellant_models(),
         "methane_thermo_datasets": methane_dataset_catalog(),

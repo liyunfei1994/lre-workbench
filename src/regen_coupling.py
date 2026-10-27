@@ -72,11 +72,14 @@ def cooling_arguments(model, material=None):
         nozzle_initial_angle_deg=getattr(i,"nozzle_initial_angle_deg",35.),
         nozzle_exit_angle_deg=getattr(i,"nozzle_exit_angle_deg",10.),
         n_points=int(getattr(i,"cooling_grid_points",120)),
+        sizing_reference=getattr(i,"cooling_sizing_reference","legacy_inlet_density_throat_width"),
         wall_thermal_dataset_id=i.wall_thermal_dataset_id,
         wall_manufacturing_state=i.wall_manufacturing_state,
         wall_material_zones=i.wall_material_zones_json,
         remap_hot_side_trial=True,
         gas_emissivity=i.cooling_gas_emissivity,wall_temp_limit_K=i.cooling_wall_temp_limit_K,
+        wall_temp_limit_status=getattr(i,"cooling_wall_temp_limit_status","provisional"),
+        wall_temp_limit_basis=getattr(i,"cooling_wall_temp_limit_basis",""),
         film_fraction=i.film_cooling_fraction)
 
 
