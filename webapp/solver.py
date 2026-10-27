@@ -27,7 +27,7 @@ SCIENCE_PINS = {
 def system_calculation_scope():
     """Version the web execution policy separately from immutable user inputs."""
     return {
-        "id": "engine_system", "version": 3, "label": "系统仿真 · 稳态设计点",
+        "id": "engine_system", "version": 4, "label": "系统仿真 · 稳态设计点",
         "disabled_postprocessing": ["cfd", "fea"],
         "cooling_profile_source": "calculation.components.cooling_channel.profile",
         "independent_cooling_postprocessing": False,
@@ -38,6 +38,7 @@ def system_calculation_scope():
             "沿程图直接读取本次循环保存的 cooling_channel.profile，不运行独立冷却后处理；给定热量/压降的预算模式不生成沿程解。",
             "详细部件估算沿用底层模型并保留在原始结果中，不作为本阶段的部件设计结论；未执行有限元或 CFD 求解。",
             "方案参数完整保留；历史沿程后处理开关不控制循环内统一冷却模型。历史记录不按当前参数补算曲线。",
+            "预燃室温度约束分别记录状态与依据；未设定时尚未评估，暂定限值内仍待核实，已有依据仅代表用户登记的方案条件。",
         ],
     }
 
@@ -52,6 +53,9 @@ def input_values(values, *, saved_snapshot=False):
     if unknown:
         raise ValueError("无法识别的参数：" + ", ".join(sorted(unknown)))
     merged = defaults | values
+    if "nozzle_contour_method" not in values:
+        # An older parameter document must not acquire new wall angles on load.
+        merged["nozzle_contour_method"] = "legacy_log_v1"
     if "wall_thermal_dataset_id" not in values:
         # Resolve a historical material explicitly in EngineInputs; do not let
         # the current default silently replace a different saved copper alloy.
@@ -175,6 +179,8 @@ def _calculate(values, progress, input_warnings):
                                       [str(w.message) for w in caught])),
     }, missing)
     output["nonfinite_fields"] = missing
+    from webapp.nozzle_geometry import nozzle_geometry_view
+    output["nozzle_geometry"] = nozzle_geometry_view(output)
     if missing:
         output["warnings"].append("部分结果不是有限数值，已标为缺失；请检查计算和工程警告。")
     json.dumps(output, allow_nan=False)

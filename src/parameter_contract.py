@@ -14,8 +14,8 @@ ROLE_LABELS = {
 }
 
 PREBURNER_MODE_CHOICES = [
-    {"value": "temperature", "label": "指定预燃室出口温度（推荐）"},
-    {"value": "mixture_ratio", "label": "指定预燃室混合比"},
+    {"value": "temperature", "label": "指定出口温度（反求 O/F）"},
+    {"value": "mixture_ratio", "label": "指定 O/F（计算出口温度）"},
 ]
 
 
@@ -45,10 +45,11 @@ def _meta(role, help_text, *, source="默认值为工程假设", **extra):
 
 
 PARAMETER_CONTRACT = {
-    "thrust": _meta("design_input", "在给定环境压力下匹配的推力目标；命中目标不构成独立性能验证。Raptor 3 官方推力及换算见机型资料。", source="方案设计要求"),
+    "thrust": _meta("design_input", "在本栏给定环境压力下匹配的推力目标；FFSC 为主喷管推力，GG 为主喷管与 GG 排气喷管的总推力。命中目标不构成独立性能验证。", source="方案设计要求", role_label="设计目标"),
     "pc": _meta("design_input", "指定主燃烧室压力；33 MPa 是本项目示例假设，未核实为 Raptor 3 对应公开工况。"),
-    "of_ratio": _meta("design_input", "总氧化剂 / 燃料质量流量比；3.6 为示例输入，不是喷管面积比。"),
-    "expansion_ratio": _meta("design_input", "喷管出口面积 / 喉部面积；34.34 是当前几何假设，未核实为 Raptor 3 实机值。"),
+    "of_ratio": _meta("design_input", "指定发动机总供给的氧化剂 / 燃料质量流量比；预燃室、GG 及 GG 主室的局部混合比分别求解或指定。3.6 为示例输入。"),
+    "expansion_ratio": _meta("design_input", "主喷管出口面积 Ae / 喉部面积 At；循环、推力室轮廓和冷却使用同一个输入。它不同于燃烧室收缩比及冷却终点面积比，也不同于 GG 排气喷管的面积比。34.34 是示例几何假设。"),
+    "gg_exhaust_expansion_ratio": _meta("design_input", "GG 涡轮排气所用独立喷管的出口面积 / 喉部面积；参与 GG 排气推力计算，不定义主推力室型面或主喷管冷却覆盖。"),
     "ambient_pressure": _meta("boundary", "用于压力推力项；目标推力必须与这一环境压力使用相同口径。", source="方案边界"),
     "target_isp": _meta("initial_guess", "仅通过 F/(g₀ Isp) 构造总流量初值；最终比冲由模型计算。", source=None),
     "fuel_inlet_temp": _meta("boundary", "燃料贮箱侧温度。FFSC 与 GG 的增压泵出口及主泵入口温度均由泵焓升和管路等焓过程计算；不是在各节点沿用该温度。"),
@@ -84,12 +85,33 @@ for key in ("boost_pump_efficiency", "pump_efficiency_ox", "pump_efficiency_fuel
 
 for key in ("chamber_contraction_ratio", "chamber_l_star_m", "chamber_conv_half_angle_deg", "nozzle_bell_fraction"):
     PARAMETER_CONTRACT[key] = _meta("design_input", "系统级内轮廓几何假设；热侧、冷却覆盖面积与通道水力长度使用同一几何。设计点定尺寸后，固定硬件计算保留该轮廓。")
+PARAMETER_CONTRACT["chamber_contraction_ratio"]["help"] = "燃烧室截面积 Acc / 主喷管喉部面积 At，定义燃烧室相对喉部的尺寸；不同于喷管出口面积比 Ae/At。主循环、型面与冷却使用同一取值。"
+PARAMETER_CONTRACT["chamber_l_star_m"]["help"] = "特征长度 L*=燃烧室容积/喉部面积；不是燃烧室轴向长度或冷却通道长度。实际轮廓尺寸由同一几何模型生成。"
+PARAMETER_CONTRACT["nozzle_bell_fraction"]["help"] = "主喷管轴向长度与同喉部、出口半径的 15° 半角锥形喷管长度之比；0.80 表示 80%。它不是喷管面积比，也不是冷却覆盖比例。"
+PARAMETER_CONTRACT["nozzle_contour_method"] = _meta(
+    "design_input", "圆弧连接二次 Bézier 抛物线；按给定长度及端点切线构造并检查几何有效性。新方案采用指定角度；历史表达式仅为旧方案复现保留，未建立 Rao 图拟合证据。",
+    source="构造方法参考 NASA SP-8120；角度为本项目设计输入，非实机数据",
+    type="select", choices=[
+        {"value": "parabolic_bell_explicit_v1", "label": "抛物线钟形 · 指定端点角度"},
+        {"value": "legacy_log_v1", "label": "历史经验角度 · 旧方案兼容"}])
+for key, label in (("nozzle_initial_angle_deg", "抛物线起始角 θn"), ("nozzle_exit_angle_deg", "出口角 θe")):
+    PARAMETER_CONTRACT[key] = _meta(
+        "design_input", "相对于轴线的壁面切线角，直接参与型面构造。35° / 10° 是可调整的概念设计起点，非优化结果；长度与两端切线无法组成单调型面时拒绝计算。",
+        source="本项目几何设计假设；未标定为任何现役发动机型面",
+        label=label, visibility={"all": [{"key": "nozzle_contour_method", "op": "eq", "value": "parabolic_bell_explicit_v1"}]})
 for key in ("cooling_cover_eps", "cooling_n_channels", "cooling_channel_width_m",
             "cooling_channel_height_m", "cooling_wall_thickness_m"):
     PARAMETER_CONTRACT[key] = _meta("design_input", "准一维冷却的几何输入；只在物理冷却模式生效。沿程面积、热面积和长度由同一轮廓与通道规则生成。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+PARAMETER_CONTRACT["cooling_cover_eps"]["help"] = "主喷管轮廓上冷却终点的局部截面积 / 喉部面积；0 表示覆盖至主喷管出口。用于确定同一型面的冷却范围，不改变主喷管出口面积比；结果记录实际覆盖位置。"
 PARAMETER_CONTRACT["cooling_channel_height_m"]["visibility"]["all"].append({"key": "cooling_channel_auto_size", "op": "lte", "value": 0})
 PARAMETER_CONTRACT["cooling_channel_auto_size"] = _meta("component_sizing", "额定点按指定入口速度估算通道深度；固定硬件节流沿用该设计深度，不逐点重新设计。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
 PARAMETER_CONTRACT["cooling_target_velocity_ms"] = _meta("component_sizing", "仅通道自动定深时使用的设计速度，不是对每个沿程节点施加固定流速。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}, {"key": "cooling_channel_auto_size", "op": "gt", "value": 0}]})
+for key in ("cooling_channel_auto_size", "cooling_target_velocity_ms", "cooling_n_channels",
+            "cooling_channel_width_m", "cooling_channel_height_m", "cooling_wall_thickness_m"):
+    # A saved distribution table controls all four dimensions and disables
+    # automatic sizing. Keep the inactive scalar inputs in the saved case.
+    PARAMETER_CONTRACT[key]["visibility"]["all"].append(
+        {"key": "cooling_channel_table_json", "op": "empty"})
 for key in ("cooling_htc_enhancement", "cooling_channel_rel_roughness", "cooling_channel_k_minor"):
     PARAMETER_CONTRACT[key] = _meta("model_assumption", "准一维冷却的换热/阻力模型假设；影响吸热和压降，不是初值，也未标定为 Raptor 实机参数。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
 PARAMETER_CONTRACT["cooling_htc_enhancement"]["help"] = "仅修正喉部轴向前后各一个喉半径范围内的冷却侧换热系数；1 表示不作额外修正。它不是 Bartz 气侧曲率项，不是初值，也未由实机数据标定。气侧曲率半径另从规范内轮廓的上游喉部圆弧取得。"
@@ -103,10 +125,27 @@ for key in ("chamber_temp_guess", "chamber_gamma", "molar_mass"):
 
 for side, label in (("ox", "富氧"), ("fuel", "富燃")):
     PARAMETER_CONTRACT[f"{side}_preburner_temp_target"] = _meta(
-        "design_input", "指定预燃室出口 / 涡轮入口温度，反求混合比；这是设计选择，不是材料极限或实机测量值。",
+        "design_input", "概念设计中选定预燃室出口的整体燃气温度，反求局部 O/F 并匹配循环；它不是局部热点、金属温度或材料允许上限。当前模型将此状态直接用作涡轮入口。",
+        source="本项目概念设计目标；非 Raptor 3 实测值",
         visibility={"preburner_modes": ["temperature"]})
     PARAMETER_CONTRACT[f"{side}_preburner_temp_limit"] = _meta(
-        "constraint", "用户选定的运行温度上限，用于结果验收；未进行材料寿命或氧相容性联合论证。")
+        "constraint", "仅在约束状态为示例暂定或已有依据时生效。800 / 900 K 是旧示例取值，不是通用工程上限；燃气温度与金属温度不同。",
+        source="旧示例限值未登记材料、寿命或氧相容性依据",
+        visibility={"any": [
+            {"key": f"{side}_preburner_temp_limit_status", "op": "eq", "value": "provisional"},
+            {"key": f"{side}_preburner_temp_limit_status", "op": "eq", "value": "documented"}]})
+    PARAMETER_CONTRACT[f"{side}_preburner_temp_limit_status"] = _meta(
+        "constraint", "未设定：该项尚未评估；示例暂定：检查数值但合格仍待依据；已有依据：按登记的方案条件检查，不自动认证材料或寿命。",
+        source=None, type="select", choices=[
+            {"value": "unset", "label": "未设定 / 尚未评估"},
+            {"value": "provisional", "label": "示例暂定 / 待补依据"},
+            {"value": "documented", "label": "已有依据 / 用户登记"}])
+    PARAMETER_CONTRACT[f"{side}_preburner_temp_limit_basis"] = _meta(
+        "constraint", "记录依据文件及适用条件，例如燃气组成、压力、涡轮材料与冷却方式、任务寿命和温度裕度。填入资料不等于平台完成了资格验证。",
+        source=None, multiline=True,
+        visibility={"any": [
+            {"key": f"{side}_preburner_temp_limit_status", "op": "eq", "value": "provisional"},
+            {"key": f"{side}_preburner_temp_limit_status", "op": "eq", "value": "documented"}]})
     PARAMETER_CONTRACT[f"{side}_preburner_mr_target"] = _meta(
         "design_input", "指定温度时仅为反求混合比的初值；指定混合比时为设计输入。初值不应作为性能标定手段。",
         roles_by_mode={"temperature": "initial_guess", "mixture_ratio": "design_input"},
@@ -142,7 +181,7 @@ def preburner_mode_field():
     return {"key": "preburner_design_mode", "label": "预燃室设计方式", "type": "select",
             "default": "temperature", "virtual": True, "cycles": ["ffsc"],
             "unit": "", "factor": 1, "choices": deepcopy(PREBURNER_MODE_CHOICES),
-            **_meta("design_input", "总体设计推荐指定出口温度，反求混合比与分流；复现已知配比时指定混合比，计算温度并检查运行上限。两种方式不同时施加。", source="设计任务选择")}
+            **_meta("design_input", "新方案可选温度目标反求 O/F；已知流量配比时可指定 O/F 计算温度。两种方式都需循环匹配，不能同时独立指定温度和 O/F；这不等于固定硬件的运行控制。", source="设计任务选择")}
 
 # In parallel dual-shaft GG the oxygen-side turbine also receives fuel-rich gas.
 # Single-shaft GG uses the oxygen-side speed and the fuel-side turbine efficiency.

@@ -12,6 +12,7 @@ from materials import list_materials_for_part
 from propellants import propellant_models
 from parameter_contract import parameter_metadata, preburner_mode_field, ROLE_LABELS
 from wall_materials import list_wall_datasets
+from thermo_data import methane_dataset_catalog
 from ui_metadata import (
     _MATERIAL_FIELD_META, CHAMBER_INPUTS, CYCLE_TYPE_CHOICES, GG_LAYOUT_CHOICES, PROPELLANT_CHOICES,
     NONLINEAR_SOLVER_CHOICES, COMBUSTION_LOSS_CHOICES, THERMO_DATASET_CHOICES,
@@ -27,9 +28,10 @@ GROUP_IDS = (
 )
 
 CHAMBER_GROUPS = (
-    ("chamber_contour", "推力室·型面与分区", (
-        "chamber_contraction_ratio", "chamber_l_star_m", "chamber_conv_half_angle_deg",
-        "nozzle_bell_fraction", "cooling_cover_eps")),
+    ("chamber_contour", "推力室型面与覆盖", (
+        "expansion_ratio", "chamber_contraction_ratio", "chamber_l_star_m", "chamber_conv_half_angle_deg",
+        "nozzle_bell_fraction", "nozzle_contour_method", "nozzle_initial_angle_deg",
+        "nozzle_exit_angle_deg", "cooling_cover_eps")),
     ("chamber_channels", "推力室·冷却通道", (
         "cooling_channel_auto_size", "cooling_target_velocity_ms", "cooling_n_channels",
         "cooling_channel_width_m", "cooling_channel_height_m", "cooling_wall_thickness_m",
@@ -163,10 +165,15 @@ def _system_groups(groups):
     import/export, but are not advertised as available design workspaces.
     """
     included = set(GROUP_IDS[:10]) | {"pumps", "solver", "chamber_contour", "chamber_channels", "wall_thermal"}
-    excluded = {"cooling_marching_enable", "cooling_dp_auto", "coolant_cp", "pump_tip_speed_limit_ms"}
+    excluded = {"cooling_marching_enable", "cooling_dp_auto", "coolant_cp", "pump_tip_speed_limit_ms",
+                "methane_thermo_dataset"}
     result = []
     for original in groups:
         if original["id"] not in included:
+            continue
+        if original["id"] == "preburners":
+            # All preburner inputs have one system-editor home. Keep the full
+            # desktop/case groups below unchanged for compatibility.
             continue
         group = deepcopy(original)
         group["fields"] = [f for f in group["fields"] if f["key"] not in excluded]
@@ -176,12 +183,24 @@ def _system_groups(groups):
             group["description"] = "两种方法使用相同物理方程与残差验收判据。TRF 用于对照；求解器停止后仍检查全部启用的迭代层。"
         if group["id"] == "cycle":
             group["description"] = "循环按涡轮排气去向区分开式与闭式；轴系布局另行描述泵与涡轮的机械连接。本模型的双轴 GG 采用燃气并联分流、共用入口及背压假设。"
+        elif group["id"] == "design":
+            group["description"] = "目标推力与下方环境压力构成同一设计工况；室压和总氧燃比为指定输入。主喷管面积比统一在“推力室型面与覆盖”中设置，推力、比冲和流量的计算值在结果区显示。"
         elif group["id"] == "preburner_design":
-            group["title"] = "预燃室设计方式与目标"
-            group["description"] = "指定温度时反求混合比与分流；指定混合比时计算温度并检查运行上限。初值仅影响迭代起点，计算结果在右侧显示。"
+            group["title"] = "预燃室设计"
+            group["description"] = "温度或 O/F 用于概念设计点匹配；运行上限单独登记依据。固定硬件的实际温度还取决于流量、阀门及部件特性。"
+            previous = next(g for g in groups if g["id"] == "preburners")
+            group["fields"].extend(deepcopy(previous["fields"]))
             group["fields"].insert(0, preburner_mode_field())
-        elif group["id"] == "preburners":
-            group["description"] = "运行温度上限是方案验收条件，不代表材料寿命已验证。pPB/pc 与真正的涡轮进出口压比不同。"
+            group["sections"] = [
+                {"id": "targets", "title": "设计方式与目标",
+                 "description": "仅显示当前生效的设计输入；O/F 为该预燃室的氧化剂 / 燃料质量流量比。",
+                 "keys": ["preburner_design_mode", "ox_preburner_temp_target", "fuel_preburner_temp_target",
+                          "ox_preburner_mr_target", "fuel_preburner_mr_target"]},
+                {"id": "limits", "title": "运行温度约束",
+                 "description": "设计目标不等于允许上限。没有限值或依据时，不把该项判为已通过。",
+                 "keys": [f"{side}_preburner_temp_limit{suffix}" for side in ("ox", "fuel")
+                          for suffix in ("_status", "", "_basis")]},
+            ]
         elif group["id"] == "thermo":
             group["description"] = "以下为准一维冷却与循环热反馈的迭代起点，不是最终燃气物性，也不是化学焓参考态。预算模式不显示。"
         elif group["id"] == "inlet":
@@ -198,11 +217,11 @@ def _system_groups(groups):
             group["title"] = "涡轮泵·概念选型与转速设定"
             group["description"] = "指定或按比转速估算转速；尚未依据泵 / 涡轮特性图匹配工作点。压头系数仅保留于完整参数中的概念几何估算，相关诊断待统一。"
         elif group["id"] == "chamber_contour":
-            group["title"] = "冷却系统几何·型面与覆盖"
-            group["description"] = "准一维热侧、冷却通道长度与面积使用同一规范内轮廓；Bartz 型关联读取该轮廓的上游喉部曲率半径。冷却覆盖按出口面积比指定，结果记录实际起止位置。这里提供系统级几何，部件详细流动与结构另行分析。"
+            group["description"] = "抛物线钟形喷管采用相切圆弧和二次 Bézier 曲线，属于系统级工程近似；指定端点角度不代表已完成推力优化。循环、热侧与冷却共用同一轮廓，尺寸和图示见左侧“推力室与喷管几何”。旧方案保留历史角度方法，切换后保存为新版本。"
         elif group["id"] == "chamber_channels":
             group["title"] = "冷却系统几何·通道与壁面"
             group["description"] = "额定设计点可按入口流速估算通道深度；固定硬件节流沿用设计点几何。压降由流量、密度及截面积沿程求解，不能单独指定另一套水力长度。"
+            group["geometry_source_key"] = "cooling_channel_table_json"
         result.append(group)
     return result
 
@@ -217,6 +236,12 @@ def design_ui_schema():
             "id": group_id, "title": _title(title), "full_title": title, "cycles": cycles,
             "fields": [_field(key, label, unit, defaults, cycles) for key, label, unit in fields],
         })
+        if group_id == "preburners":
+            for side, label in (("ox", "富氧"), ("fuel", "富燃")):
+                groups[-1]["fields"].extend([
+                    _field(f"{side}_preburner_temp_limit_status", f"{label}侧温度约束状态", "", defaults, cycles),
+                    _field(f"{side}_preburner_temp_limit_basis", f"{label}侧限值依据与适用条件", "", defaults, cycles),
+                ])
     for group_id, title, keys in CHAMBER_GROUPS:
         cycles = ["ffsc", "gg"]
         groups.append({
@@ -232,9 +257,10 @@ def design_ui_schema():
                    for key, label, unit in EXTRA_FIELDS],
     })
     return {
-        "version": 8, "defaults": defaults, "groups": groups,
+        "version": 12, "defaults": defaults, "groups": groups,
         "parameter_role_labels": dict(ROLE_LABELS),
         "propellant_models": propellant_models(),
+        "methane_thermo_datasets": methane_dataset_catalog(),
         "system_groups": _system_groups(groups),
         "scope": {"id": "engine_system", "label": "系统设计 · 运行仿真",
                   "description": "支持稳态循环匹配与适用范围明确的瞬态研究；热态扰动及预冷、点火、关机等模型分别说明边界，尚未形成经验证的整机全过程仿真。完整方案参数保留用于兼容与追溯。"},

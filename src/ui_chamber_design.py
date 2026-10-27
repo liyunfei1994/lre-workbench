@@ -330,6 +330,7 @@ class ChamberDesignPanel(QWidget):
         left = QVBoxLayout()
         box = QGroupBox("型面参数（改后重跑设计点生效）")
         form = QFormLayout(box)
+        self._register_edit(form, "expansion_ratio", *CHAMBER_INPUTS['expansion_ratio'])
         self._register_edit(form, "chamber_contraction_ratio", *CHAMBER_INPUTS['chamber_contraction_ratio'])
         self._register_edit(form, "chamber_l_star_m", *CHAMBER_INPUTS['chamber_l_star_m'])
         self._register_edit(form, "chamber_conv_half_angle_deg", *CHAMBER_INPUTS['chamber_conv_half_angle_deg'])

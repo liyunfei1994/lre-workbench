@@ -6,7 +6,10 @@ Old inputs retain GRI30; changing data must be recorded in a new calculation.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
-from functools import wraps
+from functools import lru_cache, wraps
+from copy import deepcopy
+from pathlib import Path
+import hashlib
 
 
 METHANE_DATASETS = {
@@ -14,6 +17,35 @@ METHANE_DATASETS = {
     "gri30_highT": {"file": "gri30_highT.yaml", "phase": "gri30", "label": "GRI30 高温热化学数据"},
 }
 _ACTIVE = ContextVar("methane_thermo_dataset", default="gri30")
+
+
+@lru_cache(maxsize=2)
+def _bundled_dataset_metadata(dataset):
+    """Describe the exact bundled species data; do not infer its validity."""
+    import cantera as ct
+
+    definition = METHANE_DATASETS[dataset]
+    raw = (Path(ct.__file__).resolve().parent / "data" / definition["file"]).read_bytes()
+    # The Python read also avoids Cantera's Windows non-ASCII path lookup.
+    gas = ct.Solution(yaml=raw.decode("utf-8"), name=definition["phase"])
+    species = gas.species()
+    return {
+        "id": dataset, **definition,
+        "cantera_version": ct.__version__,
+        "source_label": "Cantera 官方随附数据",
+        "source_url": f"https://github.com/Cantera/cantera/blob/v{ct.__version__}/data/{definition['file']}",
+        "file_description": str(gas.input_header.get("description", "")),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "species_count": len(species), "gas_eos": gas.thermo_model,
+        "common_temperature_range_K": [max(s.thermo.min_temp for s in species),
+                                       min(s.thermo.max_temp for s in species)],
+        "historical": dataset == "gri30",
+    }
+
+
+def methane_dataset_catalog():
+    """Return fresh read-only UI descriptions, separate from editable inputs."""
+    return [deepcopy(_bundled_dataset_metadata(key)) for key in METHANE_DATASETS]
 
 
 def active_methane_dataset():

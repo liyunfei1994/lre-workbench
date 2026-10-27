@@ -102,7 +102,8 @@ class CoolingChannel:
             bell_fraction=.8, channel_table=None, n_points=120, k_wall_func=None,
             gas_emissivity=.2, wall_temp_limit_K=800., film_fraction=0., counterflow=True,
             wall_thermal_dataset_id=None, wall_manufacturing_state="unspecified", wall_material_zones=None,
-            remap_hot_side_trial=False):
+            remap_hot_side_trial=False, nozzle_contour_method="legacy_log_v1",
+            nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0):
         self.fuel_species = normalize_fuel_species(fuel_species)
         if self.fuel_species == "c12h26":
             validate_surrogate_state(t_inlet, p_inlet)
@@ -190,7 +191,9 @@ class CoolingChannel:
             n_points=self.n_points,hot_side_profile=self.hot_side_profile,inlet_enthalpy_Jkg=h_in,
             wall_thermal_dataset_id=self.wall_thermal_dataset_id,
             wall_manufacturing_state=self.wall_manufacturing_state,
-            wall_material_zones=self.wall_material_zones,remap_hot_side_trial=self.remap_hot_side_trial)
+            wall_material_zones=self.wall_material_zones,remap_hot_side_trial=self.remap_hot_side_trial,
+            nozzle_contour_method=self.nozzle_contour_method,
+            nozzle_initial_angle_deg=self.nozzle_initial_angle_deg, nozzle_exit_angle_deg=self.nozzle_exit_angle_deg)
         profile = result["profile"]
         s,b = result["summary"],result["balance"]
         channels = [c for c in profile["cells"] if c["kind"] == "channel"]

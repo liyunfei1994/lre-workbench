@@ -356,6 +356,8 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
             raise HTTPException(404, "任务不存在。")
         for field in ("inputs", "result", "progress"):
             row[field] = json.loads(row[field]) if row[field] else None
+        from webapp.nozzle_geometry import nozzle_geometry_view
+        row["nozzle_geometry"] = nozzle_geometry_view(row["result"], row["id"])
         return row
 
     @app.post("/api/jobs/{job_id}/cancel")
@@ -968,6 +970,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         # registry associations can incorrectly classify JavaScript as text/plain.
         media_types = {"bootstrap.js": "text/javascript", "app.js": "text/javascript", "results.js": "text/javascript",
                        "parameter-editor.js": "text/javascript",
+                       "nozzle-geometry.js": "text/javascript", "nozzle-geometry.css": "text/css",
                        "thermo-applicability.js": "text/javascript", "thermo-applicability.css": "text/css",
                        "cooling.js": "text/javascript", "cooling.css": "text/css",
                        "convergence.js": "text/javascript", "convergence.css": "text/css",
@@ -977,6 +980,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
                        "cycle-model.js": "text/javascript", "cycle-schematic.js": "text/javascript", "cycle-schematic.css": "text/css",
                        "flow-model.js": "text/javascript", "flow-analysis.js": "text/javascript", "flow-analysis.css": "text/css",
                        "validation.js": "text/javascript", "validation.css": "text/css",
+                       "thermo-stations.js": "text/javascript",
                        "throttle.js": "text/javascript", "throttle.css": "text/css",
                        "transient.js": "text/javascript", "transient.css": "text/css",
                        "feed-network.js": "text/javascript", "feed-network.css": "text/css",

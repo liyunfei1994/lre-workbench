@@ -58,7 +58,7 @@ from core import (
     ValidationError,
 )
 from cooling import CoolingChannel
-from regen_coupling import close_regen_cycle, cooling_arguments
+from regen_coupling import close_regen_cycle, cooling_arguments, fixed_contour_inputs
 from chamber_sizing import size_combustion_chamber
 from pump import Pump, fluid_density
 from nozzle import Nozzle
@@ -1578,6 +1578,7 @@ class GGCycleModel:
         # Web studies use an immutable source design. Never silently fall back
         # to proportional pressure when that explicitly supplied baseline fails.
         if design_baseline is not None:
+            frozen_contour = fixed_contour_inputs(design_baseline)
             At_design = float(design_baseline.get("throat_area_m2", 0))
             if not math.isfinite(At_design) or At_design <= 0:
                 raise ValueError("固定喉部基准面积必须为有限正数。")
@@ -1587,11 +1588,17 @@ class GGCycleModel:
                 if not math.isfinite(frozen_h_m) or frozen_h_m <= 1e-4:
                     raise ValueError("冷却通道冻结高度无效。")
         else:
+            frozen_contour = {key: getattr(self.inputs, key) for key in (
+                "nozzle_contour_method", "nozzle_initial_angle_deg", "nozzle_exit_angle_deg",
+                "nozzle_bell_fraction", "chamber_conv_half_angle_deg", "expansion_ratio")}
             At_design = None
             frozen_h_m = None
             try:
                 _design = GGCycleModel(copy.deepcopy(self.inputs)).evaluate(
                     include_cooling_marching=include_cooling_marching)
+                profile = getattr(_design.components.get("cooling_channel"), "profile", None) or {}
+                frozen_contour = fixed_contour_inputs({"contour_inputs": frozen_contour,
+                    "cooling_hardware": {"geometry": profile.get("geometry", {})}})
                 At_design = float(_design.components["nozzle"].outputs.get("At_m2", 0.0)) or None
                 if (bool(getattr(self.inputs, "cooling_channel_auto_size", 1.0))
                         and bool(getattr(self.inputs, "cooling_bartz_mode", True))):
@@ -1604,6 +1611,8 @@ class GGCycleModel:
 
         def _solve_at(thrust_target: float, pc_val: float):
             pi = copy.deepcopy(self.inputs)
+            for key, value in frozen_contour.items():
+                setattr(pi, key, value)
             pi.thrust = thrust_target
             pi.pc = pc_val
             pi.cooling_marching_enable = 0.0

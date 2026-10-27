@@ -11,6 +11,7 @@ EngineInputs 的默认值构成工程设计示例，不是一套经过验证的 
 
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
@@ -34,6 +35,27 @@ R_UNIVERSAL = 8314.462618
 class ValidationError(Exception):
     """参数校验失败时抛出的异常。"""
     pass
+
+
+PREBURNER_LIMIT_STATUSES = ("unset", "provisional", "documented")
+
+
+def preburner_temperature_constraint(inputs, side: str) -> dict:
+    """Resolve an optional gas-temperature constraint without inventing evidence.
+
+    Missing status is the historical, provisional numeric constraint. Saved
+    snapshots are not rewritten. An unset value remains stored but is inactive.
+    """
+    if side not in ("ox", "fuel"):
+        raise ValueError("preburner side must be ox or fuel")
+    prefix = f"{side}_preburner_temp_limit"
+    read = inputs.get if isinstance(inputs, dict) else lambda key, default=None: getattr(inputs, key, default)
+    status = read(f"{prefix}_status", "provisional")
+    basis = read(f"{prefix}_basis", "")
+    basis = basis.strip() if isinstance(basis, str) else ""
+    active = status in ("provisional", "documented")
+    return {"status": status, "basis": basis,
+            "limit_K": read(prefix) if active else None}
 
 
 def _check_range(
@@ -209,6 +231,12 @@ class EngineInputs:
     # 实际允许值还需材料、环境、冷却和寿命证据，不能称为通用材料耐温极限。
     ox_preburner_temp_limit: float = 800.0    # [K] 富氧侧运行限值假设
     fuel_preburner_temp_limit: float = 900.0  # [K] 富燃侧运行限值假设
+    # 缺少状态的历史方案仍按暂定数值检查；不据此宣称材料/寿命已验证。
+    # unset 不使用保存的数值；documented 仅表示用户已填写该方案的依据。
+    ox_preburner_temp_limit_status: str = "provisional"
+    fuel_preburner_temp_limit_status: str = "provisional"
+    ox_preburner_temp_limit_basis: str = ""
+    fuel_preburner_temp_limit_basis: str = ""
 
     # ---------- 压力网络（V7 新增，FFSC 必需）----------
     # ⚠ FFSC 模式已废弃（V13）：主燃烧室喷注器压降统一由 ox/fuel_turbine_exhaust_dp_ratio
@@ -235,9 +263,12 @@ class EngineInputs:
     chamber_contraction_ratio: float = 2.5
     chamber_l_star_m: float = 1.0
     chamber_conv_half_angle_deg: float = 30.0   # 收缩段半锥角 β [°]（典型 25–45°）
-    # 钟形喷管长度比（0.80 = 80% bell，TOP 的核心定义参数；V19 起为正式输入，
+    # 钟形喷管长度比（相对同喉部/出口 15° 锥形喷管长度；
     # 全链同口径：geometry 轮廓 / cooling_marching / 2D图 / CSV 导出）
     nozzle_bell_fraction: float = 0.80
+    nozzle_contour_method: str = "parabolic_bell_explicit_v1"
+    nozzle_initial_angle_deg: float = 35.0  # 设计角度示例，非优化/实机数据
+    nozzle_exit_angle_deg: float = 10.0
     # 具体材料选择与温度依赖物性由下面的材料字段管理。
 
     # ---------- 预燃室混合比模式与历史序列化开关 ----------
@@ -251,7 +282,7 @@ class EngineInputs:
     # ---------- 预燃室温度目标模式（V11 新增）──────────────────
     # 温度模式适用于给定预燃室出口温度的概念设计；外环在当前入口焓与压力下
     # 反求 MR，并重新检查耦合后的目标误差。它不是比固定 MR 更真实的物理模型。
-    # 目标必须不超过用户给定上限；默认目标与上限均为假设，不声称材料裕度已验证。
+    # 启用上限时目标必须不超过上限；默认目标与上限均为假设，不声称材料裕度已验证。
     use_target_preburner_temp: float = 1.0
     ox_preburner_temp_target: float = 750.0    # [K] 富氧预燃室出口设计目标
     fuel_preburner_temp_target: float = 850.0  # [K] 富燃预燃室出口设计目标
@@ -389,6 +420,13 @@ class EngineInputs:
     wall_manufacturing_state: str = "unspecified"
     wall_material_zones_json: str = ""
 
+    @classmethod
+    def from_dict(cls, values):
+        """Load saved input documents without changing the historical contour."""
+        copied = dict(values)
+        copied.setdefault("nozzle_contour_method", "legacy_log_v1")
+        return cls(**copied)
+
     def __post_init__(self):
         """输入参数物理范围校验。"""
 
@@ -494,6 +532,23 @@ class EngineInputs:
         _check_range("cooling_channel_k_minor（局部损失动压头数）", self.cooling_channel_k_minor, lo=0.0, hi=20.0)
         _check_range("chamber_conv_half_angle_deg（收缩段半锥角）", self.chamber_conv_half_angle_deg, lo=10.0, hi=60.0)
         _check_range("nozzle_bell_fraction（钟形长度比）", self.nozzle_bell_fraction, lo=0.60, hi=1.00)
+        from geometry.nozzle import CONTOUR_METHODS, _bezier_definition
+        if self.nozzle_contour_method not in CONTOUR_METHODS:
+            raise ValidationError("未知的喷管型面方法。")
+        # Geometry compatibility is dimensionless and independent of throat sizing.
+        try:
+            _bezier_definition(1., math.sqrt(self.expansion_ratio), self.expansion_ratio,
+                self.nozzle_bell_fraction, nozzle_contour_method=self.nozzle_contour_method,
+                nozzle_initial_angle_deg=self.nozzle_initial_angle_deg,
+                nozzle_exit_angle_deg=self.nozzle_exit_angle_deg)
+            if self.nozzle_contour_method == "parabolic_bell_explicit_v1":
+                from chamber_contour import convergent_geometry
+                cg = convergent_geometry(math.sqrt(self.chamber_contraction_ratio), 1.,
+                                         self.chamber_conv_half_angle_deg)
+                if cg["R1_m"] <= 1e-12:
+                    raise ValueError("圆筒入口过渡圆角退化为尖角；请增大收缩比或减小收缩角。")
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValidationError(str(exc)) from exc
         _check_range("cooling_gas_emissivity（燃气辐射发射率）", self.cooling_gas_emissivity, lo=0.0, hi=0.60)
         # 通道分布表：仅做 JSON 可解析性校验（结构校验在 chamber_design.parse_channel_table）
         if isinstance(self.cooling_channel_table_json, str) and self.cooling_channel_table_json.strip():
@@ -532,11 +587,20 @@ class EngineInputs:
         _check_range("fuel_turbine_exhaust_dp_ratio（富燃涡轮出口至主燃烧室压降比）",
                      self.fuel_turbine_exhaust_dp_ratio, lo=0.0, hi=0.8)
 
-        # ── 预燃室温度上限（V6 新增）───────────────────
-        _check_range("ox_preburner_temp_limit（富氧预燃室温度上限）",
-                     self.ox_preburner_temp_limit, lo=400, hi=1200)
-        _check_range("fuel_preburner_temp_limit（富燃预燃室温度上限）",
-                     self.fuel_preburner_temp_limit, lo=600, hi=1500)
+        # ── 可选的 FFSC 预燃室气体温度约束 ──────────────
+        # 数值范围不代表材料许可范围；GG 不使用这两侧隐藏约束。
+        if self.cycle_type == "ffsc":
+            for side in ("ox", "fuel"):
+                constraint = preburner_temperature_constraint(self, side)
+                key = f"{side}_preburner_temp_limit"
+                if constraint["status"] not in PREBURNER_LIMIT_STATUSES:
+                    raise ValidationError(f"{key}_status 必须是 unset、provisional 或 documented。")
+                if constraint["status"] == "documented" and not constraint["basis"]:
+                    raise ValidationError(f"{key}_basis：已有依据状态必须填写该限值的适用条件和来源。")
+                if constraint["status"] != "unset":
+                    limit = constraint["limit_K"]
+                    if not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
+                        raise ValidationError(f"{key} 必须是大于 0 K 的有限数值。")
 
         # ── 压力网络参数（V7 新增）──────────────────────
         _check_range("injector_dp_ratio_ox（氧喷注器压降比）",
@@ -567,36 +631,34 @@ class EngineInputs:
         # ── 预燃室目标混合比（V3 新增）──────────────────
         _check_range("use_target_preburner_mr（是否采用目标预燃室混合比模式）",
                      self.use_target_preburner_mr, lo=0.0, hi=1.0)
-        _check_range("ox_preburner_mr_target（富氧预燃室目标 O/F）",
-                     self.ox_preburner_mr_target, lo=5.0, hi=200.0)
-        _check_range("fuel_preburner_mr_target（富燃预燃室目标 O/F）",
-                     self.fuel_preburner_mr_target, lo=0.01, hi=2.0)
-        _warn_range("ox_preburner_mr_target（富氧预燃室目标 O/F）",
-                    self.ox_preburner_mr_target, 40.0, 80.0)
-        _warn_range("fuel_preburner_mr_target（富燃预燃室目标 O/F）",
-                    self.fuel_preburner_mr_target, 0.05, 0.30)
+        # 下列宽范围是当前求解器支持域，不是工程推荐值或材料温度依据。
+        # 温度模式实际使用 MR 初始化循环；GG 与历史自由分流不使用这两项。
+        if self.cycle_type == "ffsc" and (
+                self.use_target_preburner_temp >= 0.5 or self.use_target_preburner_mr >= 0.5):
+            role = "O/F 初值" if self.use_target_preburner_temp >= 0.5 else "指定 O/F"
+            for side, label, lower, upper in (("ox", "富氧", 5.0, 200.0),
+                                               ("fuel", "富燃", 0.01, 2.0)):
+                value = getattr(self, f"{side}_preburner_mr_target")
+                name = f"{side}_preburner_mr_target（{label}预燃室{role}；当前求解器支持范围）"
+                if not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValidationError(f"{name} 必须是有限数值。")
+                _check_range(name, value, lo=lower, hi=upper)
 
         # ── 预燃室温度目标模式（V11 新增）──────────────────
         _check_range("use_target_preburner_temp（温度目标模式开关）",
                      self.use_target_preburner_temp, lo=0.0, hi=1.0)
-        _check_range("ox_preburner_temp_target（富氧预燃室目标温度）",
-                     self.ox_preburner_temp_target, lo=400.0, hi=1200.0)
-        _check_range("fuel_preburner_temp_target（富燃预燃室目标温度）",
-                     self.fuel_preburner_temp_target, lo=600.0, hi=1500.0)
-        if self.use_target_preburner_temp >= 0.5:
-            # 目标温度不得超过用户指定运行限值；不代表已完成材料验证。
-            if self.ox_preburner_temp_target > self.ox_preburner_temp_limit:
-                raise ValidationError(
-                    f"ox_preburner_temp_target = {self.ox_preburner_temp_target} K "
-                    f"> ox_preburner_temp_limit = {self.ox_preburner_temp_limit} K，"
-                    f"目标温度不能超过富氧侧指定温度上限"
-                )
-            if self.fuel_preburner_temp_target > self.fuel_preburner_temp_limit:
-                raise ValidationError(
-                    f"fuel_preburner_temp_target = {self.fuel_preburner_temp_target} K "
-                    f"> fuel_preburner_temp_limit = {self.fuel_preburner_temp_limit} K，"
-                    f"目标温度不能超过富燃侧指定温度上限"
-                )
+        if self.cycle_type == "ffsc" and self.use_target_preburner_temp >= 0.5:
+            for side, label in (("ox", "富氧"), ("fuel", "富燃")):
+                target = getattr(self, f"{side}_preburner_temp_target")
+                if not isinstance(target, (int, float)) or not math.isfinite(target) or target <= 0:
+                    raise ValidationError(f"{side}_preburner_temp_target 必须是大于 0 K 的有限数值。")
+                limit = preburner_temperature_constraint(self, side)["limit_K"]
+                if limit is not None and target > limit:
+                    raise ValidationError(
+                        f"{side}_preburner_temp_target = {target} K "
+                        f"> {side}_preburner_temp_limit = {limit} K，"
+                        f"目标温度不能超过{label}侧已启用的温度上限。"
+                    )
 
         # ── 自由分流模式初始猜测 ─────────────────────────
         _check_range("fuel_split_to_ox_preburner（燃料→富氧预燃室比例）",

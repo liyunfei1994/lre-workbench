@@ -93,7 +93,7 @@ class ValidationAPITests(unittest.TestCase):
         self.assertEqual(guest.post("/api/validations/"+keys[0]+"/cancel", json={}).status_code, 403)
         self.assertEqual(self.admin.post("/api/validations/"+keys[0]+"/cancel", json={}).status_code, 200)
         self.assertEqual(self.admin.post("/api/validations/"+keys[0]+"/cancel", json={}).status_code, 409)
-        for filename in ("validation.js", "validation.css", "validation-charts.js", "validation-charts.css", "property-comparison.js", "property-comparison.css", "component-analysis.js", "component-analysis.css", "flow-model.js", "flow-analysis.js", "flow-analysis.css", "cycle-model.js", "cycle-schematic.js", "cycle-schematic.css"):
+        for filename in ("validation.js", "thermo-stations.js", "validation.css", "validation-charts.js", "validation-charts.css", "property-comparison.js", "property-comparison.css", "component-analysis.js", "component-analysis.css", "flow-model.js", "flow-analysis.js", "flow-analysis.css", "cycle-model.js", "cycle-schematic.js", "cycle-schematic.css"):
             self.assertEqual(self.admin.get("/static/"+filename).status_code, 200)
 
     def test_actual_worker_preserves_source_and_returns_real_backends(self):

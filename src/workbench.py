@@ -942,8 +942,8 @@ class WorkbenchWindow(CfdIntegrationMixin, CaseSafetyMixin, legacy.MainWindow):
         table.setHorizontalHeaderLabels(["校核项", "当前值", "判据", "状态"])
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.verticalHeader().hide()
-        labels = {"pass": "通过", "fail": "未通过", "unknown": "待确认"}
-        colors = {"pass": "#15803d", "fail": "#b91c1c", "unknown": "#a65a0a"}
+        labels = {"pass": "通过", "fail": "未通过", "unknown": "待确认", "review": "依据待核实"}
+        colors = {"pass": "#15803d", "fail": "#b91c1c", "unknown": "#a65a0a", "review": "#a65a0a"}
         for row, check in enumerate(assessment["checks"]):
             value = "—" if check["value"] is None else f"{check['value']:.5g} {check['unit']}"
             limit = "—" if check["limit"] is None else f"{'≥' if check['criterion'] == 'minimum' else '≤'} {check['limit']:.5g} {check['unit']}"
@@ -1353,6 +1353,8 @@ class WorkbenchWindow(CfdIntegrationMixin, CaseSafetyMixin, legacy.MainWindow):
             raise ValueError("未知参数：" + ", ".join(sorted(unknown)))
         values = asdict(EngineInputs())
         values.update(document["inputs"])
+        if "nozzle_contour_method" not in document["inputs"]:
+            values["nozzle_contour_method"] = "legacy_log_v1"
         if document.get("format") == "ffsc.workbench.case":
             from thermo_data import saved_input_identity
             values.update(saved_input_identity(document["inputs"]))

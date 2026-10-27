@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from ._common import *  # noqa: F401,F403
 from .engine3d import EngineThreeDView
-from .nozzle import _fig_nozzle, _explain_nozzle, _build_nozzle_3d
+from .nozzle import _fig_nozzle, _explain_nozzle, _build_nozzle_3d, _nozzle_method_note
 from .chamber import _fig_chamber, _explain_chamber, _build_chamber_3d
 from .injector import _fig_injector, _explain_injector
 from .pumps import _fig_pumps, _explain_pumps
@@ -80,7 +80,9 @@ def export_contour_csv(geom: Dict[str, Any], kind: str, path: str,
     Lconv = float(n.get("convergent_length_m") or 0.0)
     Lnoz = float(n.get("nozzle_length_m") or 0.0)
     bf = float(n.get("bell_fraction") or 0.80)
-    ntype = str(n.get("nozzle_type") or "TOP")
+    ntype = str(n.get("nozzle_type") or "历史记录未保存")
+    method = str(n.get("nozzle_contour_method") or "历史记录未保存")
+    angle_source = str(n.get("angle_source") or "历史记录未保存")
 
     # 整段燃气侧内壁:收缩段起点前补一段燃烧室圆柱(到喷注面)
     x_inj = xs[0] - Lc
@@ -93,7 +95,9 @@ def export_contour_csv(geom: Dict[str, Any], kind: str, path: str,
         "# 单位 米 [m]; 喉部 x = 0; r = 到轴线半径 (轴对称; 绕 x 轴旋转成三维)",
         "# 用途 外部 CAD 旋转建模 / CFD 轴对称网格 / 后处理",
         f"# Dt = {2*rt:.6f} m | De = {2*re:.6f} m | Dc = {2*rc:.6f} m",
-        f"# 喷管类型 = {ntype} (Thrust-Optimized Parabola) | bell 长度比 = {bf:.2f}",
+        f"# 内壁型面 = 抛物线钟形（系统级工程近似） | bell 长度比 = {bf:.2f}",
+        f"# 保存的类型标识 = {ntype} | 构造方法 = {method} | 角度来源 = {angle_source}",
+        f"# 方法说明 = {_nozzle_method_note(n)}；历史类型标识不构成优化型面证明",
         f"# 膨胀比 eps = {eps:.4f} | 收缩比 = {cr:.4f}",
         f"# L_chamber = {Lc:.6f} | L_conv = {Lconv:.6f} | L_nozzle = {Lnoz:.6f} | "
         f"L_total = {Lc + Lconv + Lnoz:.6f} (m)",

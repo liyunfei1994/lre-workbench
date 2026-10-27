@@ -178,7 +178,9 @@ class EngineeringTests(unittest.TestCase):
         self.assertEqual(assessment["status"], "unknown", assessment)
         missing = {row["key"] for row in assessment["checks"] if row["status"] == "unknown"}
         self.assertEqual(missing, {"feed_network_closure", "energy_ledger_closure"})
-        self.assertTrue(all(row["status"] == "pass" for row in assessment["checks"] if row["key"] not in missing))
+        provisional = {"ox_preburner_T_combustion_K", "fuel_preburner_T_combustion_K"}
+        self.assertTrue(all(row["status"] == ("review" if row["key"] in provisional else "pass")
+                            for row in assessment["checks"] if row["key"] not in missing))
         json.dumps(assessment, allow_nan=False)
 
     def test_converged_result_can_fail_pressure_temperature_and_power(self):

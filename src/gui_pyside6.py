@@ -97,7 +97,7 @@ from ui_metadata import (
     PARAM_GROUPS, OVERVIEW_GROUPS, OVERVIEW_GROUPS_GG, COMPONENT_ORDER,
     COMPONENT_LABELS, COMPONENT_GROUPS, KEY_LABELS, STATE_LABELS
 )
-from core import EngineInputs, CycleResults
+from core import EngineInputs, CycleResults, preburner_temperature_constraint
 from cycle import FFSCCycleModel
 from gg_cycle import make_cycle_model
 from geometry import compute_geometry, geometry_to_dict
@@ -3002,9 +3002,9 @@ class MainWindow(QMainWindow):
 
         # 顶部说明
         intro = QLabel(
-            "通过扫描预燃室 O/F 找到温度落入 700–800 K（富氧侧涡轮材料限值）的设计点，"
+            "扫描预燃室 O/F，比较出口温度、分流与循环匹配；运行上限由方案单独设定，不能由气体温度推定材料寿命。"
             "选中一行可直接获得 CFTurbo Global Setup 所需的 (T_in, p_in, p_out, π_t, ṁ, cp, γ, R, MW)。\n"
-            "提示：T_PB 已是真实物理温度（LOX/CH4 真实流体焓修正已内置于 _real_fluid_enthalpy，CoolProp），无需再减 150 K。"
+            "提示：T_PB 是使用当前入口焓与热化学假设得到的计算值；不是金属温度，也不是已验证的实测温度。"
         )
         intro.setObjectName("MutedLabel")
         intro.setWordWrap(True)
@@ -3991,23 +3991,25 @@ class MainWindow(QMainWindow):
         thrust_err = abs(float(s.get("thrust_error_percent", 999) or 999))
         oxT = float(s.get("ox_preburner_T_combustion_K", 0) or 0)
         fuelT = float(s.get("fuel_preburner_T_combustion_K", 0) or 0)
-        ox_limit = float(results.inputs.ox_preburner_temp_limit)
-        fuel_limit = float(results.inputs.fuel_preburner_temp_limit)
-        # V11：温度目标模式下，预燃室温度卡片显示"目标 / 上限"，并按是否命中目标着色
+        # 目标命中、数值限值与限值依据分别表述；未设定/暂定不显示绿色验收。
         temp_mode = float(s.get("preburner_temp_target_mode", 0.0) or 0.0) >= 0.5
-        if temp_mode:
-            ox_tgt = float(s.get("ox_preburner_temp_target_K", ox_limit) or ox_limit)
-            fuel_tgt = float(s.get("fuel_preburner_temp_target_K", fuel_limit) or fuel_limit)
-            ox_pb_hint = f"目标 {self._fmt(ox_tgt)} / 上限 {self._fmt(ox_limit)} K"
-            fuel_pb_hint = f"目标 {self._fmt(fuel_tgt)} / 上限 {self._fmt(fuel_limit)} K"
-            # 命中目标(±5K)且不超上限 → ok；超上限 → warning；偏离目标 → neutral
-            ox_pb_state = "ok" if (oxT <= ox_limit and abs(oxT - ox_tgt) <= 5.0) else ("warning" if oxT > ox_limit else "neutral")
-            fuel_pb_state = "ok" if (fuelT <= fuel_limit and abs(fuelT - fuel_tgt) <= 5.0) else ("warning" if fuelT > fuel_limit else "neutral")
-        else:
-            ox_pb_hint = f"上限 {self._fmt(ox_limit)} K"
-            fuel_pb_hint = f"上限 {self._fmt(fuel_limit)} K"
-            ox_pb_state = "ok" if oxT <= ox_limit else "warning"
-            fuel_pb_state = "ok" if fuelT <= fuel_limit else "warning"
+        def preburner_card(side, temperature):
+            constraint = preburner_temperature_constraint(results.inputs, side)
+            limit, status = constraint["limit_K"], constraint["status"]
+            target = s.get(f"{side}_preburner_temp_target_K",
+                           getattr(results.inputs, f"{side}_preburner_temp_target", None))
+            target_hint = f"目标 {self._fmt(target)} K / " if temp_mode else ""
+            if status == "unset":
+                return target_hint + "上限未设定 · 尚未评估", "neutral"
+            if status == "provisional":
+                return target_hint + f"暂定上限 {self._fmt(limit)} K · 依据待核实", "warning"
+            if status != "documented" or not constraint["basis"] or limit is None:
+                return target_hint + "上限依据不完整 · 尚未评估", "neutral"
+            reached = not temp_mode or (target is not None and abs(temperature - target) <= 5.0)
+            state = "warning" if temperature > limit else "ok" if reached else "neutral"
+            return target_hint + f"方案上限 {self._fmt(limit)} K · 已填写依据", state
+        ox_pb_hint, ox_pb_state = preburner_card("ox", oxT)
+        fuel_pb_hint, fuel_pb_state = preburner_card("fuel", fuelT)
         # 真空比冲 = 发动机内禀属性(主显);海平面比冲 = 测试结果(副显)
         isp_vac = s.get("Isp_vac_s")
         isp_sl  = s.get("Isp_s")
@@ -4684,22 +4686,19 @@ class MainWindow(QMainWindow):
         # ───── 预燃室 ─────
         if "T_combustion_K" in o and inputs is not None:
             Tc = o["T_combustion_K"]
-            if name == "ox_preburner":
-                lim = getattr(inputs, "ox_preburner_temp_limit", 9999)
-                if Tc > lim:
+            if name in ("ox_preburner", "fuel_preburner"):
+                constraint = preburner_temperature_constraint(inputs, name.split("_")[0])
+                lim, status = constraint["limit_K"], constraint["status"]
+                if status == "unset":
+                    badges.append(("温度上限未设定 · 尚未评估", "neutral"))
+                elif status == "documented" and not constraint["basis"]:
+                    badges.append(("温度上限依据不完整", "neutral"))
+                elif lim is not None and Tc > lim:
                     badges.append((f"T={Tc:.0f}>限 {lim:.0f}K", "error"))
-                elif Tc > 0.95 * lim:
-                    badges.append((f"T={Tc:.0f}≈限", "warn"))
-                else:
-                    badges.append((f"T={Tc:.0f}K ✓", "ok"))
-            elif name == "fuel_preburner":
-                lim = getattr(inputs, "fuel_preburner_temp_limit", 9999)
-                if Tc > lim:
-                    badges.append((f"T={Tc:.0f}>限 {lim:.0f}K", "error"))
-                elif Tc > 0.95 * lim:
-                    badges.append((f"T={Tc:.0f}≈限", "warn"))
-                else:
-                    badges.append((f"T={Tc:.0f}K ✓", "ok"))
+                elif status == "provisional":
+                    badges.append((f"T={Tc:.0f}K · 暂定限值依据待核实", "warn"))
+                elif lim is not None:
+                    badges.append((f"T={Tc:.0f}K · 满足方案上限", "ok"))
 
         return badges
 

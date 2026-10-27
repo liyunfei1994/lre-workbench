@@ -37,7 +37,13 @@ function element() {
     setAttribute() {}, showModal() {}, close() {}, reset() {}, append() {}, click() {}, remove() {}, focus() {}};
 }
 
-function harness(fetcher) {
+function memoryStorage() {
+  const items=new Map();
+  return {getItem:key=>items.get(key)??null,setItem:(key,value)=>items.set(key,String(value)),
+    removeItem:key=>items.delete(key)};
+}
+
+function harness(fetcher,{storage=memoryStorage()}={}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], element()]));
   const body = element();
   let confirmations = 0;
@@ -47,30 +53,179 @@ function harness(fetcher) {
     document: {hidden: false, getElementById: id => {
       assert.ok(nodes.has(id), `Unexpected DOM id ${id}`);return nodes.get(id);
     }, querySelectorAll: () => [], querySelector: () => element(), body, createElement: () => element()},
-    window: {addEventListener() {}},
+    window: {addEventListener() {}}, sessionStorage:storage,
     renderAnalysis: () => "analysis", configureResultSchema() {}, fetch: fetcher, AbortController, Blob, URL,
-    mountIgnition:()=>({refresh(){},sync(){},onLeave(){}}),mountChilldown:()=>({refresh(){},sync(){},onLeave(){}}),mountFeedNetwork:()=>({refresh(){},sync(){},onLeave(){}}),mountTransient: () => ({refresh(){},onLeave(){},sync(){}}),
+    mountShutdown:()=>({refresh(){},sync(){},onLeave(){}}),mountIgnition:()=>({refresh(){},sync(){},onLeave(){}}),mountChilldown:()=>({refresh(){},sync(){},onLeave(){}}),mountFeedNetwork:()=>({refresh(){},sync(){},onLeave(){}}),mountTransient: () => ({refresh(){},onLeave(){},sync(){}}),
     mountValidation: () => ({refresh(){},onLeave(){},sync(){}}),
     mountThrottle: () => {throttleLifecycle.mounts++;return {refresh(){throttleLifecycle.refreshes++;},onLeave(){throttleLifecycle.leaves++;},sync(){}};},
     mountComponentWorkspace() {},
     mountFlowWorkspace() {},
     mountCycleWorkspace() {},
+    renderNozzleGeometry:()=>"geometry",mountNozzleGeometry:()=>()=>{},
     mountSteadyWorkspace,
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, confirm: () => {confirmations++;return true;},
     FormData: class {}, console,
   });
-  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyInputDocument,buildInputBackup,validateDraft,loadRecord,chooseView,
+  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyInputDocument,buildInputBackup,validateDraft,loadRecord,chooseView,navigate,openProject,
+    reset(){user=null;initialized=false;info=null;page="projects";analysisView="overview";current=null;draft=null;dirty=false;resultRecord=null;selectedJobId=null;projectJobs=[];workspaceUserId=null;},
     seed(value){({current,draft,dirty,user,info,groups,fields,page,projectJobs,connected}=value);referenceKey=value.referenceKey||"";presetUndo=value.presetUndo||null;},
-    state(){return JSON.parse(JSON.stringify({current,draft,dirty,user,page,projectJobs,connected,editorBusy,resultRecord,selectedJobId,referenceKey,presetUndo}));}};`, context,
+    state(){return JSON.parse(JSON.stringify({current,draft,dirty,user,page,analysisView,projectJobs,connected,editorBusy,resultRecord,selectedJobId,referenceKey,presetUndo}));}};`, context,
     {filename: fileURLToPath(new URL("webapp/static/app.js", root))});
   nodes.get("project-name").value = project.name;
   nodes.get("project-description").value = "";
   context.app.seed(copy({current: project, draft: defaults, dirty: false, user, info,
     groups: schema.groups, fields, page: "project", projectJobs: [], connected: true}));
-  return {app: context.app, nodes, body, throttleLifecycle, confirmations:()=>confirmations};
+  return {app: context.app, nodes, body, storage, throttleLifecycle, confirmations:()=>confirmations};
 }
 
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => copy(data)});
+
+function navigationServer({account=user,projects=[project],records=[]}={}) {
+  const calls=[];
+  const fetcher=async(url,options)=>{
+    calls.push(url);assert.equal(options.method,"GET","Navigation must never save or run a calculation");
+    if(url==="/api/auth/status")return response({initialized:true,user:account});
+    if(url==="/api/info")return response(info);
+    if(url==="/api/projects")return response(projects);
+    if(url==="/api/members")return response([]);
+    if(url==="/api/jobs")return response(records);
+    const projectDetail=projects.find(p=>url===`/api/projects/${p.id}`);
+    if(projectDetail)return response(projectDetail);
+    if(projects.some(p=>url===`/api/projects/${p.id}/revisions`))return response([]);
+    const projectJobs=projects.find(p=>url===`/api/jobs?project_id=${p.id}`);
+    if(projectJobs)return response(records.filter(r=>r.project_id===projectJobs.id));
+    const record=records.find(r=>url===`/api/jobs/${r.id}`);
+    if(record)return response(record);
+    throw new Error(`Unexpected navigation request ${url}`);
+  };
+  return {fetcher,calls};
+}
+
+const navigationViews=["overview","topology","states","components","geometry","log","history","shutdown","ignition","chilldown","feed","validation","transient","throttle"];
+for(const view of navigationViews)test(`reload restores ${view} with the selected project and historical design record`,async()=>{
+  const other={...project,id:"p2",name:"另一个方案"};
+  const records=[
+    {id:"latest",project_id:other.id,project_name:other.name,revision:2,status:"succeeded",created:2},
+    {id:"historical",project_id:other.id,project_name:other.name,revision:1,status:"succeeded",created:1},
+  ];
+  const server=navigationServer({projects:[project,other],records});
+  const first=harness(server.fetcher);
+  await first.app.openProject(other.id);
+  await first.app.loadRecord("historical");
+  await first.app.chooseView(view);
+  const saved=JSON.parse(first.storage.getItem(`lre.workspace.navigation.v1:${user.id}`));
+  assert.deepEqual(Object.keys(saved).sort(),["jobId","page","projectId","version","view"]);
+  assert.equal(saved.projectId,other.id);assert.equal(saved.jobId,"historical");
+  const reloaded=harness(server.fetcher,{storage:first.storage});reloaded.app.reset();
+  await reloaded.app.initialize();
+  const state=reloaded.app.state();
+  assert.equal(state.page,"project");assert.equal(state.analysisView,view);
+  assert.equal(state.current.id,other.id);assert.equal(state.selectedJobId,"historical");
+  assert.equal(state.resultRecord.id,"historical");assert.equal(state.dirty,false);
+  assert.equal(reloaded.nodes.get("page-name").textContent,reloaded.nodes.get("analysis-title").textContent);
+});
+
+for(const page of ["projects","jobs","members"])test(`reload keeps the ${page} workspace page`,async()=>{
+  const server=navigationServer(),first=harness(server.fetcher);
+  await first.app.chooseView("validation");await first.app.navigate(page);
+  const reloaded=harness(server.fetcher,{storage:first.storage});reloaded.app.reset();
+  await reloaded.app.initialize();
+  assert.equal(reloaded.app.state().page,page);
+  assert.equal(reloaded.nodes.get(`${page}-page`).hidden,false);
+  assert.equal(reloaded.nodes.get("project-page").hidden,true);
+});
+
+test("missing or inaccessible saved project falls back to the accessible project list",async()=>{
+  const server=navigationServer(),storage=memoryStorage();
+  storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:"private-or-deleted",view:"validation",jobId:"private-job"}));
+  const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+  assert.equal(h.app.state().page,"projects");assert.equal(h.app.state().current,null);
+  assert.ok(!server.calls.some(url=>url.includes("private")));
+});
+
+test("missing or cross-project record is never fetched and falls back within the restored project",async()=>{
+  for(const records of [[],[{id:"available",project_id:project.id,project_name:project.name,revision:1,status:"succeeded",created:1}]]){
+    const storage=memoryStorage(),server=navigationServer({records});
+    storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:project.id,view:"validation",jobId:"foreign-job"}));
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.app.state().analysisView,"validation");
+    assert.equal(h.app.state().selectedJobId,records[0]?.id??null);
+    assert.equal(h.app.state().resultRecord?.id??null,records[0]?.id??null);
+    assert.ok(!server.calls.includes("/api/jobs/foreign-job"));
+  }
+});
+
+test("corrupt and unsupported stored navigation safely use the default workspace",async()=>{
+  for(const value of ["{broken", "null", "[]", JSON.stringify({version:2,page:"project"}),JSON.stringify({version:1,page:"unknown"})]){
+    const storage=memoryStorage(),server=navigationServer();
+    storage.setItem(`lre.workspace.navigation.v1:${user.id}`,value);
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.app.state().page,"project");assert.equal(h.app.state().analysisView,"overview");
+    assert.equal(h.app.state().current.id,project.id);
+  }
+});
+
+test("invalid saved analysis names cannot address inherited object properties",async()=>{
+  for(const view of ["unknown","constructor","__proto__",null,{}]){
+    const storage=memoryStorage(),server=navigationServer();
+    storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:project.id,view}));
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.app.state().analysisView,"overview");assert.equal(h.app.state().current.id,project.id);
+  }
+});
+
+test("blocked browser storage does not prevent navigation or initialization",async()=>{
+  const storage={getItem(){throw new Error("SecurityError");},setItem(){throw new Error("QuotaExceededError");}};
+  const server=navigationServer(),h=harness(server.fetcher,{storage});h.app.reset();
+  await h.app.initialize();await h.app.chooseView("validation");await h.app.navigate("jobs");
+  assert.equal(h.app.state().page,"jobs");
+});
+
+test("saved navigation is account scoped and a non-admin cannot restore the members page",async()=>{
+  const storage=memoryStorage(),member={id:"u2",display_name:"成员",role:"member"};
+  storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:project.id,view:"validation"}));
+  let server=navigationServer({account:member}),h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+  assert.equal(h.app.state().analysisView,"overview");
+  assert.equal(JSON.parse(storage.getItem(`lre.workspace.navigation.v1:${user.id}`)).view,"validation");
+  storage.setItem(`lre.workspace.navigation.v1:${member.id}`,JSON.stringify({version:1,page:"members",projectId:project.id,view:"history"}));
+  server=navigationServer({account:member});h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+  assert.equal(h.app.state().page,"projects");assert.equal(h.nodes.get("members-nav").hidden,true);
+  assert.ok(!server.calls.includes("/api/members"));
+});
+
+test("switching authenticated accounts clears the previous workspace and restores only the new account",async()=>{
+  let account=user;
+  const member={id:"u2",display_name:"成员",role:"member"},other={...project,id:"p2",name:"成员方案"};
+  const storage=memoryStorage(),calls=[];
+  const h=harness(async(url,options)=>{
+    calls.push(url);
+    return navigationServer({account,projects:account===user?[project]:[other]}).fetcher(url,options);
+  },{storage});
+  h.app.reset();await h.app.initialize();await h.app.chooseView("validation");
+  account=member;calls.length=0;await h.app.initialize();
+  assert.equal(h.app.state().current.id,other.id);assert.equal(h.app.state().analysisView,"overview");
+  assert.equal(h.app.state().resultRecord,null);assert.equal(h.app.state().selectedJobId,null);
+  assert.ok(!calls.includes("/api/projects/p1"));
+  assert.equal(JSON.parse(storage.getItem(`lre.workspace.navigation.v1:${user.id}`)).view,"validation");
+});
+
+test("explicitly opening a different project starts its overview without reusing the saved record",async()=>{
+  const other={...project,id:"p2",name:"新打开方案"},server=navigationServer({projects:[project,other]});
+  const h=harness(server.fetcher);await h.app.chooseView("validation");await h.app.openProject(other.id);
+  assert.equal(h.app.state().analysisView,"overview");assert.equal(h.app.state().current.id,other.id);
+  assert.equal(h.app.state().selectedJobId,null);assert.equal(h.app.state().resultRecord,null);
+  assert.equal(JSON.parse(h.storage.getItem(`lre.workspace.navigation.v1:${user.id}`)).view,"overview");
+});
+
+test("reconnection keeps the current analysis view and unsaved draft in memory",async()=>{
+  const server=navigationServer(),h=harness(server.fetcher);
+  await h.app.chooseView("validation");
+  h.nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"12.5"}});
+  await h.app.initialize();
+  assert.equal(h.app.state().analysisView,"validation");assert.equal(h.app.state().draft.pc,12.5e6);
+  assert.equal(h.app.state().dirty,true);
+  assert.ok(!server.calls.includes("/api/projects/p1"));
+});
 
 test("throttle navigation keeps the selected design and stops its polling when leaving", async () => {
   const record={id:"steady-source",project_id:project.id,revision:1,status:"succeeded",created:1,result:{calculation:{inputs:defaults}}};
@@ -915,6 +1070,48 @@ test("saved legacy imports preserve thermochemistry and material identity while 
   const explicit={...materialDefaults,methane_thermo_dataset:"gri30_highT",wall_manufacturing_state:"specific_qualified_state"};
   h.app.applyInputDocument({format:"lre.workbench.inputs",schema_version:1,inputs:explicit});
   assert.deepEqual(copy(h.app.state().draft),explicit);
+});
+
+test("explicit high-T upgrade saves a new revision while retaining the old result and other draft edits",async()=>{
+  const oldInputs={...defaults,propellant_pair:"lox_methane",methane_thermo_dataset:"gri30",
+    combustion_loss_model:"legacy_temperature_rise",cooling_bartz_mode:0};
+  const oldProject={...project,inputs:oldInputs};
+  const currentDefaults={...oldInputs,methane_thermo_dataset:"gri30_highT"};
+  const allFields=[...fields,...Object.keys(currentDefaults).filter(key=>!(key in defaults))
+    .map(key=>({key,label:key,default:currentDefaults[key]}))];
+  const visibleFields=allFields.filter(f=>f.key!=="methane_thermo_dataset");
+  const currentInfo={...info,ui_schema:{defaults:currentDefaults,
+    groups:[{id:"design",fields:allFields}],system_groups:[{id:"design",fields:visibleFields}]}};
+  const record={id:"old-thermo",project_id:project.id,revision:1,status:"succeeded",created:1,
+    result:{calculation:{inputs:oldInputs}}};
+  const saved=[];
+  const h=harness(async(url,options)=>{
+    if(url==="/api/jobs/old-thermo")return response(record);
+    if(url==="/api/projects/p1"&&options.method==="PUT"){
+      const body=JSON.parse(options.body);saved.push(body);
+      return response({project:{...oldProject,...body,revision:2},warnings:[]});
+    }
+    throw new Error(`Unexpected request ${options.method} ${url}`);
+  });
+  h.app.seed(copy({current:oldProject,draft:oldInputs,dirty:false,user,info:currentInfo,
+    groups:currentInfo.ui_schema.system_groups,fields:allFields,page:"project",projectJobs:[],connected:true}));
+  h.app.fillProject(oldProject);await h.app.loadRecord(record.id);
+  assert.equal(h.nodes.get("upgrade-methane-dataset").hidden,false);
+  assert.doesNotMatch(h.nodes.get("parameter-fields").innerHTML,/data-input="methane_thermo_dataset"/);
+  h.nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"22"}});
+  h.nodes.get("upgrade-methane-dataset").onclick();
+  let state=h.app.state();
+  assert.equal(saved.length,0);assert.equal(state.current.inputs.methane_thermo_dataset,"gri30");
+  assert.equal(state.draft.methane_thermo_dataset,"gri30_highT");assert.equal(state.draft.pc,22e6);
+  assert.equal(state.draft.combustion_loss_model,"legacy_temperature_rise");
+  assert.equal(state.draft.cooling_bartz_mode,0);assert.equal(state.dirty,true);
+  assert.deepEqual(copy(state.resultRecord),record);assert.equal(h.nodes.get("upgrade-methane-dataset").hidden,true);
+  await h.app.saveProject();state=h.app.state();
+  assert.equal(saved.length,1);assert.equal(saved[0].revision,1);
+  assert.equal(saved[0].inputs.methane_thermo_dataset,"gri30_highT");
+  assert.equal(state.current.revision,2);assert.equal(state.dirty,false);
+  assert.deepEqual(copy(state.resultRecord),record);
+  assert.equal(oldProject.inputs.methane_thermo_dataset,"gri30");
 });
 
 test("a missing scenario name opens its editable history field before save or run",async()=>{

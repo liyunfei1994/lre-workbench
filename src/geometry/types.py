@@ -38,8 +38,11 @@ class NozzleGeometry:
     contour_r: List[float] = field(default_factory=list)  # 半径 [m]
 
     # ── V7.1 新增:CAD 建模必需字段 ──────────────────
-    bell_fraction: float = 0.80             # 钟形长度比(0.80 = 80% bell;TOP 的核心定义参数之一)
-    nozzle_type: str = "TOP"                # 喷管类型:TOP=推力优化抛物线(Thrust-Optimized Parabola)
+    bell_fraction: float = 0.80             # 相对同喉部/出口 15° 锥形喷管长度比
+    nozzle_type: str = "parabolic_bell_engineering"  # 系统级工程近似，未进行推力优化
+    nozzle_contour_method: str = "legacy_log_v1"
+    angle_source: str = "historical_log_rule_unvalidated"
+    coordinate_origin: str = "nozzle_throat"
     wall_thickness_mm: float = 0.0          # 喷管壁(含再生冷却层)总厚度
     inner_surface_area_m2: float = 0.0      # 燃气侧内表面积(用于热流分析)
     throat_axial_position_m: float = 0.0    # 喉部相对于燃烧室入口的轴向位置

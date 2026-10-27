@@ -5,7 +5,7 @@ chamber_contour.py — 主燃烧室收缩段的【唯一规范轮廓】（入口
 2D/3D 图 + CSV + 拓扑) / 热结构云图(cooling_marching) 都从本模块取收缩段形状与
 L_conv / V_conv，消除历史上"两套收缩段定义并存"导致的不一致。
 
-形状（Huzel & Huang / Rao 惯例；两端都用相切圆弧，全程 C¹ 连续，无尖角）：
+形状（工程圆弧构造；R1 > 0 时两端相切，历史极限参数可使入口圆角退化）：
 
   圆筒(rc) ──┐                                         ┌── 喉部(rt)
             │  入口倒角弧 R1   直锥 半锥角 β   喉部上游弧 Ru
@@ -20,6 +20,7 @@ L_conv / V_conv，消除历史上"两套收缩段定义并存"导致的不一致
   · 喉部上游弧 Ru=1.5·Rt（行业惯例，旧版已有）相切于直锥并相切于喉部。
 R1 取 R1_factor·Rt（默认 1.5，与 Ru 同量级的"圆弧收缩段"构型），并按几何容许量
 截断，保证直锥段长 ≥ 0（高 β/低收缩比时两弧不互相侵入）。
+历史算法允许 R1=0 并留下圆筒尖角；新显式喷管方法拒绝该退化，不再将它声明为光滑型面。
 """
 
 from __future__ import annotations
@@ -122,7 +123,7 @@ def convergent_contour(rc: float, rt: float,
 
     形状：入口倒角弧 R1（相切圆筒）→ 直锥 β → 喉部上游弧 Ru → 喉部。
     xs 单调增（x0 → x0+L_conv），rs 单调减（rc → rt）；首点=(x0, rc) 起始斜率 0
-    （与圆筒相切），末点=(x0+L_conv, rt)，全程 C¹ 连续无尖角。
+    （R1 > 0 时与圆筒相切），末点=(x0+L_conv, rt)；R1=0 的历史参数可有入口尖角。
     """
     beta = _beta_rad(conv_half_angle_deg)
     sinb = math.sin(beta)

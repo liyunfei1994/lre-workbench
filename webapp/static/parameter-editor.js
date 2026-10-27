@@ -14,6 +14,7 @@ export function savedInputDocument(value) {
 
 export function mergeInputDefaults(defaults, inputs, savedSnapshot = false) {
   const result = {...defaults, ...inputs};
+  if(Object.hasOwn(defaults,"nozzle_contour_method") && !Object.hasOwn(inputs,"nozzle_contour_method")) result.nozzle_contour_method="legacy_log_v1";
   if (savedSnapshot && Object.hasOwn(defaults, "methane_thermo_dataset") && !Object.hasOwn(inputs, "methane_thermo_dataset")) result.methane_thermo_dataset = "gri30";
   if(Object.hasOwn(defaults,"wall_thermal_dataset_id") && !Object.hasOwn(inputs,"wall_thermal_dataset_id") &&
       (savedSnapshot || Object.hasOwn(inputs,"chamber_inner_wall_material"))) {
@@ -21,6 +22,38 @@ export function mergeInputDefaults(defaults, inputs, savedSnapshot = false) {
     result.wall_thermal_dataset_id=supported[inputs.chamber_inner_wall_material || defaults.chamber_inner_wall_material] || "";
   }
   return result;
+}
+
+export function methaneThermoSummary(inputs, catalog = []) {
+  const id = inputs.methane_thermo_dataset ?? "gri30";
+  const dataset = catalog.find(item => item.id === id);
+  const names = {gri30:"GRI30（历史数据）", gri30_highT:"GRI30 high-T"};
+  const legacyLoss = (inputs.combustion_loss_model ?? "legacy_temperature_rise") === "legacy_temperature_rise";
+  const spatialCooling = Boolean(inputs.cooling_bartz_mode);
+  const chamber = legacyLoss ? "焓平衡后温升折减（历史模型）" :
+    inputs.combustion_loss_model === "adiabatic" ?
+      (spatialCooling ? "焓约束化学平衡" : "焓约束化学平衡（扣除给定冷却吸热）") : "未识别的燃烧损失模型";
+  const rows = [["甲烷热化学", names[id] || `未识别：${id}`], ["燃烧室", chamber],
+    ["主喷管热侧", spatialCooling ? "冻结组成 · 沿程冷却" : "冻结组成 · 绝热膨胀"],
+    ["燃气状态方程", dataset?.gas_eos === "ideal-gas" ? "理想气体混合物" : dataset?.gas_eos || "数据未读取"]];
+  const range = dataset?.common_temperature_range_K;
+  const rangeText = Array.isArray(range) && range.length === 2 && range.every(Number.isFinite) ? `${range[0]}–${range[1]} K` : "未读取";
+  const source = /^https:\/\//i.test(dataset?.source_url || "") ?
+    `<a href="${escape(dataset.source_url)}" target="_blank" rel="noopener noreferrer">${escape(dataset.source_label || "数据来源")}</a>` : "来源未读取";
+  const update = id === "gri30_highT" && dataset?.file_description?.includes("NASA TM-4513") ?
+    "文件说明：Joseph Shepherd 依据 NASA TM-4513 更新高温热力学多项式，并非仅放宽温区。" : "";
+  const historical = id === "gri30";
+  const details = `<p class="fine">当前参数所用文件：${escape(dataset?.file || id)}；Cantera ${escape(dataset?.cantera_version || "版本未读取")}。${source}</p>` +
+    `<p class="fine">${escape(dataset?.species_count ?? "未读取")} 种物种声明温区的交集：${escape(rangeText)}。交集外需逐物种检查，不代表所有物种都已越界。${escape(update)}</p>` +
+    '<p class="fine">高温热数据提供物种焓、熵和比热；不能据此认定高压状态方程、反应速率、输运或积碳模型已验证。系统纯流体物性使用 CoolProp 的 HEOS 模型；REFPROP 对照在“热力学校核”中单独进行。</p>' +
+    (legacyLoss ? '<p class="fine">此方案保留历史温升折减；升级热化学数据不会自动改变该模型。</p>' : "") +
+    (historical ? '<p class="fine">旧方案继续使用其原数据复现。使用 high-T 时先建立草稿，点击“保存方案”生成新版本；旧版本和已保存结果保留。</p>' : '<p class="fine">此摘要对应当前参数。已保存结果使用各自记录的数据版本，修改后需重新计算。</p>');
+  return {summary: rows.map(([label,value]) => `<p class="fine"><b>${escape(label)}：</b>${escape(value)}</p>`).join(""), details, historical};
+}
+
+export function upgradeMethaneDatasetDraft(inputs) {
+  if ((inputs.propellant_pair || "lox_methane") !== "lox_methane" || (inputs.methane_thermo_dataset ?? "gri30") !== "gri30") return inputs;
+  return {...inputs, methane_thermo_dataset:"gri30_highT"};
 }
 const ROLE_LABELS = {
   design_input:"设计输入", boundary:"边界条件", model_assumption:"模型假设",
@@ -46,11 +79,20 @@ export function parameterCompatible(item, inputs) {
 }
 
 function conditionMatches(condition, inputs) {
-  const actual = inputs[condition.key];
+  const actual = preburnerStatusValue(condition.key, inputs[condition.key]);
+  // Do not trim: even whitespace or "[]" selects the table path in the solver
+  // and must be surfaced for correction, never silently treated as scalar input.
+  if (condition.op === "empty") return actual == null || actual === "";
   if (condition.op === "eq") return actual === condition.value;
   if (condition.op === "gt") return typeof actual === "number" && actual > condition.value;
   if (condition.op === "lte") return typeof actual === "number" && actual <= condition.value;
   return false;
+}
+
+function preburnerStatusValue(key, value) {
+  // Old snapshots had numeric limits but no evidence classification. Rendering
+  // their controls as provisional preserves the saved values without a migration.
+  return /^(ox|fuel)_preburner_temp_limit_status$/.test(key) && value == null ? "provisional" : value;
 }
 
 export function parameterVisible(field, inputs) {
@@ -75,7 +117,7 @@ export function parameterPresentation(field, inputs) {
 
 export function parameterValue(field, inputs) {
   if (field.key === PREBURNER_MODE_KEY && field.virtual) return preburnerMode(inputs);
-  const value = inputs[field.key];
+  const value = preburnerStatusValue(field.key, inputs[field.key]);
   return value == null ? "" : typeof value === "number" ? Number((value * (field.factor || 1)).toPrecision(12)) : value;
 }
 
@@ -130,6 +172,28 @@ export function parameterGroups(groups, inputs) {
   })).filter(group => group.fields.length);
 }
 
+function renderChannelGeometryInfo(group, inputs) {
+  if (!group.geometry_source_key || !(inputs.cooling_bartz_mode > 0)) return "";
+  const raw = inputs[group.geometry_source_key];
+  if (raw == null || raw === "") {
+    const depth = inputs.cooling_channel_auto_size > 0 ? "入口速度估算深度" : "指定深度";
+    return `<p class="fine channel-geometry-source">几何来源：标量规则（通道宽随型面半径变化，${depth}）。</p>`;
+  }
+  const note = '<p class="fine">当前保存的沿程表覆盖通道数、宽度、深度和热壁厚，自动定深与目标流速不生效。被覆盖的标量仍保留在方案中。此处只读展示原表；保存不会改写它。</p>';
+  let rows;
+  try {
+    const data = JSON.parse(raw);
+    rows = Array.isArray(data) ? data : data?.rows;
+    if (!Array.isArray(rows) || !rows.length || rows.some(row => !row || typeof row !== "object" || Array.isArray(row))) throw new Error("invalid table");
+  } catch {
+    return `<div class="channel-geometry-source"><p class="notice warning">几何来源：沿程通道表，但保存内容无法展示为非空断点表。需修复原表后计算；不会自动回退为标量几何。</p>${note}</div>`;
+  }
+  const anchors = {injector:"喷注面", conv_start:"收敛起点", throat:"喉部", exit:"主喷管出口", x_mm:"轴向坐标"};
+  const cell = (row, key) => Object.hasOwn(row, key) ? escape(row[key]) : "未填写";
+  const body = rows.map(row => `<tr><td>${escape(anchors[row.anchor] || row.anchor || "未填写")}</td><td>${cell(row,"x_mm")}</td><td>${cell(row,"n")}</td><td>${cell(row,"w_mm")}</td><td>${cell(row,"h_mm")}</td><td>${cell(row,"t_mm")}</td></tr>`).join("");
+  return `<div class="channel-geometry-source"><p class="fine">几何来源：沿程通道表（${rows.length} 个断点）。</p>${note}<details><summary>查看保存的通道几何</summary><p class="fine">x 从喷注面起算；物理锚点随型面定位。宽、深、壁厚沿 x 线性插值，表两端之外沿用端值。未填列采用解析器默认值，不继承被覆盖的标量；当前内核要求各断点通道数相同。几何适用性由运行时统一校验。</p><div class="table-wrap"><table><thead><tr><th>定位</th><th>x / mm</th><th>N</th><th>宽 / mm</th><th>深 / mm</th><th>壁厚 / mm</th></tr></thead><tbody>${body}</tbody></table></div></details></div>`;
+}
+
 export function renderParameterGroups(groups, inputs, expanded = new Set()) {
   return groups.map(group => {
     const standard = [], seeds = [], numeric = [];
@@ -144,8 +208,23 @@ export function renderParameterGroups(groups, inputs, expanded = new Set()) {
     const numerics = numeric.length ? `<details class="parameter-initials" data-initials="${escape(numericKey)}"${expanded.has(numericKey) ? " open" : ""}><summary>高级设置 · ${escape(advancedTitle)}（${numeric.length}）</summary><p class="fine">${escape(advancedHelp)}</p>${numeric.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
     const contexts=Array.isArray(group.configuration_context) ? group.configuration_context : group.configuration_context ? [group.configuration_context] : [];
     const contextText=contexts.map(context=>`<p class="fine wall-configuration-context">${escape(context.label)}：${escape(context.labels?.[inputs[context.key]] || inputs[context.key] || "未指定")}。${escape(context.note)}</p>`).join("");
-    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.description ? `<p class="fine">${escape(group.description)}</p>` : ""}${standard.map(field => renderParameterField(field, inputs)).join("")}${contextText}${advanced}${numerics}</fieldset>`;
+    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.description ? `<p class="fine">${escape(group.description)}</p>` : ""}${renderChannelGeometryInfo(group, inputs)}${renderParameterSections(group, standard, inputs)}${contextText}${advanced}${numerics}</fieldset>`;
   }).join("");
+}
+
+function renderParameterSections(group, fields, inputs) {
+  if (!Array.isArray(group.sections)) return fields.map(field=>renderParameterField(field,inputs)).join("");
+  const rendered=new Set(), sections=[];
+  for (const section of group.sections) {
+    const keys=new Set(Array.isArray(section.keys)?section.keys:[]);
+    const selected=fields.filter(field=>keys.has(field.key)&&!rendered.has(field.key));
+    if (!selected.length) continue;
+    selected.forEach(field=>rendered.add(field.key));
+    sections.push(`<section class="parameter-subsection" data-parameter-section="${escape(section.id)}"><h3>${escape(section.title)}</h3>${section.description?`<p class="fine">${escape(section.description)}</p>`:""}${selected.map(field=>renderParameterField(field,inputs)).join("")}</section>`);
+  }
+  // Search filtering and future schema additions must never drop an otherwise
+  // visible control merely because it is not assigned to a subsection yet.
+  return sections.join("")+fields.filter(field=>!rendered.has(field.key)).map(field=>renderParameterField(field,inputs)).join("");
 }
 
 export function renderParameterEvidence(evidence, fields = []) {

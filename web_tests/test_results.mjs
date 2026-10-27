@@ -76,7 +76,9 @@ test("both cycle families show the six desktop KPI values with correct names", (
   for (const html of [ffsc,gg]) {
     assert.equal((html.match(/class="kpi-card"/g) || []).length,6);
     assert.match(html,/1,234\.567 <small>kN<\/small>/);
-    assert.match(html,/海平面 1,000 kN/);
+    assert.match(html,/计算真空推力/);
+    assert.match(html,/工况计算值 1,000 kN（环境压力未记录）/);
+    assert.match(html,/计算真空比冲 Isp/);
     assert.match(html,/350 <small>s<\/small>/);
     assert.match(html,/300 <small>kg\/s<\/small>/);
   }
@@ -249,6 +251,73 @@ test("current thermal limit failure remains separate from full numerical converg
   assert.match(html,/沿程热面壁温峰值/);
   assert.match(html,/1,252.873 K/);
   assert.doesNotMatch(html,/历史系统约束范围/);
+});
+
+function preburnerRecord(status="provisional",basis="") {
+  const input=record();input.result.calculation_scope.version=3;
+  Object.assign(input.result.calculation.inputs,{use_target_preburner_temp:1,ox_preburner_temp_target:750,
+    ox_preburner_temp_limit:800,ox_preburner_temp_limit_status:status,ox_preburner_temp_limit_basis:basis});
+  input.result.calculation.summary.ox_preburner_T_combustion_K=749;
+  input.result.assessment={...input.result.assessment,status:"pass",label:"系统约束通过",checks:[{
+    key:"ox_preburner_T_combustion_K",label:"富氧预燃室温度",value:749,limit:status==="unset"?null:800,unit:"K",criterion:"maximum",
+    status:status==="unset"?"unknown":status==="provisional"?"review":"pass",limit_status:status,limit_basis:basis,
+  }]};
+  return input;
+}
+
+test("unset preburner limits are not evaluated and saved inactive numbers never become criteria",()=>{
+  const input=preburnerRecord("unset"),before=structuredClone(input),html=renderAnalysis("overview",input);
+  assert.match(html,/目标 750 K · 上限未设定（未评估）/);
+  assert.match(html,/系统约束未完成评估/);
+  assert.match(html,/<td class="constraint-limit">上限未设定（未评估）<\/td>/);
+  assert.match(html,/<span class="badge ">未评估<\/span>/);
+  assert.doesNotMatch(html,/≤ 800|上限 800 K|<span class="badge success">系统约束通过/);
+  assert.deepEqual(input,before);
+});
+
+test("provisional preburner limits remain review below the numerical threshold and fail above it",()=>{
+  const input=preburnerRecord(),html=renderAnalysis("overview",input);
+  assert.match(html,/目标 750 K · 暂定上限 800 K（待核实）/);
+  assert.match(html,/系统约束待核实/);assert.match(html,/暂定，待核实/);
+  assert.doesNotMatch(html,/<span class="badge success">系统约束通过/);
+  input.result.assessment.status="fail";input.result.assessment.label="系统约束未通过";
+  input.result.assessment.checks[0].status="fail";input.result.assessment.checks[0].value=850;
+  const failed=renderAnalysis("overview",input);
+  assert.match(failed,/系统约束未通过/);assert.match(failed,/850 K · 暂定上限 800 K（待核实）/);
+});
+
+test("documented preburner limits expose user evidence without implying validation and reject empty evidence",()=>{
+  const input=preburnerRecord("documented",'部件试验计划 <source>'),html=renderAnalysis("overview",input);
+  assert.match(html,/上限 800 K（已填写依据，未验证）/);
+  assert.match(html,/依据（用户声明）：部件试验计划 &lt;source&gt;/);
+  assert.match(html,/数值满足给定上限/);assert.doesNotMatch(html,/<source>/);
+  input.result.assessment.checks[0].limit_basis="";input.result.calculation.inputs.ox_preburner_temp_limit_basis="";
+  const absent=renderAnalysis("overview",input);
+  assert.match(absent,/上限设置无效（未评估）/);assert.match(absent,/系统约束未完成评估/);
+  assert.doesNotMatch(absent,/数值满足给定上限/);
+});
+
+test("historical preburner pass is annotated as provisional without rewriting its saved verdict",()=>{
+  const input=preburnerRecord("provisional");
+  delete input.result.calculation.inputs.ox_preburner_temp_limit_status;
+  delete input.result.assessment.checks[0].limit_status;
+  input.result.assessment.checks[0].status="pass";
+  const before=structuredClone(input),html=renderAnalysis("overview",input);
+  assert.match(html,/历史暂定上限 800 K/);
+  assert.match(html,/历史保存判定：通过/);
+  assert.match(html,/历史记录按当时限值判定；限值未登记依据，当前按暂定展示，原记录不变/);
+  assert.match(html,/系统约束待核实/);assert.match(html,/暂定，待核实/);
+  assert.doesNotMatch(html,/<span class="badge success">系统约束通过/);
+  assert.deepEqual(input,before);
+});
+
+test("preburner hints follow immutable check evidence and active target mode instead of another input snapshot",()=>{
+  const input=preburnerRecord("unset");
+  Object.assign(input.result.submitted_inputs,{ox_preburner_temp_limit_status:"documented",ox_preburner_temp_limit:9999,ox_preburner_temp_limit_basis:"wrong snapshot"});
+  Object.assign(input.result.calculation.inputs,{use_target_preburner_temp:0,use_target_preburner_mr:1,ox_preburner_mr_target:60});
+  const html=renderAnalysis("overview",input);
+  assert.match(html,/指定 O\/F 60 · 上限未设定（未评估）/);
+  assert.doesNotMatch(html,/目标 750 K|9,999|wrong snapshot/);
 });
 
 test("overview declarations cannot accidentally add detailed geometry or material sections", () => {
@@ -576,10 +645,44 @@ test("steady study conditions use saved inputs, preserve missing fields, and do 
   assert.match(html,/aria-label="稳态计算工况"/);
   assert.match(html,/单工况 · 稳态设计点/);
   assert.match(html,/本页显示稳态设计点；热态扰动见瞬态响应分析/);
-  assert.match(html,/<dt>燃烧室压力<\/dt><dd>33 <small>MPa/);
-  assert.match(html,/<dt>设定 O\/F<\/dt><dd>3\.6 /);
+  assert.match(html,/<dt>指定燃烧室压力<\/dt><dd>33 <small>MPa/);
+  assert.match(html,/<dt>环境压力边界<\/dt><dd>0\.101 <small>MPa/);
+  assert.match(html,/<dt>指定总氧燃比 O\/F<\/dt><dd>3\.6 /);
+  assert.match(html,/<dt>主喷管面积比 Ae\/At<\/dt><dd>34\.34 /);
   assert.doesNotMatch(html,/<dd>999 /);
   assert.deepEqual(input,before);
   delete input.result.calculation.inputs.pc;
-  assert.match(renderAnalysis('overview',input),/<dt>燃烧室压力<\/dt><dd>— /);
+  assert.match(renderAnalysis('overview',input),/<dt>指定燃烧室压力<\/dt><dd>— /);
+});
+
+test("performance calculations retain their recorded operating pressure instead of assuming sea level", () => {
+  for (const cycle of ["ffsc","gg"]) {
+    for (const [pressure,label] of [[0,"0"],[35000,"35"],[101325,"101.325"]]) {
+      const input=record(cycle);
+      input.result.calculation.inputs.ambient_pressure=pressure;
+      input.result.submitted_inputs.ambient_pressure=987654;
+      const before=structuredClone(input), html=renderAnalysis("overview",input);
+      assert(html.includes(`工况计算值 1,000 kN（pₐ = ${label} kPa）`));
+      assert(html.includes(`工况计算值 300 s（pₐ = ${label} kPa）`));
+      assert.match(html,/工况推力目标误差 0%/);
+      assert.doesNotMatch(html,/海平面|987\.654 kPa/);
+      assert.deepEqual(input,before,"presentation must not recompute or modify recorded values");
+    }
+  }
+});
+
+test("missing or invalid saved operating pressure is disclosed without borrowing another input document", () => {
+  for (const pressure of [undefined,null,"101325",NaN]) {
+    const input=record();
+    input.result.calculation.inputs.ambient_pressure=pressure;
+    input.result.submitted_inputs.ambient_pressure=101325;
+    const html=renderAnalysis("overview",input);
+    assert.match(html,/工况计算值 1,000 kN（环境压力未记录）/);
+    assert.match(html,/工况计算值 300 s（环境压力未记录）/);
+    assert.doesNotMatch(html,/海平面|pₐ = 101\.325 kPa/);
+  }
+  const legacy=record();
+  delete legacy.result.calculation.inputs;
+  legacy.result.submitted_inputs.ambient_pressure=25000;
+  assert.match(renderAnalysis("overview",legacy),/工况计算值 1,000 kN（pₐ = 25 kPa）/);
 });

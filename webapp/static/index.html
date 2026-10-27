@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="/static/ignition.css">
   <link rel="stylesheet" href="/static/shutdown.css">
   <link rel="stylesheet" href="/static/steady-workspace.css">
+  <link rel="stylesheet" href="/static/nozzle-geometry.css">
   <script defer src="/static/bootstrap.js"></script>
 </head>
 <body>
@@ -73,6 +74,7 @@
         <button data-view="shutdown">关机与再启动分析</button>
         <div class="nav-divider"></div>
         <button data-view="topology">发动机循环原理图</button><button data-view="states">流路状态分析</button><button data-view="components">部件性能分析</button>
+        <button data-view="geometry">推力室与喷管几何</button>
         <button data-view="validation">热力学校核</button>
         <div class="nav-section"><span>02</span>运行记录</div>
         <button data-view="log">日志与警告</button><button data-view="history">方案与计算记录</button>
@@ -101,7 +103,7 @@
               <form id="project-form" novalidate>
                 <div class="parameter-scroll">
                   <div class="preset-box"><label>参考机型<select id="project-preset" aria-label="参考工况"></select></label><p class="fine">选择即载入整套示例参数，可撤销。</p><p id="preset-context" class="field-help"></p><div class="preset-actions"><button id="apply-preset" type="button">恢复示例参数</button><button id="open-references" type="button">机型资料</button></div><button id="undo-preset" type="button" class="wide" hidden>撤销机型切换</button></div>
-                  <div class="propellant-context" aria-label="当前推进剂模型"><b id="propellant-model-label"></b><p id="propellant-model-note" class="fine"></p><details id="propellant-model-details"><summary>物性范围与模型说明</summary><p id="propellant-model-limits" class="fine"></p></details><p id="propellant-model-error" class="error" role="alert"></p><button id="load-propellant-example" type="button" hidden>加载配套工程示例</button></div>
+                  <div class="propellant-context" aria-label="当前推进剂模型"><b id="propellant-model-label"></b><div id="propellant-model-note" class="fine"></div><details id="propellant-model-details"><summary>数据来源、温区与模型说明</summary><div id="propellant-model-limits" class="fine"></div><button id="upgrade-methane-dataset" type="button" hidden>使用 high-T 建立新版草稿</button></details><p id="propellant-model-error" class="error" role="alert"></p><button id="load-propellant-example" type="button" hidden>加载配套工程示例</button></div>
                   <div id="parameter-fields"></div><p id="parameter-empty" class="small-empty" hidden>没有匹配的参数。</p>
                 </div>
                 <div class="parameter-footer">

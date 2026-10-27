@@ -55,7 +55,8 @@ class SystemAssessmentTests(unittest.TestCase):
         for key in missing:
             self.assertEqual(checks[key]["status"], "unknown")
             self.assertIsNone(checks[key]["value"])
-        self.assertTrue(all(row["status"] == "pass" for key, row in checks.items()
+        provisional = {"ox_preburner_T_combustion_K", "fuel_preburner_T_combustion_K"}
+        self.assertTrue(all(row["status"] == ("review" if key in provisional else "pass") for key, row in checks.items()
                             if key not in missing))
         self.assertEqual(scoped["materials"], {})
         self.assertIn("cooling_hydraulics", {check["key"] for check in scoped["checks"]})
@@ -115,7 +116,7 @@ class SystemExecutionTests(unittest.TestCase):
 
     def test_scope_records_coupled_cooling_and_excludes_cfd_fea(self):
         scope = system_calculation_scope()
-        self.assertEqual(scope["version"], 3)
+        self.assertEqual(scope["version"], 4)
         self.assertEqual(scope["disabled_postprocessing"], ["cfd", "fea"])
         self.assertFalse(scope["independent_cooling_postprocessing"])
         self.assertEqual(scope["cooling_profile_source"], "calculation.components.cooling_channel.profile")
@@ -145,7 +146,7 @@ class SystemExecutionTests(unittest.TestCase):
         self.assertEqual(record["calculation"]["inputs"], submitted)
         self.assertEqual(submitted["cooling_marching_enable"], 1.0)
         self.assertEqual(record["calculation_scope"]["id"], "engine_system")
-        self.assertEqual(record["calculation_scope"]["version"], 3)
+        self.assertEqual(record["calculation_scope"]["version"], 4)
         self.assertEqual(record["calculation_scope"]["disabled_postprocessing"], ["cfd", "fea"])
         self.assertFalse(record["calculation_scope"]["independent_cooling_postprocessing"])
         self.assertEqual(record["assessment"]["scope"], "system")

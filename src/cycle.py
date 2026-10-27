@@ -20,9 +20,10 @@ import math
 import warnings
 from typing import Callable, Optional, List
 
-from core import CycleResults, EngineInputs, FlowState, TopologyEdge, TopologyNode, ValidationError
+from core import (CycleResults, EngineInputs, FlowState, TopologyEdge, TopologyNode,
+                  ValidationError, preburner_temperature_constraint)
 from cooling import CoolingChannel
-from regen_coupling import close_regen_cycle, cooling_arguments
+from regen_coupling import close_regen_cycle, cooling_arguments, fixed_contour_inputs
 from chamber import MainChamber
 from chamber_sizing import size_combustion_chamber
 from pump import Pump, fluid_density
@@ -694,7 +695,7 @@ class FFSCCycleModel:
             n_stages_user=self.inputs.turb_ox_n_stages_user,
             rotor_material=self.inputs.turb_ox_rotor_material,
             side="ox",
-            t_in_limit_K=self.inputs.ox_preburner_temp_limit,
+            t_in_limit_K=preburner_temperature_constraint(self.inputs, "ox")["limit_K"],
             u_max_ms=self.inputs.turb_ox_u_max_ms,
         )
         fuel_turbine = Turbine(
@@ -710,7 +711,7 @@ class FFSCCycleModel:
             n_stages_user=self.inputs.turb_fuel_n_stages_user,
             rotor_material=self.inputs.turb_fuel_rotor_material,
             side="fuel",
-            t_in_limit_K=self.inputs.fuel_preburner_temp_limit,
+            t_in_limit_K=preburner_temperature_constraint(self.inputs, "fuel")["limit_K"],
             u_max_ms=self.inputs.turb_fuel_u_max_ms,
         )
         ox_turbine_out,   ox_turbine_result   = ox_turbine.evaluate()
@@ -940,20 +941,18 @@ class FFSCCycleModel:
 
         cycle_warnings = list(self._warnings)
 
-        if not (40.0 <= mr_ox_preburner <= 80.0):
-            cycle_warnings.append(f"⚠ 富氧预燃室 O/F={mr_ox_preburner:.2f} 超出建议范围 40–80。")
-        if not (0.05 <= mr_fuel_preburner <= 0.30):
-            cycle_warnings.append(f"⚠ 富燃预燃室 O/F={mr_fuel_preburner:.3f} 超出建议范围 0.05–0.30。")
-        if t_comb_ox > self.inputs.ox_preburner_temp_limit:
-            cycle_warnings.append(
-                f"⚠ 富氧预燃室燃烧温度 {t_comb_ox:.0f} K 超过指定运行温度上限 "
-                f"{self.inputs.ox_preburner_temp_limit:.0f} K（O/F={mr_ox_preburner:.2f}, phi={phi_ox_preburner:.3f}）。"
-            )
-        if t_comb_fuel > self.inputs.fuel_preburner_temp_limit:
-            cycle_warnings.append(
-                f"⚠ 富燃预燃室燃烧温度 {t_comb_fuel:.0f} K 超过指定运行温度上限 "
-                f"{self.inputs.fuel_preburner_temp_limit:.0f} K（O/F={mr_fuel_preburner:.3f}, phi={phi_fuel_preburner:.2f}）。"
-            )
+        for side, label, temperature in (("ox", "富氧", t_comb_ox), ("fuel", "富燃", t_comb_fuel)):
+            constraint = preburner_temperature_constraint(self.inputs, side)
+            limit = constraint["limit_K"]
+            if constraint["status"] == "unset":
+                cycle_warnings.append(f"{label}预燃室出口温度上限未设定，该项尚未评估。")
+            elif temperature > limit:
+                qualifier = "暂定" if constraint["status"] == "provisional" else "方案指定"
+                cycle_warnings.append(
+                    f"⚠ {label}预燃室出口温度 {temperature:.0f} K 超过{qualifier}上限 {limit:.0f} K。")
+            elif constraint["status"] == "provisional":
+                cycle_warnings.append(
+                    f"{label}预燃室出口温度处于暂定上限 {limit:.0f} K 内；限值依据尚待核实。")
 
         # Available head before EXTRA valve throttling, using this evaluation's
         # actual branch losses (including frozen K in offdesign).
@@ -1955,6 +1954,7 @@ class FFSCCycleModel:
         # Web studies use an immutable source design. Never silently fall back
         # to proportional pressure when that explicitly supplied baseline fails.
         if design_baseline is not None:
+            frozen_contour = fixed_contour_inputs(design_baseline)
             At_design = float(design_baseline.get("throat_area_m2", 0))
             if not math.isfinite(At_design) or At_design <= 0:
                 raise ValueError("固定喉部基准面积必须为有限正数。")
@@ -1988,6 +1988,12 @@ class FFSCCycleModel:
                     raise ValueError("设计点数值、四支路或能量闭合未通过，不能冻结为节流基准。")
                 feed_hardware = copy.deepcopy(_design.steady_closure["feed_network"]["hardware_snapshot"])
                 warm_seed = seed_from_result(_design)
+                profile = getattr(_design.components.get("cooling_channel"), "profile", None) or {}
+                frozen_contour = fixed_contour_inputs({
+                    "cooling_hardware": {"geometry": profile.get("geometry", {})},
+                    "contour_inputs": {key: getattr(_design.inputs, key) for key in (
+                        "nozzle_contour_method", "nozzle_initial_angle_deg", "nozzle_exit_angle_deg",
+                        "nozzle_bell_fraction", "chamber_conv_half_angle_deg", "expansion_ratio")}})
                 At_design = float(_design.components["nozzle"].outputs.get("At_m2", 0.0)) or None
                 if (bool(getattr(self.inputs, "cooling_channel_auto_size", 1.0))
                         and bool(getattr(self.inputs, "cooling_bartz_mode", True))):
@@ -2010,6 +2016,8 @@ class FFSCCycleModel:
             每次循环评价均闭合唯一冷却内核；关闭旧兼容视图不省略物理计算。
             """
             pi = copy.deepcopy(self.inputs)
+            for key, value in frozen_contour.items():
+                setattr(pi, key, value)
             pi.thrust = thrust_target
             pi.pc = pc_val
             pi.cooling_marching_enable = 0.0

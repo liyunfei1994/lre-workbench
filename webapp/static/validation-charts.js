@@ -117,7 +117,7 @@ function methodLegend(){
 }
 
 function conditionText(data){
-  const r=data.request,mode={equilibrium:"平衡流",frozen_chamber:"燃烧室冻结",frozen_throat:"喉部冻结"}[r.mode]||"口径见记录";
+  const r=data.request,mode={equilibrium:"平衡流",frozen_chamber:"燃烧室冻结",frozen_throat:"喉部冻结"}[r.mode]||"膨胀假设见记录";
   const fuel={lox_methane:"液氧 / 甲烷",lox_kerosene:"液氧 / 正十二烷（煤油替代）"}[r.propellant_pair]||"推进剂见记录";
   return `${fuel} · Pc ${finite(r.pc_pa)?number(r.pc_pa/1e6):"—"} MPa · 燃料 ${number(r.T_fuel_K)} K / 氧化剂 ${number(r.T_ox_K)} K · ${mode}`;
 }
@@ -135,7 +135,7 @@ export function renderThermoCharts(result){
   const explanation=data.singlePoint?"这条历史记录仅有一个 O/F，不能形成趋势曲线。下方同时比较四项指标；运行多点扫描后即可查看曲线。":
     "横轴为实际 O/F；颜色区分膨胀比，线型区分计算后端。下方小图显示相对差，0 表示两个后端数值相同。悬停数据点查看数值。";
   return `<section class="tc-dashboard" aria-label="热力学性能图形对比"><div class="tc-chart-heading">${data.singlePoint?`<h3>${escape(heading)}</h3>`:""}<p>${escape(conditionText(data))}</p></div><p class="tc-reading-guide">${escape(explanation)}</p>${!data.singlePoint?methodLegend():""}<div class="tc-chart-grid">${data.panels.map(panel=>data.singlePoint?singleCard(panel,data):
-    `<article class="tc-panel" data-thermo-metric="${panel.key}"><header><h4>${escape(panel.label)} <span>${escape(panel.symbol)} / ${escape(panel.unit)}</span></h4><p>${escape(panelHint(panel,data))}</p></header>${plotSvg(panel,data)}${seriesLegend(panel)}${plotSvg(panel,data,true)}${panel.missing?`<p class="tc-gap-note">${panel.missing} 个工况缺少完整配对；曲线在缺失处断开，不填零。</p>`:""}</article>`).join("")}</div><p class="tc-chart-foot">相对差 = (CEA − Cantera) / |Cantera| × 100%，采用该记录保存的差值。曲线接近表示数值接近；数据库、产物集与允许相的差异仍需结合下方口径说明判断。</p></section>`;
+    `<article class="tc-panel" data-thermo-metric="${panel.key}"><header><h4>${escape(panel.label)} <span>${escape(panel.symbol)} / ${escape(panel.unit)}</span></h4><p>${escape(panelHint(panel,data))}</p></header>${plotSvg(panel,data)}${seriesLegend(panel)}${plotSvg(panel,data,true)}${panel.missing?`<p class="tc-gap-note">${panel.missing} 个工况缺少完整配对；曲线在缺失处断开，不填零。</p>`:""}</article>`).join("")}</div><p class="tc-chart-foot">相对差 = (CEA − Cantera) / |Cantera| × 100%，采用该记录保存的差值。曲线接近表示数值接近；数据库、允许产物及物态的差异仍需结合本次比较条件判断。</p></section>`;
 }
 
 const SVG_STYLE=`
@@ -175,5 +175,5 @@ export function buildThermoChartSvg(result){
   }).join("");
   const guide=data.singlePoint?`单工况 O/F = ${number(data.xValues[0])} · 仅比较保存的数值，不生成趋势曲线。`:
     "横轴 O/F · 颜色区分 ε · Cantera 实线圆点 / CEA 虚线方点 · 小图为相对差 / % · 缺失处断开";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="NASA CEA 与 Cantera 四项热力学指标对比"><defs><style>${SVG_STYLE}</style></defs><rect width="${width}" height="${height}" fill="#f5f8fa"/><text class="tc-export-title" x="18" y="34">NASA CEA × Cantera · 热力学对比</text><text class="tc-export-subtitle" x="18" y="61">${escape(conditionText(data))}</text><text class="tc-export-subtitle" x="18" y="87">${escape(guide)}</text>${panels}<text class="tc-export-label" x="18" y="${height-32}">相对差 = (CEA − Cantera) / |Cantera| × 100%，来自保存记录；数值接近不等同于实机验证或精度合格。</text><text class="tc-export-label" x="18" y="${height-13}">产品数据库、允许物种和相态的适用范围，请结合该校核记录的口径说明。</text></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="NASA CEA 与 Cantera 四项热力学指标对比"><defs><style>${SVG_STYLE}</style></defs><rect width="${width}" height="${height}" fill="#f5f8fa"/><text class="tc-export-title" x="18" y="34">NASA CEA × Cantera · 热力学对比</text><text class="tc-export-subtitle" x="18" y="61">${escape(conditionText(data))}</text><text class="tc-export-subtitle" x="18" y="87">${escape(guide)}</text>${panels}<text class="tc-export-label" x="18" y="${height-32}">相对差 = (CEA − Cantera) / |Cantera| × 100%，来自保存记录；数值接近不等同于实机验证或精度合格。</text><text class="tc-export-label" x="18" y="${height-13}">产品数据库、允许物种和相态的适用范围，请结合该校核记录的比较条件说明。</text></svg>`;
 }

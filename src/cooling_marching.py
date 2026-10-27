@@ -172,7 +172,9 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         hot_side_profile=None, inlet_enthalpy_Jkg=None, k_minor_inlet=None,
         k_minor_outlet=None, heat_transfer_enabled=True, friction_enabled=True,
         strict=True, wall_thermal_dataset_id=None, wall_manufacturing_state="unspecified",
-        wall_material_zones=None, remap_hot_side_trial=False):
+        wall_material_zones=None, remap_hot_side_trial=False,
+        nozzle_contour_method="legacy_log_v1",
+        nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0):
     """One conserved profile including both zero-speed cycle ports.
 
     hot_side_profile aligns with build_regen_geometry().cells in coolant order.
@@ -218,7 +220,8 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         n_points=n_points,counterflow=counterflow,n_channels=n_channels,
         channel_width_m=channel_width_m,channel_height_m=channel_height_m,
         wall_thickness_m=wall_thickness_m,channel_table=channel_table,
-        material_boundaries_m=boundaries)
+        material_boundaries_m=boundaries, nozzle_contour_method=nozzle_contour_method,
+        nozzle_initial_angle_deg=nozzle_initial_angle_deg, nozzle_exit_angle_deg=nozzle_exit_angle_deg)
     # Legacy callers may supply a length, but cannot define a second contour.
     if L_conv is not None and (not math.isfinite(L_conv) or
             not math.isclose(L_conv, geom["L_conv_m"], rel_tol=1e-8, abs_tol=1e-10)):

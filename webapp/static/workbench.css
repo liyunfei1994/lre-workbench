@@ -68,6 +68,9 @@ button:disabled { cursor: not-allowed; }
 .parameter-scroll details.parameter-initials { margin: 12px 0 3px; padding: 9px 0 0; border-top: 1px solid #d6dfe6; }
 .parameter-initials > summary { color: #52677b; font-size: 11px; cursor: pointer; line-height: 1.7; }
 .parameter-initials > .fine { margin: 7px 0; line-height: 1.6; color: #687b8b; }
+.parameter-subsection { margin-top:12px; padding-top:9px; border-top:1px solid #d6dfe6; }
+.parameter-subsection > h3 { font-size:12px; margin:0 0 5px; color:#405c70; }
+.parameter-subsection > .fine { margin:4px 0 8px; }
 .parameter-legacy-note { display: block; margin-top: 7px; padding: 7px 8px; border-left: 2px solid #b3884b; background: #faf4e9; color: #765c34; font-size: 11px; font-weight: 400; line-height: 1.65; }
 .reference-evidence { margin: 15px 0 4px; padding-top: 10px; border-top: 1px solid #d2dce4; }
 .reference-evidence summary { cursor: pointer; color: #385b73; font-size: 12px; }

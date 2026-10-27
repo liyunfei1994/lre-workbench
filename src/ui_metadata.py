@@ -96,12 +96,11 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
         ],
     ),
     (
-        "基本性能 / Design point",
+        "设计目标与工况 / Design targets & conditions",
         [
             ("thrust",           "目标推力（给定环境压力） / Target thrust", "kN"),
-            ("pc",               "燃烧室压力 / Chamber press.", "MPa"),
-            ("of_ratio",         "氧燃比 O/F",                  "—"),
-            ("expansion_ratio",  "喷管膨胀比 / Nozzle ε",       "—"),
+            ("pc",               "指定燃烧室压力 / Specified chamber pressure", "MPa"),
+            ("of_ratio",         "指定总氧燃比 O/F",            "—"),
             ("target_isp",       "比冲初值(仅流量初猜) / Isp init.", "s"),
             ("ambient_pressure", "环境压力 / Ambient press.",   "MPa"),
         ],
@@ -174,7 +173,7 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
             ("gg_fraction_guess",   "GG 流量分数初猜 / GG flow fraction", "—"),
             ("gg_injector_dp_ratio","GG 喷注器压降比 ΔP/p_gg",           "—"),
             ("gg_turbine_backpressure_pa", "涡轮排气背压 / Turbine backpress.", "bar"),
-            ("gg_exhaust_expansion_ratio", "排气喷管膨胀比 / Exhaust ε",  "—"),
+            ("gg_exhaust_expansion_ratio", "GG 排气喷管面积比 Ae/At / GG exhaust area ratio", "—"),
             ("gg_mech_efficiency",  "轴系机械效率 / Mech. η",             "—"),
             ("injector_dp_ratio_ox",   "主喷注器压降比(LOX 液路) ΔP/pc",  "—"),
             ("injector_dp_ratio_fuel", "主喷注器压降比(燃料液路) ΔP/pc",  "—"),
@@ -350,9 +349,9 @@ OVERVIEW_GROUPS_GG = [
         ("gg_pressure_MPa",        "GG 压力",                "MPa"),
         ("gg_turbine_pi_t",        "GG 涡轮压比 π_t",        "—"),
         ("gg_turbine_exhaust_T_K", "涡轮排气温度",           "K"),
-        ("thrust_gg_exhaust_N",    "排气喷管推力(海平面)",    "N"),
-        ("Isp_gg_exhaust_s",       "排气喷管比冲(海平面)",    "s"),
-        ("Isp_main_flow_s",        "主室流比冲(海平面)",      "s"),
+        ("thrust_gg_exhaust_N",    "GG 排气喷管计算推力（指定环境压力）", "N"),
+        ("Isp_gg_exhaust_s",       "GG 排气喷管计算比冲（指定环境压力）", "s"),
+        ("Isp_main_flow_s",        "主室流计算比冲（指定环境压力）", "s"),
         ("Isp_gg_penalty_s",       "开式循环比冲代价 ΔIsp",  "s"),
     ]),
     ("求解状态 / Solver Status", [
@@ -695,7 +694,7 @@ KEY_LABELS = {
     "T_chamber_ideal_K":         "理想平衡燃烧温度（η=1）[K]",
     "combustion_efficiency":     "历史温升折减系数（非 c* 效率）[-]",
     "Cf_vac":                    "真空推力系数 Cf_vac [-]",
-    "Cf_sl":                     "海平面推力系数 Cf_sl [-]",
+    "Cf_sl":                     "指定环境压力推力系数 Cf [-]",
     "flow_model":                "喷管流动模型 (0=冻结/1=平衡/-1=理想气体)",
 }
 
@@ -718,11 +717,15 @@ STATE_LABELS = {
 
 # Labels, units and tooltips shared with the desktop chamber design inputs.
 CHAMBER_INPUTS = {
+    'expansion_ratio': ('主喷管面积比 Ae/At', '—', '主喷管出口面积 / 喉部面积；循环、型面和冷却共用此输入。'),
     'chamber_contraction_ratio': ('燃烧室收缩比 Acc/At', '—', ''),
     'chamber_l_star_m': ('特征长度 L*', 'm', ''),
     'chamber_conv_half_angle_deg': ('收缩段半锥角 β', '°', 'V19 起全链同口径：室分层几何 / 喷管轮廓 / marching / CSV'),
-    'nozzle_bell_fraction': ('钟形长度比（0.80=80% bell）', '—', 'V19 新输入：旧版恒 0.80 不可改'),
-    'cooling_cover_eps': ('再生冷却覆盖面积比（0=全喷管）', '—', '如填 8 表示再生冷却只到 ε=8，其外为延伸段（暂无热模型）'),
+    'nozzle_bell_fraction': ('主喷管长度比 L/L15°', '—', '相对于相同喉部及出口半径的 15° 半角锥形喷管轴向长度；0.80 表示其长度的 80%。'),
+    'nozzle_contour_method': ('喷管型面构造方法', '', '抛物线钟形系统级工程近似；旧记录保留原方法。'),
+    'nozzle_initial_angle_deg': ('抛物线起始角 θn', '°', '下游喉部圆弧与抛物线相接处的壁面切线角。'),
+    'nozzle_exit_angle_deg': ('出口角 θe', '°', '出口壁面切线与轴线的夹角。'),
+    'cooling_cover_eps': ('冷却终点面积比 A止/At（0=至主喷管出口）', '—', '冷却覆盖终点在主喷管同一轮廓上定位；不是另一套喷管面积比。'),
     'cooling_channel_auto_size': ('自动定通道深 1/0', '—', ''),
     'cooling_target_velocity_ms': ('目标冷却剂流速', 'm/s', ''),
     'cooling_n_channels': ('通道数 N', '—', ''),

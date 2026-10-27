@@ -43,12 +43,34 @@ def current_thermal_evidence(model, result):
     return copy.deepcopy(evidence) if coupling_passed(evidence) else None
 
 
+def fixed_contour_inputs(baseline):
+    """Freeze nozzle definition from recorded hardware, never later edits."""
+    recorded = dict((baseline or {}).get("contour_inputs") or {})
+    if "expansion_ratio" in (baseline or {}):
+        recorded.setdefault("expansion_ratio", baseline["expansion_ratio"])
+    geometry = ((baseline or {}).get("cooling_hardware") or {}).get("geometry") or {}
+    if geometry:
+        recorded.update(nozzle_contour_method=geometry.get("nozzle_contour_method", "legacy_log_v1"),
+            nozzle_initial_angle_deg=geometry.get("initial_expansion_angle_deg", 35.),
+            nozzle_exit_angle_deg=geometry.get("exit_angle_deg", 10.),
+            nozzle_bell_fraction=geometry["bell_fraction"],
+            chamber_conv_half_angle_deg=geometry["conv_half_angle_deg"],
+            expansion_ratio=geometry["expansion_ratio"])
+    recorded.setdefault("nozzle_contour_method", "legacy_log_v1")
+    allowed = ("nozzle_contour_method", "nozzle_initial_angle_deg", "nozzle_exit_angle_deg",
+               "nozzle_bell_fraction", "chamber_conv_half_angle_deg", "expansion_ratio")
+    return {key: recorded[key] for key in allowed if key in recorded}
+
+
 def cooling_arguments(model, material=None):
     i=model.inputs
     trial=getattr(model,"_hydraulic_trial",None) or {}
     return dict(throat_area_m2=getattr(model,"_fixed_cooling_throat_area",None) or trial.get("throat_area_m2"),
         hot_side_profile=trial.get("hot_side_profile"), expansion_ratio=i.expansion_ratio,
         bell_fraction=i.nozzle_bell_fraction, channel_table=i.cooling_channel_table_json or None,
+        nozzle_contour_method=getattr(i,"nozzle_contour_method","legacy_log_v1"),
+        nozzle_initial_angle_deg=getattr(i,"nozzle_initial_angle_deg",35.),
+        nozzle_exit_angle_deg=getattr(i,"nozzle_exit_angle_deg",10.),
         n_points=int(getattr(i,"cooling_grid_points",120)),
         wall_thermal_dataset_id=i.wall_thermal_dataset_id,
         wall_manufacturing_state=i.wall_manufacturing_state,

@@ -127,7 +127,7 @@ def _cooling_baseline(calculation, values, throat_area, height):
             "记录缺失或来自旧模型")
     material_binding = _wall_material_binding(profile, values)
     geometry = profile.get("geometry")
-    require(isinstance(geometry, dict) and geometry.get("version") == 2, "几何快照缺失或曲率来源版本过旧")
+    require(isinstance(geometry, dict) and geometry.get("version") in (2, 3), "几何快照缺失或曲率来源版本过旧")
     from cooling_marching import BARTZ_GEOMETRY_ID
     gas_heat = profile.get("gas_heat_transfer")
     require(isinstance(gas_heat, dict) and gas_heat.get("geometry_model_id") == BARTZ_GEOMETRY_ID
@@ -151,6 +151,9 @@ def _cooling_baseline(calculation, values, throat_area, height):
         expected = build_regen_geometry(r_t=rt, r_c=rc, L_cyl=length,
             expansion_ratio=values["expansion_ratio"], cover_eps=values["cooling_cover_eps"],
             bell_fraction=values["nozzle_bell_fraction"], conv_half_angle_deg=values["chamber_conv_half_angle_deg"],
+            nozzle_contour_method=values.get("nozzle_contour_method", "legacy_log_v1"),
+            nozzle_initial_angle_deg=values.get("nozzle_initial_angle_deg", 35.0),
+            nozzle_exit_angle_deg=values.get("nozzle_exit_angle_deg", 10.0),
             n_points=values["cooling_grid_points"], counterflow=True,
             n_channels=values["cooling_n_channels"], channel_width_m=values["cooling_channel_width_m"],
             channel_height_m=height, wall_thickness_m=values["cooling_wall_thickness_m"],
@@ -172,7 +175,21 @@ def _cooling_baseline(calculation, values, throat_area, height):
             close(saved, rebuilt, path, atol=1e-11, rtol=1e-9)
         else:
             require(saved == rebuilt, f"{path}不一致")
-    compare_geometry(geometry, expected)
+    comparison = expected
+    if geometry["version"] == 2:
+        # v2 used the same coordinates and hydraulic definitions, but predated
+        # explicit-angle provenance. Only absent newly introduced metadata can
+        # be omitted; every original coordinate/dimension remains checked.
+        require(values.get("nozzle_contour_method", "legacy_log_v1") == "legacy_log_v1",
+                "历史型面方法与显式角度输入不一致")
+        comparison = dict(expected, version=2)
+        introduced = ("nozzle_contour_method", "initial_expansion_angle_deg", "exit_angle_deg",
+            "angle_source", "method_note", "coordinate_origin", "L_nozzle_m",
+            "chamber_blend_radius_m", "convergent_tangent_continuity")
+        for key in introduced:
+            if key not in geometry:
+                comparison.pop(key, None)
+    compare_geometry(geometry, comparison)
     close(gas_heat.get("throat_diameter_m"), 2*rt, "Bartz 喉径")
     close(gas_heat.get("curvature_radius_m"), expected["throat_upstream_radius_m"], "Bartz 曲率半径")
     close(gas_heat.get("curvature_factor"), (2*rt/expected["throat_upstream_radius_m"])**.1, "Bartz 曲率因子")
@@ -334,6 +351,9 @@ def source_baseline(source):
         "expansion_ratio": values["expansion_ratio"], "throat_area_m2": area,
         "cooling_height_m": height, "cycle_type": values["cycle_type"],
         "propellant_pair": values["propellant_pair"], "gg_layout": values["gg_layout"],
+        "contour_inputs": {key: values[key] for key in (
+            "nozzle_contour_method", "nozzle_initial_angle_deg", "nozzle_exit_angle_deg",
+            "nozzle_bell_fraction", "chamber_conv_half_angle_deg", "expansion_ratio")},
     }
     baseline["cooling_hardware"] = _cooling_baseline(calculation, values, area, height)
     if values["cycle_type"] == "ffsc":
