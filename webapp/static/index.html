@@ -57,7 +57,7 @@
     <header class="app-header">
       <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>系统设计 · 运行仿真</small></div></div>
       <div class="document-heading"><b id="document-title">工作区</b><span id="document-meta"></span></div>
-      <div class="actions header-actions"><button data-nav="projects">打开方案</button><button id="header-save" form="project-form" type="submit" hidden>保存方案</button><button id="export-inputs" hidden>导出方案</button><button id="header-run" class="primary" hidden>运行设计点</button><button id="header-cancel" hidden>取消计算</button></div>
+      <div class="actions header-actions"><button data-nav="projects">打开方案</button><button id="header-save" form="project-form" type="submit" hidden>保存方案</button><button id="header-run" class="primary" hidden>运行设计点</button><button id="header-cancel" hidden>取消计算</button></div>
       <div class="user-area"><span id="user-label"></span><button class="text-btn" id="logout">退出</button></div>
     </header>
     <div id="connection-banner" class="connection-banner" role="status" hidden><span id="connection-message"></span><button id="retry-connection">重新连接</button></div>
@@ -103,8 +103,6 @@
                   <div class="preset-box"><label>参考机型<select id="project-preset" aria-label="参考工况"></select></label><p class="fine">选择即载入整套示例参数，可撤销。</p><p id="preset-context" class="field-help"></p><div class="preset-actions"><button id="apply-preset" type="button">恢复示例参数</button><button id="open-references" type="button">机型资料</button></div><button id="undo-preset" type="button" class="wide" hidden>撤销机型切换</button></div>
                   <div class="propellant-context" aria-label="当前推进剂模型"><b id="propellant-model-label"></b><p id="propellant-model-note" class="fine"></p><details id="propellant-model-details"><summary>物性范围与模型说明</summary><p id="propellant-model-limits" class="fine"></p></details><p id="propellant-model-error" class="error" role="alert"></p><button id="load-propellant-example" type="button" hidden>加载配套工程示例</button></div>
                   <div id="parameter-fields"></div><p id="parameter-empty" class="small-empty" hidden>没有匹配的参数。</p>
-                  <details class="project-details"><summary>方案信息与文件</summary><label>项目名称<input id="project-name" maxlength="80" required></label><label>说明<textarea id="project-description" rows="2" maxlength="1000"></textarea></label><button type="button" id="reload-project">重新载入已保存方案</button><label class="file-button">导入方案 JSON<input type="file" accept=".json,application/json" id="import-inputs"></label></details>
-                  <details><summary>完整参数 JSON（SI 单位）</summary><p class="fine">包含原方案的兼容参数与模型假设。分组面板只编辑系统参数；修改 JSON 后，点击“应用 JSON”。物理冷却沿程模型参与稳态循环，最大壁温单独校核；历史后处理开关不控制该模型。</p><textarea id="raw-inputs" rows="12" spellcheck="false" aria-label="完整参数 JSON"></textarea><button type="button" id="apply-json">应用 JSON</button></details>
                 </div>
                 <div class="parameter-footer">
                 <p id="editor-error" class="error" role="alert"></p>
@@ -115,7 +113,7 @@
             </section>
             <div class="analysis-pane">
               <div class="analysis-heading"><div><h1 id="analysis-title">稳态性能分析</h1><p class="muted" id="analysis-subtitle">单工况设计点 · 循环匹配、功率平衡与系统约束</p></div><button id="toggle-parameters" aria-expanded="true">收起参数</button></div>
-              <div class="result-toolbar"><label>计算记录<select id="result-selector" aria-label="选择计算记录"><option value="">尚无计算记录</option></select></label><button id="export-current-result" hidden>导出结果</button></div>
+              <div id="result-toolbar" class="result-toolbar"><label>计算记录<select id="result-selector" aria-label="选择计算记录"><option value="">尚无计算记录</option></select></label><button id="export-current-result" hidden>导出结果</button></div>
               <div id="result-context" class="banner" role="status">尚无计算结果。选择参考工况后运行设计点。</div>
               <div id="analysis-content"></div>
               <div id="validation-content" hidden></div>
@@ -126,6 +124,17 @@
               <div id="ignition-content" hidden></div>
               <div id="shutdown-content" hidden></div>
               <div id="project-history" class="project-right" hidden>
+              <section class="panel project-information" aria-labelledby="project-information-title">
+                <div class="panel-heading"><h2 id="project-information-title">方案信息</h2><span id="project-dirty-label" class="badge">已保存</span></div>
+                <label>方案名称<input id="project-name" form="project-form" maxlength="80" required></label>
+                <label>说明<textarea id="project-description" form="project-form" rows="3" maxlength="1000" placeholder="记录设计目的、工况与本次修改说明"></textarea></label>
+                <p id="project-history-error" class="error" role="alert"></p>
+                <div class="project-information-actions"><button id="history-save" form="project-form" type="submit" class="primary">保存方案</button><p class="fine">名称、说明与当前参数一起保存为新版本；历史版本与计算快照保留。</p></div>
+                <details id="project-more-actions"><summary>更多操作</summary>
+                  <div class="project-file-actions"><button id="export-inputs" type="button">导出参数备份</button><button id="choose-import" type="button">导入参数备份</button><input type="file" accept=".json,application/json" id="import-inputs" hidden aria-label="选择参数备份文件"><button type="button" id="reload-project">重新载入已保存方案</button></div>
+                  <p class="fine">备份使用 JSON 格式，包含当前完整参数、方案名称与说明，不包含历史计算结果。导入仅替换参数，名称与说明保持当前内容；保存后生成新版本。</p>
+                </details>
+              </section>
               <section class="panel"><div class="panel-heading"><h2>计算记录</h2><span class="muted">每次提交保留输入快照</span></div><div id="project-jobs"></div></section>
               <section class="panel"><div class="panel-heading"><h2>方案版本</h2><span class="muted">保存时自动记录</span></div><div id="project-revisions"></div></section>
               </div>

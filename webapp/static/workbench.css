@@ -278,3 +278,13 @@ button:disabled { cursor: not-allowed; }
 .wall-dataset-evidence a{color:#426e9c}
 .wall-dataset-summary,.wall-configuration-context{overflow-wrap:anywhere}
 .parameter-section[data-group="wall_thermal"] .field-help{overflow-wrap:anywhere}
+.workbench-layout.history-view{grid-template-columns:minmax(0,1fr)}
+.workbench-layout.history-view .parameter-pane{display:none}
+.project-information>label{max-width:780px}
+.project-information-actions,.project-file-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.project-information-actions .fine{margin:0}
+.project-information-actions>button{flex-shrink:0}
+#project-more-actions{margin-top:18px}
+.project-file-actions{margin:14px 0 10px}
+#project-history-error:empty{display:none}
+#project-history[inert]{opacity:.7}

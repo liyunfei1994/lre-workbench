@@ -23,7 +23,7 @@ const statusClass = value => ["succeeded","pass"].includes(value) ? "success" : 
 const badge = (value, label) => `<span class="badge ${statusClass(value)}">${escape(label || statusNames[value] || value)}</span>`;
 const views = {overview:["稳态性能分析","单工况设计点 · 循环匹配、功率平衡与系统约束"],topology:["发动机循环原理图","查看推进剂流向、燃气路径与泵—涡轮驱动关系"],states:["流路状态分析","沿流路查看节点状态、压力与温度变化及组分"],components:["部件性能分析","按功能查看部件性能、进出口状态与能量转换"],log:["日志与警告","检查计算状态、警告与运行环境"],history:["方案与计算记录","查看方案版本、计算快照与历史结果"]};
 let user=null, initialized=false, info=null, page="projects", analysisView="overview";
-let current=null, draft=null, dirty=false, rawDirty=false, resultRecord=null, modalRecord=null;
+let current=null, draft=null, dirty=false, resultRecord=null, modalRecord=null;
 let fields=[], groups=[], projectJobs=[], selectedJobId=null, polling=false, editorBusy=false, connected=null;
 let toastTimer;
 let refreshSequence=0;
@@ -70,9 +70,9 @@ async function api(path, method="GET", data) {
   return output;
 }
 async function action(button,errorId,task) {
-  if(errorId) $(errorId).textContent="";
+  if(errorId==="editor-error")setEditorError("");else if(errorId) $(errorId).textContent="";
   if(button) button.disabled=true;
-  try {await task();} catch(error){if(errorId) $(errorId).textContent=error.message;else toast(error.message);}
+  try {await task();} catch(error){if(errorId==="editor-error")setEditorError(error.message);else if(errorId) $(errorId).textContent=error.message;else toast(error.message);}
   finally {if(button) button.disabled=false;updateActionState();}
 }
 function download(value,filename) {
@@ -80,8 +80,12 @@ function download(value,filename) {
   const link=document.createElement("a");link.href=url;link.download=filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
 }
 function downloadResult(record) {if(record?.result) download(record,"lre-result-"+record.id+".json");}
+function setEditorError(message){
+  $("editor-error").textContent=message;$("project-history-error").textContent=message;
+}
 function setDirty(value=true) {
-  dirty=value;$("dirty-label").textContent=value?"尚未保存":"已保存";$("dirty-label").className="badge"+(value?" dirty":" success");
+  dirty=value;
+  for(const id of ["dirty-label","project-dirty-label"]){$(id).textContent=value?"尚未保存":"已保存";$(id).className="badge"+(value?" dirty":" success");}
   if(current) $("document-title").textContent=$("project-name").value+(value?" · 已修改":"");
   updateResultContext();
   if(analysisView==="validation") validationView?.sync();
@@ -95,7 +99,8 @@ function setDirty(value=true) {
 function mayLeave(){return !dirty || confirm("当前编辑尚未保存。确定放弃这些编辑？");}
 function updateActionState(){
   for(const id of ["header-run","submit-job"]) $(id).disabled=!current || editorBusy || connected===false || projectJobs.some(active) || !!propellantIssue();
-  $("header-save").disabled=!current || editorBusy || connected===false;
+  for(const id of ["header-save","history-save"])$(id).disabled=!current || editorBusy || connected===false;
+  for(const id of ["choose-import","import-inputs","export-inputs","reload-project"])$(id).disabled=!current || editorBusy;
   const cancellable=projectJobs.find(j=>active(j)&&(user?.role==="admin"||user?.id===j.submitted_by));
   $("header-cancel").hidden=page!=="project"||!cancellable;
   $("header-cancel").disabled=editorBusy||connected===false;
@@ -103,9 +108,11 @@ function updateActionState(){
 }
 async function withEditorLock(task){
   if(editorBusy) return;
-  editorBusy=true;$("project-form").inert=true;const controls=[...$("project-form").querySelectorAll("input,select,textarea,button")];
+  editorBusy=true;const containers=[$("project-form"),$("project-history")];
+  containers.forEach(el=>el.inert=true);
+  const controls=containers.flatMap(el=>[...el.querySelectorAll("input,select,textarea,button")]);
   const disabled=controls.map(el=>el.disabled);controls.forEach(el=>el.disabled=true);updateActionState();
-  try{return await task();}finally{controls.forEach((el,i)=>el.disabled=disabled[i]);$("project-form").inert=false;editorBusy=false;updateActionState();}
+  try{return await task();}finally{controls.forEach((el,i)=>el.disabled=disabled[i]);containers.forEach(el=>el.inert=false);editorBusy=false;updateActionState();}
 }
 function showAuth(){
   validationView?.onLeave();
@@ -148,7 +155,7 @@ function switchPage(next){
   if(next!=="project") shutdownView?.onLeave();
   page=next;for(const name of ["projects","project","jobs","members"]) $(name+"-page").hidden=name!==next;
   $("page-name").textContent=next==="project"?views[analysisView][0]:{projects:"共享项目",jobs:"计算任务",members:"成员管理"}[next];
-  for(const id of ["header-save","header-run","export-inputs"]) $(id).hidden=next!=="project";
+  for(const id of ["header-save","header-run"]) $(id).hidden=next!=="project";
   document.querySelectorAll("[data-nav]").forEach(b=>b.classList.toggle("active",b.dataset.nav===next));
   document.querySelectorAll("[data-view]").forEach(b=>b.classList.toggle("active",next==="project" && b.dataset.view===analysisView));
   if(next!=="project"){$("document-title").textContent="团队工作区";$("document-meta").textContent="共享方案 · 版本与计算记录";}else updateDocument();
@@ -200,19 +207,19 @@ function syncPresetSelection(infer=false){
 }
 function loadPreset(preset){
   if(!preset||editorBusy)return;
-  presetUndo={draft:clone(draft),dirty,rawDirty,raw:$("raw-inputs").value,referenceKey,
+  presetUndo={draft:clone(draft),dirty,referenceKey,
     group:$("parameter-group").value,search:$("parameter-search").value};
   draft={...clone(info.ui_schema.defaults),...clone(preset.inputs)};referenceKey=preset.key;
   $("parameter-search").value="";$("parameter-group").value=groups.find(g=>g.fields.some(f=>f.key==="cycle_type"))?.id||"";
-  $("editor-error").textContent="";renderFields();syncPresetSelection();setDirty();$("undo-preset").hidden=false;
+  setEditorError("");renderFields();syncPresetSelection();setDirty();$("undo-preset").hidden=false;
   toast("已载入整套参考参数，循环、推进剂与轴系已同步。尚未保存，可撤销切换。");
 }
 function undoPreset(){
   if(!presetUndo||editorBusy)return;
   const previous=presetUndo;draft=previous.draft;referenceKey=previous.referenceKey;
   $("parameter-search").value=previous.search;$("parameter-group").value=previous.group;
-  renderFields();rawDirty=previous.rawDirty;$("raw-inputs").value=previous.raw;
-  syncPresetSelection();setDirty(previous.dirty);clearPresetUndo();$("editor-error").textContent="";
+  renderFields();
+  syncPresetSelection();setDirty(previous.dirty);clearPresetUndo();setEditorError("");
   toast("已恢复切换前的参数与编辑内容。");
 }
 function updatePresetContext(){
@@ -241,7 +248,7 @@ function renderFields(){
   $("parameter-group").innerHTML=available.map(g=>`<option value="${escape(g.id)}">${escape(g.title)}</option>`).join("");
   if(available.some(g=>g.id===selected)) $("parameter-group").value=selected;
   $("parameter-fields").innerHTML=renderParameterGroups(available,draft,expanded);
-  $("raw-inputs").value=JSON.stringify(draft,null,2);rawDirty=false;filterParameters();updatePropellantContext();
+  filterParameters();updatePropellantContext();
 }
 function filterParameters(){
   const query=$("parameter-search").value.trim().toLocaleLowerCase(),selected=$("parameter-group").value;let count=0;$("parameter-group").disabled=!!query;
@@ -255,7 +262,8 @@ function updateDocument(){if(!current)return;$("document-title").textContent=$("
 function fillProject(project,keepReference=false){
   const changed=current?.id!==project.id;current=project;draft=mergeInputDefaults(clone(info.ui_schema.defaults),clone(project.inputs),true);
   if(changed){resultRecord=null;selectedJobId=null;projectJobs=[];analysisView="overview";$("parameter-search").value="";}
-  $("project-name").value=project.name;$("project-description").value=project.description;$("editor-error").textContent="";
+  $("project-name").value=project.name;$("project-description").value=project.description;setEditorError("");
+  if(changed)$("project-more-actions").open=false;
   clearPresetUndo();syncPresetSelection(changed||!keepReference);
   renderFields();updatePresetContext();setDirty(false);updateDocument();renderView();updateActionState();
 }
@@ -270,6 +278,9 @@ async function chooseView(view){
 }
 function renderView(){
   $("analysis-title").textContent=views[analysisView][0];$("analysis-subtitle").textContent=views[analysisView][1];
+  const history=analysisView==="history";
+  document.querySelector(".workbench-layout").classList.toggle("history-view",history);
+  for(const id of ["toggle-parameters","result-toolbar","result-context"])$(id).hidden=history;
   $("project-history").hidden=analysisView!=="history";$("analysis-content").hidden=["history","validation","throttle","transient","feed","chilldown","ignition","shutdown"].includes(analysisView);
   $("validation-content").hidden=analysisView!=="validation";
   $("throttle-content").hidden=analysisView!=="throttle";
@@ -358,18 +369,28 @@ function renderJobs(container,jobs){container.innerHTML=jobs.length?jobs.map(j=>
 function validateChoices(params){
   for(const f of fields)if(f.choices && f.key in params && !f.choices.some(c=>String(c.value)===String(params[f.key])))throw new Error(`${f.label}选项无效：${params[f.key]}`);
 }
-function applyRaw(){
-  const value=JSON.parse($("raw-inputs").value);if(!value||Array.isArray(value)||typeof value!=="object")throw new Error("参数必须是 JSON 对象。");
-  const params=value.inputs||value;if(!params||Array.isArray(params)||typeof params!=="object")throw new Error("inputs 必须是 JSON 对象。");
-  const defaults=info.ui_schema.defaults;for(const key of Object.keys(params))if(!(key in defaults))throw new Error("无法识别的参数："+key);
+function applyInputDocument(value){
+  if(!value||Array.isArray(value)||typeof value!=="object")throw new Error("方案文件必须包含参数对象。");
+  const params=Object.hasOwn(value,"inputs")?value.inputs:value;if(!params||Array.isArray(params)||typeof params!=="object")throw new Error("inputs 必须是参数对象。");
+  const defaults=info.ui_schema.defaults;for(const key of Object.keys(params))if(!Object.hasOwn(defaults,key))throw new Error("无法识别的参数："+key);
   for(const [key,v] of Object.entries(params)){const d=defaults[key];if(typeof v!==typeof d || (typeof d==="number"&&!Number.isFinite(v)))throw new Error("参数类型无效："+key);}
   if(params.cycle_type&&!['ffsc','gg'].includes(params.cycle_type))throw new Error("循环类型无效。");
   if(params.propellant_pair&&!['lox_methane','lox_kerosene'].includes(params.propellant_pair))throw new Error("推进剂组合无效。");
   validateChoices(params);
-  draft=mergeInputDefaults(clone(defaults),params,savedInputDocument(value));clearPresetUndo();syncPresetSelection(true);renderFields();setDirty();
+  for(const f of fields)if(f.type==="int" && f.key in params && !Number.isInteger(params[f.key]))throw new Error(`${f.label}必须是整数。`);
+  // Validate before changing the only editable draft; a failed import is inert.
+  draft=mergeInputDefaults(clone(defaults),clone(params),savedInputDocument(value));clearPresetUndo();syncPresetSelection(true);renderFields();setDirty();
+}
+function buildInputBackup(){
+  return {format:"lre.workbench.inputs",schema_version:1,inputs:clone(draft),
+    project_name:$("project-name").value,project_description:$("project-description").value,
+    base_revision:current.revision,unsaved:dirty};
 }
 function validateDraft(){
-  if(!$("project-name").value.trim())throw new Error("请在“方案信息与文件”中填写项目名称。");
+  if(!$("project-name").value.trim()){
+    analysisView="history";renderView();switchPage("project");$("project-name").focus();
+    throw new Error("请在“方案与计算记录”中填写方案名称。");
+  }
   validateChoices(draft);
   if(propellantIssue())throw new Error(propellantIssue());
   for(const f of fields){
@@ -377,19 +398,17 @@ function validateDraft(){
     if(typeof f.default==="number" && (typeof value!=="number"||!Number.isFinite(value)||(f.type==="int"&&!Number.isInteger(value)))){
       const visible=groups.some(g=>compatible(g)&&g.fields.some(item=>item.key===f.key&&parameterVisible(item,draft)));
       if(visible){$("parameter-search").value=f.label;filterParameters();}
-      throw new Error(`${f.label}必须是${f.type==="int"?"整数":"有限数值"}，请检查${visible?"参数":"完整参数 JSON 中的 "+f.key}。`);
+      throw new Error(`${f.label}必须是${f.type==="int"?"整数":"有限数值"}。${visible?"请在参数设置中修正。":`历史参数 ${f.key} 无效；请在“方案与计算记录”载入有效版本，或导入修正后的参数备份。`}`);
     }
   }
 }
 async function saveProject(){
-  if(rawDirty)throw new Error("请先点击“应用 JSON”，确认完整参数。");
   validateDraft();
   const out=await api("/projects/"+current.id,"PUT",{name:$("project-name").value,description:$("project-description").value,inputs:draft,revision:current.revision});
   fillProject(out.project,true);if(out.warnings.length)toast("已保存。参数提示："+out.warnings.join("；"));return out;
 }
 async function runDesign(){
   if(!current||projectJobs.some(active))return;
-  if(rawDirty)throw new Error("请先应用 JSON，再运行设计点。");
   validateDraft();
   await withEditorLock(async()=>{if(dirty)await saveProject();const job=await api(`/projects/${current.id}/jobs`,"POST",{revision:current.revision});selectedJobId=job.id;analysisView="overview";switchPage("project");await refreshProjectSide();toast("设计点已提交，结果会自动显示在右侧。");});
 }
@@ -414,28 +433,36 @@ $("analysis-content").addEventListener("click",event=>{
 document.querySelectorAll("[data-close]").forEach(b=>b.onclick=()=>$(b.dataset.close).close());
 $("new-project").onclick=newProject;
 $("new-form").onsubmit=event=>{event.preventDefault();action(event.submitter,"new-error",async()=>{const data=Object.fromEntries(new FormData(event.target));const preset=info.presets.find(p=>p.key===data.preset);const out=await api("/projects","POST",{name:data.name,description:data.description,inputs:preset.inputs});$("new-dialog").close();event.target.reset();fillProject(out.project);switchPage("project");await refreshProjectSide();});};
-$("project-name").oninput=$("project-description").oninput=()=>{clearPresetUndo();setDirty();};
+$("project-name").oninput=$("project-description").oninput=()=>{if(editorBusy)return;clearPresetUndo();setEditorError("");setDirty();};
 $("parameter-search").oninput=$("parameter-group").onchange=filterParameters;
-$("raw-inputs").oninput=()=>{clearPresetUndo();rawDirty=true;setDirty();};
 $("parameter-fields").oninput=event=>{
   const f=editorField(event.target.dataset.input);if(!f||editorBusy)return;
-  if(rawDirty){$("editor-error").textContent="JSON 中有尚未应用的修改，请先应用 JSON 后再修改表单。";event.target.value=displayValue(f);return;}
   const value=event.target.value;
   if(f.virtual){
     if(f.key!==PREBURNER_MODE_KEY)return;
     try{draft=selectPreburnerMode(draft,value);}
-    catch(error){$("editor-error").textContent=error.message;event.target.value=displayValue(f);return;}
+    catch(error){setEditorError(error.message);event.target.value=displayValue(f);return;}
   }else{
     const canonical=fields.find(field=>field.key===f.key);if(!canonical)return;
     draft[f.key]=typeof canonical.default==="number"?(value===""?null:Number(value)/(canonical.factor||1)):value;
   }
-  clearPresetUndo();$("editor-error").textContent="";$("raw-inputs").value=JSON.stringify(draft,null,2);syncPresetSelection();setDirty();
+  clearPresetUndo();setEditorError("");syncPresetSelection();setDirty();
   if(f.virtual||["cycle_type","propellant_pair"].includes(f.key)||(f.choices&&parameterLayoutDependency(f.key,groups)))renderFields();
   else updatePropellantContext();
 };
-$("parameter-fields").onchange=event=>{const f=editorField(event.target.dataset.input);if(!f||editorBusy||rawDirty||f.virtual||f.choices)return;if(parameterLayoutDependency(f.key,groups))renderFields();};
-$("apply-json").onclick=()=>action(null,"editor-error",async()=>{applyRaw();toast("JSON 已应用。");});
-$("import-inputs").onchange=event=>action(null,"editor-error",async()=>{const file=event.target.files[0];if(!file)return;try{if(file.size>180000)throw new Error("方案文件超过 180 KB。");if(dirty&&!confirm("导入方案将替换当前参数，是否继续？"))return;const text=await file.text();JSON.parse(text);$("raw-inputs").value=text;rawDirty=true;setDirty();applyRaw();toast("方案已导入，可保存或运行。");}finally{event.target.value="";}});
+$("parameter-fields").onchange=event=>{const f=editorField(event.target.dataset.input);if(!f||editorBusy||f.virtual||f.choices)return;if(parameterLayoutDependency(f.key,groups))renderFields();};
+$("choose-import").onclick=()=>{if(!editorBusy)$("import-inputs").click();};
+$("import-inputs").onchange=event=>action(null,"editor-error",async()=>{
+  const input=event.target,file=input.files[0];if(!file||editorBusy)return;
+  try{
+    if(file.size>180000)throw new Error("方案文件超过 180 KB。");
+    if(dirty&&!confirm("导入将替换当前参数草稿，名称与说明保持不变。是否继续？"))return;
+    await withEditorLock(async()=>{
+      let value;try{value=JSON.parse(await file.text());}catch{throw new Error("无法读取参数备份，请选择有效的 JSON 方案文件。当前草稿已保留。");}
+      applyInputDocument(value);toast("参数已导入为草稿，保存后生成新版本。");
+    });
+  }finally{input.value="";}
+});
 $("project-preset").onchange=()=>{if(editorBusy){syncPresetSelection();return;}const key=$("project-preset").value,preset=info.presets.find(p=>p.key===key);if(preset)loadPreset(preset);else {if(!key){referenceKey="";clearPresetUndo();}updatePresetContext();}};
 $("undo-preset").onclick=undoPreset;
 $("open-references").onclick=showReferences;
@@ -444,7 +471,7 @@ $("apply-preset").onclick=()=>{const preset=info.presets.find(p=>p.key===$("proj
 $("load-propellant-example").onclick=()=>loadPreset(info.presets.find(p=>p.inputs.propellant_pair===draft.propellant_pair&&p.inputs.cycle_type==="gg"));
 $("project-form").onsubmit=event=>{event.preventDefault();action(event.submitter,"editor-error",()=>withEditorLock(async()=>{await saveProject();await refreshProjectSide();toast("方案新版本已保存。");}));};
 $("reload-project").onclick=()=>action(null,"editor-error",async()=>{if(editorBusy||!mayLeave())return;await withEditorLock(async()=>{fillProject(await api("/projects/"+current.id));await refreshProjectSide();});});
-$("export-inputs").onclick=()=>action(null,"editor-error",async()=>{if(rawDirty)throw new Error("请先应用 JSON 再导出。");download({format:"lre.workbench.inputs",schema_version:1,inputs:draft,project_name:$("project-name").value,base_revision:current.revision,unsaved:dirty},"lre-inputs.json");});
+$("export-inputs").onclick=()=>action(null,"editor-error",async()=>{if(editorBusy)return;validateDraft();download(buildInputBackup(),"lre-inputs.json");});
 $("submit-job").onclick=$("header-run").onclick=()=>action(null,"editor-error",runDesign);
 $("result-selector").onchange=()=>action(null,null,()=>loadRecord($("result-selector").value));
 $("toggle-parameters").onclick=()=>{const collapsed=document.querySelector(".workbench-layout").classList.toggle("parameters-collapsed");$("toggle-parameters").textContent=collapsed?"展开参数":"收起参数";$("toggle-parameters").setAttribute("aria-expanded",String(!collapsed));};
