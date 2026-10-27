@@ -110,7 +110,9 @@ class UiSchemaTests(unittest.TestCase):
         self.assertEqual(set(self.fields), set(asdict(EngineInputs())))
         cooling = next(g for g in groups if g["id"] == "cooling")
         mode = next(f for f in cooling["fields"] if f["key"] == "cooling_bartz_mode")
-        self.assertEqual([c["value"] for c in mode["choices"]], [1, 0])
+        self.assertTrue(mode["read_only"])
+        self.assertNotIn("choices", mode)
+        self.assertTrue(all(f["advanced"] for f in cooling["fields"] if f["key"] in ("cooling_heat_load", "cooling_dp_pa")))
         self.assertEqual(self.fields["cooling_bartz_mode"]["type"], "number")
 
     def test_design_conditions_and_geometry_have_single_editor_locations(self):

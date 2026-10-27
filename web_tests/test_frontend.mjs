@@ -507,8 +507,29 @@ test("unsupported reference stays read-only, preserves the active case and escap
   assert.match(nodes.get("reference-content").innerHTML,/href="https:\/\/www.spacex.com/);
 });
 
+test("budget reference explains historical compatibility without offering a routine load",()=>{
+  const reference={key:"merlin1d_reference",name:"Merlin 1D",propellants:"LOX / RP-1",
+    cycle_label:"GG",applicable:true,preset_key:"merlin1d_gg",
+    compatibility_reason:"可加载液氧/煤油 GG 工程示例；冷却采用指定吸热量。"};
+  const catalog={...info,presets:[...info.presets,{key:"merlin1d_gg",routine_design:false,
+    inputs:{...defaults,propellant_pair:"lox_kerosene",cooling_bartz_mode:0}}],reference_engines:[reference]};
+  const {app,nodes}=harness(async()=>{throw Error("Reading a reference must not save or load a design");});
+  app.seed(copy({current:project,draft:defaults,dirty:false,user,info:catalog,
+    groups:schema.groups,fields,page:"project",projectJobs:[],connected:true}));
+  nodes.get("project-preset").value="merlin1d_gg";
+  nodes.get("open-references").onclick();
+  const content=nodes.get("reference-content").innerHTML;
+  assert.match(content,/仅公开资料/);
+  assert.match(content,/历史预算冷却模型，不作为常规新设计入口/);
+  assert.match(content,/已有方案可从“方案与计算记录”载入复现/);
+  assert.doesNotMatch(content,/可加载/);
+  assert.deepEqual(copy(app.state().draft),defaults);
+  assert.equal(app.state().dirty,false);
+  assert.match(reference.compatibility_reason,/可加载/);
+});
 
-test("switching propellants preserves numbers, blocks incompatible runs, and loads an explicit matching example", async () => {
+
+test("switching propellants never creates a budget design but saved kerosene inputs remain usable", async () => {
   const base={...defaults,propellant_pair:"lox_methane",fuel_inlet_temp:100,cooling_bartz_mode:1,cooling_dp_auto:0};
   const fluidFields=[...fields,{key:"propellant_pair",default:"lox_methane",label:"推进剂组合"},
     {key:"fuel_inlet_temp",default:100,label:"燃料入口温度",type:"number"},
@@ -519,7 +540,7 @@ test("switching propellants preserves numbers, blocks incompatible runs, and loa
       {id:"lox_kerosene",label:"液氧/煤油（正十二烷替代模型）",supported_cycles:["gg"],
         inlet_temperature_min_K:263.6,inlet_temperature_max_K:700,limitations:["未标定真实 RP-1"]}]};
   const kerosene={...base,propellant_pair:"lox_kerosene",fuel_inlet_temp:290,cooling_bartz_mode:0};
-  const localInfo={...info,ui_schema:fluidSchema,presets:[{key:"kerosene",inputs:kerosene}]};
+  const localInfo={...info,ui_schema:fluidSchema,presets:[{key:"kerosene",inputs:kerosene,routine_design:false}]};
   const {app,nodes}=harness(async()=>{throw Error("Selection must not submit or save");});
   app.seed(copy({current:project,draft:base,dirty:false,user,info:localInfo,
     groups:fluidSchema.groups,fields:fluidFields,page:"project",projectJobs:[],connected:true}));
@@ -527,13 +548,23 @@ test("switching propellants preserves numbers, blocks incompatible runs, and loa
   assert.equal(app.state().draft.fuel_inlet_temp,100);
   assert.equal(app.state().draft.cooling_bartz_mode,1);
   assert.equal(nodes.get("header-run").disabled,true);
-  assert.match(nodes.get("propellant-model-error").textContent,/指定吸热量/);
-  await assert.rejects(app.runDesign(),/指定吸热量/);
+  assert.match(nodes.get("propellant-model-error").textContent,/尚未接入统一准一维/);
+  await assert.rejects(app.runDesign(),/尚未接入统一准一维/);
+  assert.equal(nodes.get("load-propellant-example").hidden,true);
   nodes.get("load-propellant-example").onclick();
+  assert.equal(app.state().draft.cooling_bartz_mode,1);
+  app.applyInputDocument({inputs:kerosene});
   assert.deepEqual(copy(app.state().draft),kerosene);
   assert.equal(app.state().dirty,true);
   assert.equal(nodes.get("header-run").disabled,false);
   assert.match(nodes.get("propellant-model-label").textContent,/正十二烷/);
+  // The hidden legacy hydraulic flag cannot select another model or block a
+  // saved budget that the backend still accepts. Loading must retain its value.
+  const oldHydraulicFlag={...kerosene,cooling_dp_auto:1};
+  app.applyInputDocument({inputs:oldHydraulicFlag});
+  assert.deepEqual(copy(app.state().draft),oldHydraulicFlag);
+  assert.equal(nodes.get("header-run").disabled,false);
+  assert.equal(nodes.get("propellant-model-error").textContent,"");
   nodes.get("parameter-fields").oninput({target:{dataset:{input:"cycle_type"},value:"ffsc"}});
   assert.equal(nodes.get("header-run").disabled,true);
   assert.match(nodes.get("propellant-model-error").textContent,/支持 GG/);
@@ -628,6 +659,21 @@ test("legacy preburner drafts survive load, import, preset undo and save without
   assert.deepEqual(saved.inputs,copy(before));
   assert.ok(!("preburner_design_mode" in saved.inputs));
   assert.equal(saved.inputs.hidden_fixed_q,91e6);
+});
+
+test("routine new and load lists exclude budget presets while the API catalog remains intact",async()=>{
+  const old={key:"budget",label:"旧预算示例",routine_design:false,inputs:{...defaults,cooling_bartz_mode:0}};
+  const catalog={...info,presets:[...info.presets,old]};
+  const {app,nodes}=harness(async url=>{
+    if(url==="/api/auth/status")return response({initialized:true,user});
+    if(url==="/api/info")return response(catalog);
+    if(url==="/api/projects"||url.startsWith("/api/jobs"))return response([]);
+    throw Error(url);
+  });
+  app.reset();await app.initialize();
+  assert.doesNotMatch(nodes.get("new-preset").innerHTML,/旧预算/);
+  assert.match(nodes.get("project-preset").innerHTML,/<option value="budget" disabled>/);
+  assert.equal(catalog.presets[1].inputs.cooling_bartz_mode,0);
 });
 
 test("explicit preburner mode edits persist both flags and keep inactive values intact",async()=>{
@@ -1122,4 +1168,37 @@ test("a missing scenario name opens its editable history field before save or ru
   assert.equal(h.nodes.get("project-history").hidden,false);
   assert.equal(h.nodes.get("analysis-content").hidden,true);
   assert.equal(h.app.state().dirty,true);
+});
+
+test("cooling upgrade creates a draft and revision without changing the selected budget record",async()=>{
+  const oldInputs={...defaults,propellant_pair:"lox_methane",cooling_bartz_mode:0,cooling_heat_load:17e6,cooling_dp_pa:2e6};
+  const oldProject={...project,inputs:oldInputs};
+  const allFields=[...fields,...Object.keys(oldInputs).filter(key=>!(key in defaults)).map(key=>({key,label:key,default:oldInputs[key]}))];
+  const currentInfo={...info,ui_schema:{defaults:{...oldInputs,cooling_bartz_mode:1},groups:[{id:"cooling",fields:allFields}],
+    system_groups:[{id:"cooling",fields:allFields.map(f=>f.key==="cooling_bartz_mode"?{...f,read_only:true}:f)}]}};
+  const record={id:"old-budget",project_id:project.id,revision:1,status:"succeeded",created:1,result:{calculation:{inputs:oldInputs}}};
+  const saved=[];
+  const h=harness(async(url,options)=>{
+    if(url==="/api/jobs/old-budget")return response(record);
+    if(url==="/api/projects/p1"&&options.method==="PUT"){
+      const body=JSON.parse(options.body);saved.push(body);
+      return response({project:{...oldProject,...body,revision:2},warnings:[]});
+    }
+    throw Error(url);
+  });
+  h.app.seed(copy({current:oldProject,draft:oldInputs,dirty:false,user,info:currentInfo,
+    groups:currentInfo.ui_schema.system_groups,fields:allFields,page:"project",projectJobs:[],connected:true}));
+  h.app.fillProject(oldProject);await h.app.loadRecord(record.id);
+  assert.doesNotMatch(h.nodes.get("parameter-fields").innerHTML,/data-input="cooling_bartz_mode"/);
+  h.nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"22"}});
+  h.nodes.get("parameter-fields").listeners.get("click")({target:{closest:()=>({})}});
+  let state=h.app.state();
+  assert.equal(saved.length,0);assert.equal(state.current.inputs.cooling_bartz_mode,0);
+  assert.equal(state.draft.cooling_bartz_mode,1);assert.equal(state.draft.pc,22e6);
+  assert.equal(state.draft.cooling_heat_load,17e6);assert.equal(state.draft.cooling_dp_pa,2e6);
+  assert.equal(state.dirty,true);assert.deepEqual(copy(state.resultRecord),record);
+  await h.app.saveProject();state=h.app.state();
+  assert.equal(saved.length,1);assert.equal(saved[0].revision,1);
+  assert.equal(state.current.revision,2);assert.equal(state.current.inputs.cooling_bartz_mode,1);
+  assert.deepEqual(copy(state.resultRecord),record);assert.equal(oldProject.inputs.cooling_bartz_mode,0);
 });

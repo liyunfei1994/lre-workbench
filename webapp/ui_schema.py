@@ -177,6 +177,8 @@ def _system_groups(groups):
             continue
         group = deepcopy(original)
         group["fields"] = [f for f in group["fields"] if f["key"] not in excluded]
+        # Historical Q and pressure budgets have one compatibility editor home.
+        group["fields"] = [f for f in group["fields"] if f["key"] != "cooling_dp_pa"]
         if group["id"] == "solver":
             group["fields"] = [f for f in group["fields"] if f["key"] in ("nonlinear_solver", "cooling_grid_points")]
             group["title"] = "数值求解"
@@ -206,13 +208,16 @@ def _system_groups(groups):
         elif group["id"] == "inlet":
             group["description"] = "温度从贮箱侧给定；FFSC 与 GG 均计算增压泵焓升、短管压降后的主泵入口状态。效率为模型假设；主室损失模型单独选择，历史温升折减仅为兼容保留。"
         elif group["id"] == "cooling":
-            group["title"] = "再生冷却·系统热平衡"
-            group["description"] = "准一维模式沿同一几何求压力与焓，并反馈热侧和主循环；端口、总量与曲线同源。Bartz 型热侧关联的曲率半径取规范轮廓的上游喉部圆弧，关联式适用性仍需校核。预算模式给定 Q 与 Δp，没有沿程曲线。"
+            group["fields"].extend(deepcopy(f) for source in groups for f in source["fields"] if f["key"] == "cooling_dp_pa")
+            group["title"] = "再生冷却模型"
+            group["description"] = "沿同一型面和通道几何联立压力与焓，吸热、压降及出口状态反馈主循环。计算范围、材料和模型依据见结果区“再生冷却”。"
+            group["advanced_title"] = "历史预算参数"
+            group["advanced_help"] = "仅当前方案仍采用给定预算时生效；保留原值用于复现，不生成沿程解。"
             for field in group["fields"]:
                 if field["key"] == "cooling_bartz_mode":
-                    field.update(label="冷却计算方式", type="select", choices=[
-                        {"value": 1, "label": "统一准一维：Bartz 型关联与压力·焓守恒"},
-                        {"value": 0, "label": "给定 Q 与 Δp 预算（无沿程曲线）"}])
+                    field.update(label="当前冷却模型", read_only=True)
+                elif field["key"] in ("cooling_heat_load", "cooling_dp_pa"):
+                    field.update(advanced=True)
         elif group["id"] == "pumps":
             group["title"] = "涡轮泵·概念选型与转速设定"
             group["description"] = "指定或按比转速估算转速；尚未依据泵 / 涡轮特性图匹配工作点。压头系数仅保留于完整参数中的概念几何估算，相关诊断待统一。"
@@ -257,7 +262,7 @@ def design_ui_schema():
                    for key, label, unit in EXTRA_FIELDS],
     })
     return {
-        "version": 12, "defaults": defaults, "groups": groups,
+        "version": 13, "defaults": defaults, "groups": groups,
         "parameter_role_labels": dict(ROLE_LABELS),
         "propellant_models": propellant_models(),
         "methane_thermo_datasets": methane_dataset_catalog(),

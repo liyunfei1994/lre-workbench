@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {coolingDisplayState,coolingCurveSegments,coolingMaterialState,renderCooling} from "../webapp/static/cooling.js";
+import {coolingDisplayState,coolingCurveSegments,coolingMaterialState,coolingModelSummaryState,renderCooling} from "../webapp/static/cooling.js";
 import {renderAnalysis} from "../webapp/static/results.js";
 
 function record(){
@@ -270,4 +270,123 @@ test("material data HTML escapes source text and rejects unsafe links",()=>{
   assert.match(html,/&lt;script&gt;bad&lt;\/script&gt;/);
   assert.match(html,/&lt;img&gt;/);
   assert.doesNotMatch(html,/<script>|<img>|javascript:/);
+});
+
+function geometryRecord(){
+  const result=record(),profile=result.calculation.components.cooling_channel.profile;
+  const full=[{x_m:0,r_m:.2},{x_m:.5,r_m:.1},{x_m:1,r_m:.3},{x_m:2,r_m:.6}];
+  profile.geometry={full_nodes:full,nodes:full.slice(0,3).reverse().map(p=>({...p,n_channels:300,width_m:p.r_m*.015,
+    height_m:.005,wall_thickness_m:.0005,D_h_m:.002})),flow_direction:"counterflow",x_throat_m:.5,
+    coordinate_origin:"injector_face",channel_distribution:"width_proportional_to_radius"};
+  profile.material_assignment={default_dataset_id:"saved84",default_manufacturing_state:"extruded",zones:[
+    {x_start_m:.3,x_end_m:.7,dataset_id:"saved42",manufacturing_state:"powder_bed_fusion"}]};
+  profile.material_applicability={schema_version:1,status:"out_of_range",dataset_ids:["saved84","saved42"],
+    total_cells:2,out_of_range_cell_count:1,min_temperature_K:550,max_temperature_K:1200,manufacturing_match:"unknown",
+    datasets:[{dataset_id:"saved84",label:"GRCop-84 保存态"},{dataset_id:"saved42",label:"GRCop-42 分区态"}],
+    wall_temperature_limit_K:800,wall_temperature_limit_status:"exceeded",
+    conduction_model:"integral_k_dT=q_wall_times_thickness"};
+  profile.model_methods={version:1,hot_side:{id:"saved-hot",label:"本次热侧方法",detail:"保存的热侧定义"},
+    wall:{id:"saved-wall",label:"本次壁面方法",detail:"保存的壁面定义"},
+    cold_side:{id:"saved-cold",label:"本次冷侧方法",detail:"保存的冷侧定义"},
+    hydraulics:{id:"saved-pressure",label:"本次压降方法",detail:"保存的压降定义"},heat_transfer_enabled:true,friction_enabled:false};
+  profile.validity.property_domain="within_HEOS_declared_single_phase_ranges";
+  return result;
+}
+
+test("model overview presents the saved partial coverage, actual channel dimensions and material zones",()=>{
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  result.calculation.inputs={cooling_channel_count:999,wall_thermal_dataset_id:"LIVE_DRAFT",cooling_coverage_area_ratio:999};
+  const before=structuredClone(result), model=coolingModelSummaryState(profile),html=renderCooling(result);
+  assert.equal(model.drawingAvailable,true);
+  assert.equal(model.inletX,1);
+  assert.equal(model.outletX,0);
+  assert.match(html,/型面出口 x=2 m/);
+  assert.match(html,/冷却剂入口 x=1 m → 出口 x=0 m/);
+  assert.match(html,/<dt>通道数量<\/dt><dd>300<\/dd>/);
+  assert.match(html,/1.5–4.5 × 5/);
+  assert.match(html,/GRCop-84 保存态；1 个轴向覆盖分区/);
+  assert.match(html,/<td>0.3 m<\/td><td>0.7 m<\/td><td>GRCop-42 分区态<\/td>/);
+  assert.doesNotMatch(html,/LIVE_DRAFT/);
+  assert.deepEqual(result,before);
+});
+
+test("saved methods and check summaries do not turn applicability into hardware qualification",()=>{
+  const result=geometryRecord(),html=renderCooling(result);
+  for(const phrase of ["本次热侧方法","本次壁面方法","本次冷侧方法","保存的压降定义","换热：启用；摩擦：关闭",
+    "在 HEOS 声明单相范围内","超过方案壁温限值","1 / 2 个热单元越界","不等于材料使用资格"])
+    assert.ok(html.includes(phrase),phrase);
+  const methods=html.match(/<details class="cool-details cool-method-detail">[\s\S]*?<\/details>/)?.[0];
+  assert.ok(methods);
+  assert.doesNotMatch(methods,/<details[^>]*\bopen\b/);
+  assert.doesNotMatch(html,/方法明细未随记录保存|硬件检查通过/);
+});
+
+test("coflow and counterflow arrows follow the recorded node order without mutating it",()=>{
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  profile.flow_direction="coflow";profile.geometry.flow_direction="coflow";profile.geometry.nodes.reverse();
+  const before=structuredClone(result),html=renderCooling(result);
+  assert.equal(coolingModelSummaryState(profile).drawingAvailable,true);
+  assert.match(html,/冷却剂入口 x=0 m → 出口 x=1 m/);
+  assert.match(html,/顺流：冷却剂与热气流向相同/);
+  assert.deepEqual(result,before);
+});
+
+test("corrupt geometry or conflicting direction cannot draw an invented cooled outline",()=>{
+  const patches=[
+    p=>{p.geometry.full_nodes[1].r_m=NaN;},
+    p=>{p.geometry.nodes[0].r_m=.333;},
+    p=>{p.geometry.nodes[0].x_m=3;},
+    p=>{p.flow_direction="coflow";},
+    p=>{p.geometry.nodes[1]=null;},
+    p=>{delete p.geometry.full_nodes;}
+  ];
+  for(const patch of patches){
+    const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;patch(profile);
+    const html=renderCooling(result),figure=html.match(/<figure class="cool-scope-figure">[\s\S]*?<\/figure>/)?.[0];
+    assert.equal(coolingModelSummaryState(profile).drawingAvailable,false);
+    assert.match(figure,/无法绘制范围示意/);
+    assert.doesNotMatch(figure,/<svg|NaN|Infinity/);
+    assert.match(html,/冷却剂压力/);
+  }
+});
+
+test("missing historical methods or hardware fields stay unrecorded instead of adopting current defaults",()=>{
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  delete profile.model_methods;delete profile.material_applicability;delete profile.material_assignment;
+  for(const node of profile.geometry.nodes)delete node.height_m;
+  result.calculation.inputs={cooling_channel_height_m:.009,wall_thermal_dataset_id:"NEW_DEFAULT"};
+  const html=renderCooling(result);
+  assert.match(html,/方法明细未随记录保存/);
+  assert.match(html,/冷侧换热方法未记录/);
+  assert.match(html,/1.5–4.5 × 未完整记录/);
+  assert.match(html,/壁温约束尚未评估/);
+  assert.doesNotMatch(html,/NEW_DEFAULT|本次冷侧方法|Dittus|Gnielinski|未超过方案壁温限值/);
+});
+
+test("unsupported method metadata is not treated as a known historical contract",()=>{
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  profile.model_methods.version=99;
+  const html=renderCooling(result);
+  assert.match(html,/方法明细未随记录保存/);
+  assert.doesNotMatch(html,/本次热侧方法|保存的压降定义/);
+});
+
+test("model overview and method details escape saved text",()=>{
+  const result=geometryRecord(),profile=result.calculation.components.cooling_channel.profile;
+  profile.model_methods.hot_side.label="<script>hot</script>";
+  profile.model_methods.hot_side.detail="<img src=x onerror=alert(1)>";
+  profile.material_assignment.default_dataset_id="<bad>";
+  const html=renderCooling(result);
+  assert.match(html,/&lt;script&gt;hot&lt;\/script&gt;/);
+  assert.match(html,/&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(html,/<script>|<img |<bad>/);
+});
+
+test("saved budget records keep their recorded totals and never receive a quasi-one-dimensional model summary",()=>{
+  const result={calculation:{inputs:{cooling_mode:"physics"},components:{cooling_channel:{outputs:{mode:0,heat_load_W:20e6,delta_P_MPa:2}}}}};
+  const before=structuredClone(result),html=renderCooling(result);
+  assert.match(html,/历史给定预算记录/);
+  assert.match(html,/20 <small>MW/);
+  assert.doesNotMatch(html,/本次模型与计算范围|冷却剂流向|统一准一维 · 保存记录|<svg/);
+  assert.deepEqual(result,before);
 });

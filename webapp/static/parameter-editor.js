@@ -55,6 +55,21 @@ export function upgradeMethaneDatasetDraft(inputs) {
   if ((inputs.propellant_pair || "lox_methane") !== "lox_methane" || (inputs.methane_thermo_dataset ?? "gri30") !== "gri30") return inputs;
   return {...inputs, methane_thermo_dataset:"gri30_highT"};
 }
+
+export function upgradeCoolingModelDraft(inputs) {
+  if ((inputs.propellant_pair || "lox_methane") !== "lox_methane" || inputs.cooling_bartz_mode !== 0) return inputs;
+  return {...inputs, cooling_bartz_mode:1};
+}
+
+function renderCoolingModel(inputs) {
+  const spatial=typeof inputs.cooling_bartz_mode === "number" && Number.isFinite(inputs.cooling_bartz_mode) && inputs.cooling_bartz_mode>0;
+  const budget=inputs.cooling_bartz_mode===0;
+  if(spatial)return '<div class="cooling-model-summary"><b>统一准一维冷却</b><p class="field-help">吸热与压降由模型计算；型面、通道和材料分别在对应分组设置。输出沿程状态，并与热侧和循环迭代闭合。</p><p class="field-help">结果区的模型摘要对应所选计算记录；修改参数后需运行新设计点。</p></div>';
+  if(!budget)return '<p class="notice warning">冷却模型标识缺失或无效；请检查保存的方案。</p>';
+  const methane=(inputs.propellant_pair || "lox_methane")==="lox_methane";
+  return '<div class="cooling-model-summary"><b>历史兼容：给定吸热与压降预算</b><p class="field-help">本方案保留原计算方式和预算参数，没有沿程冷却解；加载、保存和查看记录不会自动转换模型。</p>'+
+    (methane?'<button type="button" data-upgrade-cooling>建立准一维冷却草稿</button><p class="field-help">切换后请核对型面、通道与材料，保存为新版本并重新计算。既有记录保留。</p>':'<p class="field-help">煤油替代工质尚未接入统一准一维冷却；当前仅保留预算模型兼容能力。</p>')+'</div>';
+}
 const ROLE_LABELS = {
   design_input:"设计输入", boundary:"边界条件", model_assumption:"模型假设",
   constraint:"约束", initial_guess:"迭代初值", component_sizing:"部件选型",
@@ -151,6 +166,7 @@ export function parameterSearchText(field, inputs, groupTitle = "") {
 
 export function renderParameterField(field, inputs) {
   const view = parameterPresentation(field, inputs), value = parameterValue(view, inputs);
+  if(view.read_only && view.key==="cooling_bartz_mode")return `<div data-field="cooling_bartz_mode" data-role="model_assumption"><span class="parameter-label">${escape(view.label)}</span>${renderCoolingModel(inputs)}</div>`;
   const virtualMode = view.virtual && view.key === PREBURNER_MODE_KEY;
   const legacy = virtualMode && value === "legacy_free_split";
   const helpId = `parameter-help-${view.key}`;

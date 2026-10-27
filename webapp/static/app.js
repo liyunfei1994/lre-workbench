@@ -11,7 +11,7 @@ import {mountComponentWorkspace} from "./component-analysis.js";
 import {mountFlowWorkspace} from "./flow-analysis.js";
 import {mountCycleWorkspace} from "./cycle-schematic.js";
 import {renderNozzleGeometry,mountNozzleGeometry} from "./nozzle-geometry.js";
-import {savedInputDocument,mergeInputDefaults,methaneThermoSummary,upgradeMethaneDatasetDraft,PREBURNER_MODE_KEY,selectPreburnerMode,parameterValue,parameterVisible,parameterGroups,parameterSearchText,parameterLayoutDependency,renderParameterGroups,renderParameterEvidence} from "./parameter-editor.js";
+import {savedInputDocument,mergeInputDefaults,methaneThermoSummary,upgradeMethaneDatasetDraft,upgradeCoolingModelDraft,PREBURNER_MODE_KEY,selectPreburnerMode,parameterValue,parameterVisible,parameterGroups,parameterSearchText,parameterLayoutDependency,renderParameterGroups,renderParameterEvidence} from "./parameter-editor.js";
 
 const $ = id => document.getElementById(id);
 const escape = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
@@ -164,10 +164,11 @@ async function enterWorkspace(){
   $("auth").hidden=true;$("workspace").hidden=false;$("auth-password").value="";$("auth-error").textContent="";
   $("user-label").textContent=`${user.display_name} · ${user.role==="admin"?"管理员":"成员"}`;$("members-nav").hidden=user.role!=="admin";
   $("runtime-version").textContent=`Python ${info.python} · Cantera / CoolProp`;
-  const options=info.presets.map(p=>`<option value="${escape(p.key)}">${escape(p.label)}</option>`).join("");
+  const options=info.presets.filter(p=>p.routine_design!==false).map(p=>`<option value="${escape(p.key)}">${escape(p.label)}</option>`).join("");
+  const compatibilityOptions=info.presets.filter(p=>p.routine_design===false).map(p=>`<option value="${escape(p.key)}" disabled>${escape(p.label)} · 历史预算</option>`).join("");
   $("new-preset").innerHTML=options;
   const references=(info.reference_engines||[]).filter(r=>!r.applicable);
-  $("project-preset").innerHTML='<option value="">自定义方案</option><optgroup label="选择即载入工程示例">'+options+'</optgroup>'+(references.length?'<optgroup label="公开机型资料 · 尚不支持计算">'+references.map(r=>`<option value="${escape(r.key)}">${escape(r.name)} · 仅资料</option>`).join("")+'</optgroup>':"");
+  $("project-preset").innerHTML='<option value="">自定义方案</option><optgroup label="选择即载入工程示例">'+options+'</optgroup>'+(compatibilityOptions?'<optgroup label="历史方案标识 · 不作为常规新建入口">'+compatibilityOptions+'</optgroup>':"")+(references.length?'<optgroup label="公开机型资料 · 尚不支持计算">'+references.map(r=>`<option value="${escape(r.key)}">${escape(r.name)} · 仅资料</option>`).join("")+'</optgroup>':"");
   $("reference-engine").innerHTML=(info.reference_engines||[]).map(r=>`<option value="${escape(r.key)}">${escape(r.name)}</option>`).join("");
   if(current){
     if(!dirty)renderFields();syncPresetSelection();
@@ -223,7 +224,7 @@ function propellantIssue(){
   const model=currentPropellant();if(!model||!draft)return "";
   if(!model.supported_cycles.includes(draft.cycle_type))return "该推进剂模型当前支持 GG 循环，请选择燃气发生器循环，或加载配套工程示例。";
   if(draft.propellant_pair!=="lox_kerosene")return "";
-  if(draft.cooling_bartz_mode!==0||draft.cooling_dp_auto!==0)return "煤油替代模型需使用指定吸热量、指定系统压降；请在再生冷却分组修改，或加载配套工程示例。";
+  if(draft.cooling_bartz_mode!==0)return "煤油替代工质尚未接入统一准一维冷却；常规新设计请选择液氧/甲烷。已有煤油预算方案可从“方案与计算记录”载入复现。";
   if(!(draft.fuel_inlet_temp>=model.inlet_temperature_min_K&&draft.fuel_inlet_temp<=model.inlet_temperature_max_K))return `煤油替代工质的入口温度需为 ${model.inlet_temperature_min_K}–${model.inlet_temperature_max_K} K；当前值 ${draft.fuel_inlet_temp} K。`;
   return "";
 }
@@ -243,7 +244,7 @@ function updatePropellantContext(){
     $("upgrade-methane-dataset").hidden=true;
   }
   $("propellant-model-error").textContent=issue;
-  $("load-propellant-example").hidden=!issue;
+  $("load-propellant-example").hidden=!issue||!info.presets.some(p=>p.routine_design!==false&&p.inputs.propellant_pair===draft.propellant_pair&&p.inputs.cycle_type==="gg");
   updateActionState();
 }
 const sameInputs=(a,b)=>Object.keys({...a,...b}).every(key=>a[key]===b[key]);
@@ -257,6 +258,7 @@ function syncPresetSelection(infer=false){
 }
 function loadPreset(preset){
   if(!preset||editorBusy)return;
+  if(preset.routine_design===false){toast("该示例保留为历史预算兼容，不作为常规新设计入口。已有方案可继续从记录页载入。");return;}
   presetUndo={draft:clone(draft),dirty,referenceKey,
     group:$("parameter-group").value,search:$("parameter-search").value};
   draft={...clone(info.ui_schema.defaults),...clone(preset.inputs)};referenceKey=preset.key;
@@ -274,15 +276,17 @@ function undoPreset(){
 }
 function updatePresetContext(){
   const key=$("project-preset").value, reference=(info.reference_engines||[]).find(r=>r.key===key||r.preset_key===key);
-  const applicable=info.presets.some(p=>p.key===key);
+  const applicable=info.presets.some(p=>p.key===key&&p.routine_design!==false);
   $("apply-preset").disabled=!applicable;
-  $("preset-context").textContent=reference?`${reference.propellants} · ${reference.cycle_label}。${reference.shaft_note||""}${reference.applicable?"":` ${reference.compatibility_reason} 当前计算方案保持不变。`}`:applicable?"已载入参考参数；修改循环、推进剂或轴系后转为自定义方案。":"当前为自定义方案。选择参考机型会立即替换整套参数，并提供一次撤销。";
+  $("preset-context").textContent=info.presets.some(p=>p.key===key&&p.routine_design===false)?"本方案保留历史预算模型，可读取、保存和复现；该示例不作为常规新设计入口。":reference?`${reference.propellants} · ${reference.cycle_label}。${reference.shaft_note||""}${reference.applicable?"":` ${reference.compatibility_reason} 当前计算方案保持不变。`}`:applicable?"已载入参考参数；修改循环、推进剂或轴系后转为自定义方案。":"当前为自定义方案。选择参考机型会立即替换整套参数，并提供一次撤销。";
 }
 function renderReference(){
   const reference=(info.reference_engines||[]).find(r=>r.key===$("reference-engine").value);
   if(!reference){$("reference-content").textContent="暂无参考资料。请重新连接新版服务。";return;}
   const safeLink=(url,title)=>/^https:\/\//i.test(url||"")?`<a href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(title)}</a>`:escape(title);
-  $("reference-content").innerHTML=`<div class="reference-heading"><h3>${escape(reference.name)}</h3><span class="badge">${reference.applicable?"可加载工程示例":"仅公开资料"}</span></div><p class="reference-propellants">${escape(reference.propellants)} · ${escape(reference.cycle_label)}</p><p class="reference-compatibility">${escape(reference.compatibility_reason)}</p>${reference.shaft_note?`<p class="reference-shaft">${escape(reference.shaft_note)}</p>`:""}<div class="table-wrap"><table><thead><tr><th>资料项</th><th>公开信息</th></tr></thead><tbody>${(reference.reference_facts||[]).map(f=>`<tr><td>${escape(f.label)}</td><td>${escape(f.value)}</td></tr>`).join("")}</tbody></table></div><p class="fine">${escape(reference.model_note)}</p><div class="reference-sources"><b>资料来源</b>${(reference.sources||[]).map(s=>safeLink(s.url,s.title)).join("")}</div>`;
+  const historicalBudget=info.presets.some(p=>p.key===reference.preset_key&&p.routine_design===false);
+  const compatibility=historicalBudget?"此工程示例采用历史预算冷却模型，不作为常规新设计入口。已有方案可从“方案与计算记录”载入复现；此处保留公开资料供参考。":reference.compatibility_reason;
+  $("reference-content").innerHTML=`<div class="reference-heading"><h3>${escape(reference.name)}</h3><span class="badge">${reference.applicable&&!historicalBudget?"可加载工程示例":"仅公开资料"}</span></div><p class="reference-propellants">${escape(reference.propellants)} · ${escape(reference.cycle_label)}</p><p class="reference-compatibility">${escape(compatibility)}</p>${reference.shaft_note?`<p class="reference-shaft">${escape(reference.shaft_note)}</p>`:""}<div class="table-wrap"><table><thead><tr><th>资料项</th><th>公开信息</th></tr></thead><tbody>${(reference.reference_facts||[]).map(f=>`<tr><td>${escape(f.label)}</td><td>${escape(f.value)}</td></tr>`).join("")}</tbody></table></div><p class="fine">${escape(reference.model_note)}</p><div class="reference-sources"><b>资料来源</b>${(reference.sources||[]).map(s=>safeLink(s.url,s.title)).join("")}</div>`;
   $("reference-content").innerHTML+=renderParameterEvidence(reference.parameter_evidence,fields);
 }
 function showReferences(){
@@ -535,6 +539,12 @@ $("upgrade-methane-dataset").onclick=()=>{
   draft=updated;clearPresetUndo();setEditorError("");syncPresetSelection();renderFields();setDirty();
   toast("已将当前草稿改为 GRI30 high-T。点击“保存方案”生成新版本；旧版本与已有结果保留，其他模型设置不变。");
 };
+$("parameter-fields").addEventListener("click",event=>{
+  if(!event.target.closest("[data-upgrade-cooling]")||editorBusy||!current||!draft)return;
+  const updated=upgradeCoolingModelDraft(draft);if(updated===draft)return;
+  draft=updated;clearPresetUndo();setEditorError("");syncPresetSelection();renderFields();setDirty();
+  toast("已建立准一维冷却草稿。请核对型面、通道及材料；保存后生成新版本，旧记录保持不变。");
+});
 $("project-form").onsubmit=event=>{event.preventDefault();action(event.submitter,"editor-error",()=>withEditorLock(async()=>{await saveProject();await refreshProjectSide();toast("方案新版本已保存。");}));};
 $("reload-project").onclick=()=>action(null,"editor-error",async()=>{if(editorBusy||!mayLeave())return;await withEditorLock(async()=>{fillProject(await api("/projects/"+current.id));await refreshProjectSide();});});
 $("export-inputs").onclick=()=>action(null,"editor-error",async()=>{if(editorBusy)return;validateDraft();download(buildInputBackup(),"lre-inputs.json");});

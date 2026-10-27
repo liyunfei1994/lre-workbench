@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {mergeInputDefaults, savedInputDocument, methaneThermoSummary, upgradeMethaneDatasetDraft, preburnerMode, selectPreburnerMode, parameterVisible, parameterPresentation,
+import {mergeInputDefaults, savedInputDocument, methaneThermoSummary, upgradeMethaneDatasetDraft, upgradeCoolingModelDraft, preburnerMode, selectPreburnerMode, parameterVisible, parameterPresentation,
   parameterGroups, renderParameterGroups, parameterSearchText, parameterLayoutDependency,renderParameterEvidence} from "../webapp/static/parameter-editor.js";
 
 const base = {cycle_type:"ffsc",propellant_pair:"lox_methane",use_target_preburner_temp:1,
@@ -19,6 +19,25 @@ const fields = [mode,
   {key:"coolant_cp",label:"旧固定比热",default:2400,hidden:true},
 ];
 const groups=[{id:"pb",title:"预燃室",cycles:["ffsc"],fields}];
+
+test("cooling model is read-only for routine designs and budget conversion is explicit",()=>{
+  const group=[{id:"cooling",title:"再生冷却模型",fields:[{key:"cooling_bartz_mode",label:"当前冷却模型",read_only:true}]}];
+  const modern=Object.freeze({...base,propellant_pair:"lox_methane"});
+  const html=renderParameterGroups(group,modern);
+  assert.match(html,/统一准一维冷却/);
+  assert.doesNotMatch(html,/data-input="cooling_bartz_mode"|<select|data-upgrade-cooling/);
+  const old=Object.freeze({...modern,cooling_bartz_mode:0,cooling_heat_load:17e6,cooling_dp_pa:2e6});
+  const legacy=renderParameterGroups(group,old);
+  assert.match(legacy,/历史兼容/);assert.match(legacy,/data-upgrade-cooling/);
+  const upgraded=upgradeCoolingModelDraft(old);
+  assert.deepEqual(upgraded,{...old,cooling_bartz_mode:1});
+  assert.equal(old.cooling_bartz_mode,0);
+  assert.equal(upgradeCoolingModelDraft(modern),modern);
+  const kerosene={...old,propellant_pair:"lox_kerosene"};
+  assert.equal(upgradeCoolingModelDraft(kerosene),kerosene);
+  assert.doesNotMatch(renderParameterGroups(group,kerosene),/data-upgrade-cooling/);
+  assert.match(renderParameterGroups(group,kerosene),/尚未接入/);
+});
 
 test("read-only thermochemistry describes the actual loss and cooling models",()=>{
   const catalog=[{id:"gri30_highT",file:"gri30_highT.yaml",species_count:53,

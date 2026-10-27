@@ -85,6 +85,7 @@ def input_values(values, *, saved_snapshot=False):
 
 def presets():
     return [{"key": key, "label": item["label"], "source": item["source"],
+             "routine_design": bool(preset_input_values(key)["cooling_bartz_mode"]),
              "inputs": input_values(preset_input_values(key))[0]}
             for key, item in ENGINE_PRESETS.items()]
 
