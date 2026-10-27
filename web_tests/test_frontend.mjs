@@ -34,7 +34,7 @@ function element() {
     listeners,
     classList: {toggle(name, force) {const on = force ?? !classes.has(name); on ? classes.add(name) : classes.delete(name); return on;}},
     reportValidity: () => true, checkValidity: () => true, addEventListener(name, callback) {listeners.set(name, callback);},
-    setAttribute() {}, showModal() {}, close() {}, reset() {}, append() {}, click() {}, remove() {}};
+    setAttribute() {}, showModal() {}, close() {}, reset() {}, append() {}, click() {}, remove() {}, focus() {}};
 }
 
 function harness(fetcher) {
@@ -59,13 +59,13 @@ function harness(fetcher) {
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, confirm: () => {confirmations++;return true;},
     FormData: class {}, console,
   });
-  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyRaw,validateDraft,loadRecord,chooseView,
-    seed(value){({current,draft,dirty,rawDirty,user,info,groups,fields,page,projectJobs,connected}=value);referenceKey=value.referenceKey||"";presetUndo=value.presetUndo||null;},
-    state(){return JSON.parse(JSON.stringify({current,draft,dirty,rawDirty,user,page,projectJobs,connected,editorBusy,resultRecord,selectedJobId,referenceKey,presetUndo}));}};`, context,
+  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyInputDocument,buildInputBackup,validateDraft,loadRecord,chooseView,
+    seed(value){({current,draft,dirty,user,info,groups,fields,page,projectJobs,connected}=value);referenceKey=value.referenceKey||"";presetUndo=value.presetUndo||null;},
+    state(){return JSON.parse(JSON.stringify({current,draft,dirty,user,page,projectJobs,connected,editorBusy,resultRecord,selectedJobId,referenceKey,presetUndo}));}};`, context,
     {filename: fileURLToPath(new URL("webapp/static/app.js", root))});
   nodes.get("project-name").value = project.name;
   nodes.get("project-description").value = "";
-  context.app.seed(copy({current: project, draft: defaults, dirty: false, rawDirty: false, user, info,
+  context.app.seed(copy({current: project, draft: defaults, dirty: false, user, info,
     groups: schema.groups, fields, page: "project", projectJobs: [], connected: true}));
   return {app: context.app, nodes, body, throttleLifecycle, confirmations:()=>confirmations};
 }
@@ -177,10 +177,15 @@ test("display units are converted to SI before saving and running the returned r
   });
   nodes.get("parameter-fields").oninput({target: {dataset: {input: "thrust"}, value: "900"}});
   nodes.get("parameter-fields").oninput({target: {dataset: {input: "pc"}, value: "11.5"}});
+  nodes.get("project-name").value="运行时保存的方案";
+  nodes.get("project-description").value="包含当前参数与名称说明的同一版本";
+  nodes.get("project-description").oninput();
   await app.runDesign();
   assert.equal(calls[0].method, "PUT");
   assert.equal(calls[0].payload.inputs.thrust, 900000);
   assert.equal(calls[0].payload.inputs.pc, 11500000);
+  assert.equal(calls[0].payload.name,"运行时保存的方案");
+  assert.equal(calls[0].payload.description,"包含当前参数与名称说明的同一版本");
   assert.equal(calls[1].method, "POST");
   assert.equal(calls[1].payload.revision, 2);
   assert.equal(app.state().dirty, false);
@@ -200,16 +205,25 @@ test("a conflicting save does not submit a job or discard the current edit", asy
   assert.equal(app.state().editorBusy, false);
 });
 
-test("unapplied JSON prevents submission without overwriting the raw text", async () => {
-  const {app, nodes} = harness(async () => {throw new Error("No request should be sent");});
-  nodes.get("raw-inputs").value = '{"thrust": 1000000';
-  nodes.get("raw-inputs").oninput();
-  await assert.rejects(app.runDesign(), /先应用 JSON/);
-  assert.equal(nodes.get("raw-inputs").value, '{"thrust": 1000000');
-  assert.equal(app.state().rawDirty, true);
+test("malformed import leaves the edited draft and metadata usable", async () => {
+  const {app, nodes} = harness(async () => {throw new Error("Import must not send a request");});
+  nodes.get("parameter-fields").oninput({target:{dataset:{input:"thrust"},value:"975"}});
+  nodes.get("project-name").value="未保存的方案名称";
+  nodes.get("project-name").oninput();
+  const before=app.state();
+  nodes.get("import-inputs").files=[{text:async()=>'{"thrust": 1000000'}];
+  await nodes.get("import-inputs").onchange({target:nodes.get("import-inputs")});
+  assert.deepEqual(app.state().draft,before.draft);
+  assert.equal(nodes.get("project-name").value,"未保存的方案名称");
+  assert.equal(app.state().dirty,true);
+  assert.equal(app.state().editorBusy,false);
+  assert.ok(nodes.get("project-history-error").textContent.length>0);
+  nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"12"}});
+  assert.equal(app.state().draft.pc,12e6);
+  assert.doesNotThrow(()=>app.validateDraft());
 });
 
-test("reconnection preserves dirty SI draft and raw JSON instead of reloading the saved project", async () => {
+test("reconnection preserves dirty SI draft and metadata instead of reloading the saved project", async () => {
   const calls = [];
   const {app, nodes} = harness(async url => {
     calls.push(url);
@@ -219,13 +233,12 @@ test("reconnection preserves dirty SI draft and raw JSON instead of reloading th
     throw new Error(`Reconnection must not overwrite the draft: ${url}`);
   });
   nodes.get("parameter-fields").oninput({target: {dataset: {input: "thrust"}, value: "975"}});
-  nodes.get("raw-inputs").value = '{"draft": "not yet applied"}';
-  nodes.get("raw-inputs").oninput();
+  nodes.get("project-description").value = "重连期间保留的方案说明";
+  nodes.get("project-description").oninput();
   await app.initialize();
   assert.equal(app.state().draft.thrust, 975000);
   assert.equal(app.state().dirty, true);
-  assert.equal(app.state().rawDirty, true);
-  assert.equal(nodes.get("raw-inputs").value, '{"draft": "not yet applied"}');
+  assert.equal(nodes.get("project-description").value,"重连期间保留的方案说明");
   assert.equal(calls.includes("/api/projects/p1"), false);
 });
 
@@ -251,10 +264,12 @@ test("editor lock keeps replacement controls inert and clears the lock after fai
   await assert.rejects(app.withEditorLock(async () => {
     nodes.get("parameter-fields").innerHTML = '<input data-input="pc">';
     assert.equal(nodes.get("project-form").inert, true);
+    assert.equal(nodes.get("project-history").inert, true);
     assert.equal(nodes.get("header-run").disabled, true);
     throw new Error("Submission failed");
   }), /Submission failed/);
   assert.equal(nodes.get("project-form").inert, false);
+  assert.equal(nodes.get("project-history").inert, false);
   assert.equal(app.state().editorBusy, false);
 });
 
@@ -301,10 +316,9 @@ test("system editor hides detailed fields but preserves and validates their case
   nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"12"}});
   await app.saveProject();
   assert.equal(saved.inputs.throttle_steps,5);
-  nodes.get("raw-inputs").value=JSON.stringify({...defaults,throttle_steps:4.5});
-  nodes.get("raw-inputs").oninput();
-  await nodes.get("apply-json").onclick();
-  await assert.rejects(app.runDesign(),/完整参数 JSON 中的 throttle_steps/);
+  const before=app.state().draft;
+  assert.throws(()=>app.applyInputDocument({...defaults,throttle_steps:4.5}),/整数|throttle_steps|步数/);
+  assert.deepEqual(app.state().draft,before);
 });
 
 test("unsupported reference stays read-only, preserves the active case and escapes sources", async () => {
@@ -352,7 +366,7 @@ test("switching propellants preserves numbers, blocks incompatible runs, and loa
   const kerosene={...base,propellant_pair:"lox_kerosene",fuel_inlet_temp:290,cooling_bartz_mode:0};
   const localInfo={...info,ui_schema:fluidSchema,presets:[{key:"kerosene",inputs:kerosene}]};
   const {app,nodes}=harness(async()=>{throw Error("Selection must not submit or save");});
-  app.seed(copy({current:project,draft:base,dirty:false,rawDirty:false,user,info:localInfo,
+  app.seed(copy({current:project,draft:base,dirty:false,user,info:localInfo,
     groups:fluidSchema.groups,fields:fluidFields,page:"project",projectJobs:[],connected:true}));
   nodes.get("parameter-fields").oninput({target:{dataset:{input:"propellant_pair"},value:"lox_kerosene"}});
   assert.equal(app.state().draft.fuel_inlet_temp,100);
@@ -409,7 +423,7 @@ const modelInfo={...info,presets:modelPresets,ui_schema:{defaults:modelDefaults,
 const modelProject={...project,inputs:modelPresets[1].inputs};
 function modelHarness(fetcher=async()=>{throw Error("Switching examples must not send requests");}){
   const h=harness(fetcher);
-  h.app.seed(copy({current:modelProject,draft:modelProject.inputs,dirty:false,rawDirty:false,user,info:modelInfo,
+  h.app.seed(copy({current:modelProject,draft:modelProject.inputs,dirty:false,user,info:modelInfo,
     groups:modelGroups,fields:modelFields,page:"project",projectJobs:[],connected:true}));
   h.app.fillProject(copy(modelProject));
   return h;
@@ -434,13 +448,13 @@ const ffscInfo={...info,ui_schema:{defaults:ffscInputs,groups:[{id:"canonical",f
   presets:[{key:"modern",label:"温度目标示例",inputs:{...ffscInputs,use_target_preburner_temp:1,use_target_preburner_mr:1}}]};
 function ffscHarness(fetcher=async()=>{throw Error("Mode changes must remain a local draft");}){
   const h=harness(fetcher),ffscProject={...project,inputs:ffscInputs};
-  h.app.seed(copy({current:ffscProject,draft:ffscInputs,dirty:false,rawDirty:false,user,info:ffscInfo,
+  h.app.seed(copy({current:ffscProject,draft:ffscInputs,dirty:false,user,info:ffscInfo,
     groups:ffscSystemGroups,fields:ffscCanonicalFields,page:"project",projectJobs:[],connected:true}));
   h.app.fillProject(copy(ffscProject));
   return h;
 }
 
-test("legacy preburner drafts survive load, JSON, preset undo and save without migration",async()=>{
+test("legacy preburner drafts survive load, import, preset undo and save without migration",async()=>{
   let saved;
   const h=ffscHarness(async(url,options)=>{
     assert.equal(options.method,"PUT");saved=JSON.parse(options.body);
@@ -449,8 +463,7 @@ test("legacy preburner drafts survive load, JSON, preset undo and save without m
   assert.deepEqual(copy(h.app.state().draft),ffscInputs);
   assert.match(h.nodes.get("parameter-fields").innerHTML,/value="legacy_free_split" selected disabled/);
   assert.equal(h.app.state().dirty,false);
-  h.nodes.get("raw-inputs").value=JSON.stringify({...ffscInputs,preburner_mr:63});
-  h.nodes.get("raw-inputs").oninput();h.app.applyRaw();
+  h.app.applyInputDocument({...ffscInputs,preburner_mr:63});
   const before=h.app.state().draft;
   selectModel(h,"modern");
   assert.equal(h.app.state().draft.use_target_preburner_temp,1);
@@ -471,8 +484,7 @@ test("explicit preburner mode edits persist both flags and keep inactive values 
     editField(h,"preburner_design_mode",selected);
     assert.deepEqual(copy(h.app.state().draft),{...ffscInputs,use_target_preburner_temp:temp,use_target_preburner_mr:1});
     assert.equal(h.app.state().dirty,true);
-    assert.equal(h.app.state().rawDirty,false);
-    assert.ok(!("preburner_design_mode" in JSON.parse(h.nodes.get("raw-inputs").value)));
+    assert.ok(!("preburner_design_mode" in h.app.state().draft));
     const rendered=h.nodes.get("parameter-fields").innerHTML;
     assert.doesNotMatch(rendered,/data-input="split_guess"|data-input="hidden_fixed_q"/);
     if(selected==="temperature")assert.match(rendered,/data-input="preburner_temp_target"/);
@@ -484,15 +496,11 @@ test("explicit preburner mode edits persist both flags and keep inactive values 
   assert.equal(saved.inputs.split_guess,.07);
 });
 
-test("pending JSON blocks virtual edits and mode dependent controls refresh without dropping dormant inputs",()=>{
+test("mode dependent controls update the same draft without dropping dormant inputs",()=>{
   const h=ffscHarness();
-  h.nodes.get("raw-inputs").value=' {"pending": ';
-  h.nodes.get("raw-inputs").oninput();
   editField(h,"preburner_design_mode","temperature");
-  assert.deepEqual(copy(h.app.state().draft),ffscInputs);
-  assert.equal(h.nodes.get("raw-inputs").value,' {"pending": ');
-  assert.match(h.nodes.get("editor-error").textContent,/先应用 JSON/);
-  h.nodes.get("raw-inputs").value=JSON.stringify(ffscInputs);h.app.applyRaw();
+  assert.equal(h.app.state().draft.use_target_preburner_temp,1);
+  assert.equal(h.app.state().draft.use_target_preburner_mr,1);
   editField(h,"cooling_bartz_mode","0");
   assert.match(h.nodes.get("parameter-fields").innerHTML,/data-input="hidden_fixed_q"/);
   editField(h,"cooling_bartz_mode","1");
@@ -500,12 +508,12 @@ test("pending JSON blocks virtual edits and mode dependent controls refresh with
   assert.equal(h.app.state().draft.hidden_fixed_q,91e6);
 });
 
-test("invalid inactive canonical fields report complete JSON rather than selecting an empty search",()=>{
+test("invalid inactive canonical fields identify their key without referring to a removed editor",()=>{
   const h=ffscHarness();
   const invalid={...ffscInputs,hidden_fixed_q:null};
-  h.app.seed(copy({current:{...project,inputs:ffscInputs},draft:invalid,dirty:true,rawDirty:false,user,info:ffscInfo,
+  h.app.seed(copy({current:{...project,inputs:ffscInputs},draft:invalid,dirty:true,user,info:ffscInfo,
     groups:ffscSystemGroups,fields:ffscCanonicalFields,page:"project",projectJobs:[],connected:true}));
-  assert.throws(()=>h.app.validateDraft(),/完整参数 JSON 中的 hidden_fixed_q/);
+  assert.throws(()=>h.app.validateDraft(),/hidden_fixed_q/);
   assert.equal(h.nodes.get("parameter-search").value,"");
 });
 
@@ -519,8 +527,6 @@ test("Merlin, TQ and Raptor selections immediately load the complete matching ca
     assert.equal(state.referenceKey,preset.key);
     assert.equal(h.nodes.get("project-preset").value,preset.key);
     assert.equal(state.dirty,true);
-    assert.equal(state.rawDirty,false);
-    assert.deepEqual(JSON.parse(h.nodes.get("raw-inputs").value),preset.inputs);
     assert.match(rendered,new RegExp(`value="${preset.inputs.propellant_pair}" selected`));
     assert.match(rendered,new RegExp(`value="${preset.inputs.cycle_type}" selected`));
     if(preset.inputs.cycle_type==="gg"){
@@ -537,28 +543,23 @@ test("Merlin, TQ and Raptor selections immediately load the complete matching ca
   assert.equal(h.confirmations(),0);
 });
 
-test("undoing a preset switch restores both saved and dirty drafts, including unapplied JSON literally",()=>{
+test("undoing a preset switch restores saved and edited drafts with their parameter navigation",()=>{
   for(const edited of [false,true]){
     const h=modelHarness();
     if(edited){
       editField(h,"thrust","963.25");
-      h.nodes.get("raw-inputs").value='  {"thrust": 1234567, "incomplete": ';
-      h.nodes.get("raw-inputs").oninput();
     }
     h.nodes.get("parameter-search").value="入口";
     h.nodes.get("parameter-group").value="design";
-    const before=h.app.state(), raw=h.nodes.get("raw-inputs").value;
+    const before=h.app.state();
     selectModel(h,"merlin1d_gg");
-    assert.equal(h.app.state().rawDirty,false);
     assert.equal(h.nodes.get("parameter-search").value,"");
     assert.equal(h.nodes.get("parameter-group").value,"architecture");
     h.nodes.get("undo-preset").onclick();
     const after=h.app.state();
     assert.deepEqual(after.draft,before.draft);
     assert.equal(after.dirty,before.dirty);
-    assert.equal(after.rawDirty,before.rawDirty);
     assert.equal(after.referenceKey,before.referenceKey);
-    assert.equal(h.nodes.get("raw-inputs").value,raw);
     assert.equal(h.nodes.get("parameter-search").value,"入口");
     assert.equal(h.nodes.get("parameter-group").value,"design");
     assert.equal(h.nodes.get("undo-preset").hidden,true);
@@ -592,8 +593,8 @@ test("manual architecture changes make the case custom while thrust edits retain
   assert.equal(h.app.state().draft.thrust,901500);
 });
 
-test("manual JSON or project metadata edits expire preset undo instead of overwriting later edits",()=>{
-  for(const nodeId of ["raw-inputs","project-name","project-description"]){
+test("project metadata edits expire preset undo instead of overwriting later edits",()=>{
+  for(const nodeId of ["project-name","project-description"]){
     const h=modelHarness();
     selectModel(h,"merlin1d_gg");
     h.nodes.get(nodeId).value="new manual edit";
@@ -607,7 +608,7 @@ test("manual JSON or project metadata edits expire preset undo instead of overwr
   }
 });
 
-test("reconnection preserves the selected example, modified draft, pending JSON and previous result",async()=>{
+test("reconnection preserves the selected example, modified draft and previous result",async()=>{
   const calls=[];
   const oldResult={id:"j-old",project_id:"p1",revision:1,status:"succeeded",created:1,
     result:{inputs:modelPresets[1].inputs,summary:{thrust_N:829640}}};
@@ -623,8 +624,6 @@ test("reconnection preserves the selected example, modified draft, pending JSON 
   await h.app.loadRecord("j-old");
   selectModel(h,"merlin1d_gg");
   editField(h,"thrust","910");
-  h.nodes.get("raw-inputs").value='{"unapplied":';
-  h.nodes.get("raw-inputs").oninput();
   const before=h.app.state();
   await h.app.initialize();
   const after=h.app.state();
@@ -632,14 +631,12 @@ test("reconnection preserves the selected example, modified draft, pending JSON 
   assert.equal(after.referenceKey,"merlin1d_gg");
   assert.equal(h.nodes.get("project-preset").value,"merlin1d_gg");
   assert.equal(after.dirty,true);
-  assert.equal(after.rawDirty,true);
-  assert.equal(h.nodes.get("raw-inputs").value,'{"unapplied":');
   assert.deepEqual(after.resultRecord,before.resultRecord);
   assert.match(h.nodes.get("result-context").textContent,/历史输入的结果/);
   assert.ok(calls.every(([url,method])=>method==="GET"&&!/^\/api\/projects(?:\/p1)?$/.test(url)));
 });
 
-test("opening saved projects and applying JSON infer only exact examples and remove stale model labels",()=>{
+test("opening saved projects and importing parameters infer only exact examples and remove stale model labels",()=>{
   const h=modelHarness();
   selectModel(h,"merlin1d_gg");
   h.app.fillProject(copy({...modelProject,inputs:modelPresets[2].inputs}));
@@ -655,13 +652,10 @@ test("opening saved projects and applying JSON infer only exact examples and rem
   assert.equal(h.app.state().draft.propellant_pair,"lox_methane");
   assert.equal(h.nodes.get("project-preset").value,"tq12a_gg");
   for(const [inputs,key] of [[modelPresets[0].inputs,"merlin1d_gg"],[{...modelPresets[0].inputs,pc:11e6},""]]){
-    h.nodes.get("raw-inputs").value=JSON.stringify({inputs});
-    h.nodes.get("raw-inputs").oninput();
-    h.app.applyRaw();
+    h.app.applyInputDocument({inputs});
     assert.deepEqual(copy(h.app.state().draft),inputs);
     assert.equal(h.nodes.get("project-preset").value,key);
     assert.equal(h.app.state().referenceKey,key);
-    assert.equal(h.app.state().rawDirty,false);
     assert.equal(h.app.state().presetUndo,null);
   }
 });
@@ -669,7 +663,7 @@ test("opening saved projects and applying JSON infer only exact examples and rem
 test("loading an older revision replaces stale reference labels while preserving the recorded result",async()=>{
   const record={id:"j-old",project_id:"p1",revision:1,status:"succeeded",created:1,
     result:{inputs:modelPresets[0].inputs,summary:{thrust_N:845000}}};
-  const older={...modelProject,revision:1,inputs:{...modelPresets[1].inputs,gg_layout:"dual_shaft"}};
+  const older={...modelProject,name:"历史方案名称",description:"旧版本设计说明",revision:1,inputs:{...modelPresets[1].inputs,gg_layout:"dual_shaft"}};
   const requests=[];
   const h=modelHarness(async(url,options)=>{
     requests.push([url,options.method]);
@@ -689,6 +683,9 @@ test("loading an older revision replaces stale reference labels while preserving
   assert.deepEqual(copy(h.app.state().resultRecord),record);
   assert.match(h.nodes.get("result-context").textContent,/历史输入的结果/);
   assert.ok(requests.every(([,method])=>method==="GET"));
+  assert.equal(h.nodes.get("project-name").value,older.name);
+  assert.equal(h.nodes.get("project-description").value,older.description);
+  assert.equal(h.app.state().dirty,true);
 });
 
 test("reload locks the editor throughout its GET and prevents a preset switch from replacing the awaited project",async()=>{
@@ -718,25 +715,22 @@ test("reload locks the editor throughout its GET and prevents a preset switch fr
   assert.equal(h.nodes.get("project-form").inert,false);
 });
 
-test("invalid text and numeric choices reject JSON and drafts without losing the pending JSON or making requests",async()=>{
+test("invalid text and numeric choices reject imports atomically and prevent invalid drafts from saving",async()=>{
   for(const [key,value] of [["gg_layout","three_shafts"],["propellant_pair","lox_hydrogen"],
     ["cycle_type","unknown_cycle"],["cooling_bartz_mode",7]]){
     const requests=[];
     const h=modelHarness(async(url,options)=>{requests.push([url,options.method]);return response({});});
     const before=h.app.state();
     const invalid={...copy(before.draft),[key]:value};
-    const raw=JSON.stringify({inputs:invalid},null,3);
-    h.nodes.get("raw-inputs").value=raw;
-    h.nodes.get("raw-inputs").oninput();
-    assert.throws(()=>h.app.applyRaw(),undefined,`${key} must fail before replacing the draft`);
+    assert.throws(()=>h.app.applyInputDocument({inputs:invalid}),undefined,`${key} must fail before replacing the draft`);
     assert.deepEqual(h.app.state().draft,before.draft);
     assert.equal(h.app.state().referenceKey,before.referenceKey);
-    assert.equal(h.app.state().rawDirty,true);
-    assert.equal(h.nodes.get("raw-inputs").value,raw);
-    await h.nodes.get("apply-json").onclick();
-    assert.ok(h.nodes.get("editor-error").textContent.length>0,`${key} should explain the rejected choice`);
-    assert.equal(h.nodes.get("raw-inputs").value,raw);
-    h.app.seed(copy({current:modelProject,draft:invalid,dirty:true,rawDirty:false,user,info:modelInfo,
+    assert.equal(h.app.state().dirty,before.dirty);
+    h.nodes.get("import-inputs").files=[{text:async()=>JSON.stringify({inputs:invalid})}];
+    await h.nodes.get("import-inputs").onchange({target:h.nodes.get("import-inputs")});
+    assert.ok(h.nodes.get("project-history-error").textContent.length>0,`${key} should explain the rejected choice`);
+    assert.deepEqual(h.app.state().draft,before.draft);
+    h.app.seed(copy({current:modelProject,draft:invalid,dirty:true,user,info:modelInfo,
       groups:modelGroups,fields:modelFields,page:"project",projectJobs:[],connected:true,referenceKey:"tq12a_gg"}));
     assert.throws(()=>h.app.validateDraft(),undefined,`${key} must also fail before save/run`);
     assert.deepEqual(requests,[]);
@@ -790,4 +784,145 @@ test("saving a non-architecture edit retains its chosen reference identity",asyn
   assert.equal(h.nodes.get("project-preset").value,"merlin1d_gg");
   assert.equal(h.app.state().dirty,false);
   assert.equal(h.app.state().current.revision,2);
+});
+
+test("history and steady views share one unsaved draft while history hides performance controls",async()=>{
+  const record={id:"selected-design",project_id:"p1",revision:1,status:"succeeded",created:1,result:{calculation:{inputs:defaults}}};
+  const h=harness(async()=>response(record));
+  await h.app.loadRecord(record.id);
+  h.nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"12.25"}});
+  await h.app.chooseView("history");
+  assert.equal(h.nodes.get("project-history").hidden,false);
+  assert.equal(h.nodes.get("analysis-content").hidden,true);
+  assert.equal(h.nodes.get("result-toolbar").hidden,true);
+  assert.equal(h.nodes.get("result-context").hidden,true);
+  assert.equal(h.nodes.get("toggle-parameters").hidden,true);
+  h.nodes.get("project-name").value="概念方案 A";
+  h.nodes.get("project-description").value="记录同一份未保存参数";
+  h.nodes.get("project-description").oninput();
+  const before=h.app.state();
+  await h.app.chooseView("overview");
+  assert.equal(h.nodes.get("project-history").hidden,true);
+  assert.equal(h.nodes.get("result-toolbar").hidden,false);
+  assert.deepEqual(h.app.state().draft,before.draft);
+  assert.equal(h.nodes.get("project-name").value,"概念方案 A");
+  assert.equal(h.nodes.get("project-description").value,"记录同一份未保存参数");
+  assert.deepEqual(h.app.state().resultRecord,before.resultRecord);
+  assert.equal(h.app.state().dirty,true);
+  assert.equal(h.confirmations(),0);
+});
+
+test("history metadata saves with all visible and inactive parameters as one new revision",async()=>{
+  const requests=[];
+  const h=ffscHarness(async(url,options)=>{
+    const payload=JSON.parse(options.body);requests.push({url,payload});
+    return response({project:{...project,...payload,revision:2},warnings:[]});
+  });
+  await h.app.chooseView("history");
+  h.nodes.get("project-name").value="试验前方案";
+  h.nodes.get("project-description").value="保存设计意图和边界";
+  h.nodes.get("project-description").oninput();
+  await h.app.saveProject();
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].url,"/api/projects/p1");
+  assert.equal(requests[0].payload.name,"试验前方案");
+  assert.equal(requests[0].payload.description,"保存设计意图和边界");
+  assert.equal(requests[0].payload.revision,1);
+  assert.deepEqual(requests[0].payload.inputs,ffscInputs);
+  assert.equal(h.app.state().current.revision,2);
+  assert.equal(h.app.state().dirty,false);
+  assert.equal(h.nodes.get("project-dirty-label").textContent,"已保存");
+});
+
+test("parameter backups round trip hidden inputs without replacing project metadata",async()=>{
+  const h=ffscHarness();
+  h.nodes.get("project-name").value="备份来源";
+  h.nodes.get("project-description").value="设计说明";
+  editField(h,"preburner_design_mode","temperature");
+  const backup=copy(h.app.buildInputBackup()), expected=copy(h.app.state().draft);
+  assert.equal(backup.project_name,"备份来源");
+  assert.equal(backup.project_description,"设计说明");
+  assert.equal(backup.base_revision,1);
+  assert.equal(backup.unsaved,true);
+  assert.deepEqual(backup.inputs,expected);
+  h.nodes.get("project-name").value="导入目标";
+  h.nodes.get("project-description").value="目标说明";
+  h.app.applyInputDocument({...ffscInputs,hidden_fixed_q:5e6});
+  h.nodes.get("import-inputs").files=[{text:async()=>JSON.stringify(backup)}];
+  await h.nodes.get("import-inputs").onchange({target:h.nodes.get("import-inputs")});
+  assert.deepEqual(copy(h.app.state().draft),expected);
+  assert.equal(h.nodes.get("project-name").value,"导入目标");
+  assert.equal(h.nodes.get("project-description").value,"目标说明");
+  assert.equal(h.app.state().dirty,true);
+  const exported=h.app.buildInputBackup();
+  exported.inputs.hidden_fixed_q=0;
+  assert.equal(h.app.state().draft.hidden_fixed_q,91e6);
+});
+
+test("file import locks both editable areas until reading and validation complete",async()=>{
+  const h=modelHarness();
+  let finishRead;
+  const pendingRead=new Promise(resolve=>{finishRead=resolve;});
+  const input=h.nodes.get("import-inputs");
+  input.files=[{text:()=>pendingRead}];input.value="selected-file.json";
+  const before=h.app.state();
+  const importing=input.onchange({target:input});
+  assert.equal(h.app.state().editorBusy,true);
+  assert.equal(h.nodes.get("project-form").inert,true);
+  assert.equal(h.nodes.get("project-history").inert,true);
+  assert.equal(h.nodes.get("history-save").disabled,true);
+  editField(h,"thrust","999");
+  selectModel(h,"merlin1d_gg");
+  assert.deepEqual(h.app.state().draft,before.draft);
+  finishRead(JSON.stringify({inputs:{...modelProject.inputs,thrust:1234567}}));
+  await importing;
+  assert.equal(h.app.state().draft.thrust,1234567);
+  assert.equal(h.app.state().editorBusy,false);
+  assert.equal(h.nodes.get("project-form").inert,false);
+  assert.equal(h.nodes.get("project-history").inert,false);
+  assert.equal(input.value,"");
+});
+
+test("invalid imported values cannot partially replace a complete draft",()=>{
+  const h=modelHarness(),before=h.app.state();
+  for(const value of [null,[],{inputs:null},{inputs:[]},{unknown_parameter:1},
+    {...modelDefaults,thrust:"123"},{...modelDefaults,thrust:NaN},
+    {...modelDefaults,pc:Infinity},{...modelDefaults,throttle_steps:4.5}]){
+    assert.throws(()=>h.app.applyInputDocument(value));
+    assert.deepEqual(h.app.state().draft,before.draft);
+    assert.equal(h.app.state().dirty,before.dirty);
+    assert.equal(h.nodes.get("project-name").value,project.name);
+  }
+});
+
+test("saved legacy imports preserve thermochemistry and material identity while new inputs use current defaults",()=>{
+  const h=harness(async()=>{throw Error("Local imports must not save");});
+  const materialDefaults={...defaults,methane_thermo_dataset:"gri30_highT",
+    chamber_inner_wall_material:"grcop84",wall_thermal_dataset_id:"grcop84_ellis2000_extruded_high_fe_v1",
+    wall_manufacturing_state:"unspecified"};
+  const materialFields=[...fields,...Object.keys(materialDefaults).filter(key=>!(key in defaults)).map(key=>({key,label:key,default:materialDefaults[key]}))];
+  h.app.seed(copy({current:project,draft:materialDefaults,dirty:false,user,
+    info:{...info,ui_schema:{defaults:materialDefaults,groups:[{id:"materials",fields:materialFields}]}},
+    groups:[{id:"materials",fields:materialFields}],fields:materialFields,page:"project",projectJobs:[],connected:true}));
+  h.app.applyInputDocument({format:"lre.workbench.inputs",schema_version:1,inputs:{pc:25e6,chamber_inner_wall_material:"cuzr"}});
+  assert.equal(h.app.state().draft.methane_thermo_dataset,"gri30");
+  assert.equal(h.app.state().draft.wall_thermal_dataset_id,"cuzr_qi2024_heat_treated_v1");
+  assert.equal(h.app.state().draft.wall_manufacturing_state,"unspecified");
+  h.app.applyInputDocument({pc:25e6});
+  assert.equal(h.app.state().draft.methane_thermo_dataset,"gri30_highT");
+  h.app.applyInputDocument({format:"lre.workbench.inputs",schema_version:1,inputs:{chamber_inner_wall_material:"grcop42"}});
+  assert.equal(h.app.state().draft.wall_thermal_dataset_id,"");
+  const explicit={...materialDefaults,methane_thermo_dataset:"gri30_highT",wall_manufacturing_state:"specific_qualified_state"};
+  h.app.applyInputDocument({format:"lre.workbench.inputs",schema_version:1,inputs:explicit});
+  assert.deepEqual(copy(h.app.state().draft),explicit);
+});
+
+test("a missing scenario name opens its editable history field before save or run",async()=>{
+  const h=harness(async()=>{throw Error("A missing name must not send a request");});
+  h.nodes.get("project-name").value="   ";
+  h.nodes.get("project-name").oninput();
+  await assert.rejects(h.app.runDesign(),/方案与计算记录/);
+  assert.equal(h.nodes.get("project-history").hidden,false);
+  assert.equal(h.nodes.get("analysis-content").hidden,true);
+  assert.equal(h.app.state().dirty,true);
 });
