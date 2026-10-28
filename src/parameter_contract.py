@@ -190,7 +190,15 @@ for side in ("lox", "fuel"):
     PARAMETER_CONTRACT[f"{side}_pump_n_stages"] = _meta(
         "component_sizing", "用于单级扬程、比转速与概念尺寸估算；当前总泵功仍由给定效率和总焓升计算。")
     PARAMETER_CONTRACT[f"{side}_pump_head_coefficient_psi"] = _meta(
-        "component_sizing", "仅概念几何估算使用；泵组件诊断仍采用固定 0.5，待统一。保留在完整参数中，仍需通过兼容有效性校验，不作为循环控制输入。", hidden=True)
+        "component_sizing", "ψ = gH级/u2²；用于叶尖速度和外径初选，部件结果与几何共用此值。CFturbo 的 Ψ = 2ψ。H级按入口密度和压差定义，不改变真实流体泵功。", source="示例初选值；待详细水力设计确认")
+    for suffix, help_text in {
+        "inlet_flow_coefficient": "cm1/u2：入口子午速度除以叶轮出口圆周速度。以入口密度、流量和轮毂比求泵眼环形面积；不等于 cm1/u1，也不验证汽蚀。",
+        "outlet_flow_coefficient": "cm2/u2：出口子午速度除以叶轮出口圆周速度。按恒入口密度、无叶片堵塞和无泄漏假设求出口宽度 b2。",
+        "eye_hub_ratio": "D1h/D1s：泵眼轮毂直径与轮盖直径之比。只定义流道入口环形面积，不是轴强度计算所得轴径。",
+        "axial_length_ratio": "Lz/D2：代表级子午流道轴向长度与叶轮外径之比。用于初始轮廓构造，不是多级泵总长或优化结论。",
+    }.items():
+        PARAMETER_CONTRACT[f"{side}_pump_{suffix}"] = _meta(
+            "component_sizing", help_text, source="可编辑的示例几何假设；不代表已验证的推荐值")
 
 
 def parameter_metadata(key):

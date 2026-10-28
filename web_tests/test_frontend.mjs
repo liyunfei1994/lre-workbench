@@ -62,6 +62,7 @@ function harness(fetcher,{storage=memoryStorage()}={}) {
     mountFlowWorkspace() {},
     mountCycleWorkspace() {},
     renderNozzleGeometry:()=>"geometry",mountNozzleGeometry:()=>()=>{},
+    renderPumpGeometry:()=>"pump_geometry",mountPumpGeometry:()=>()=>{},
     mountSteadyWorkspace,
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, confirm: () => {confirmations++;return true;},
     FormData: class {}, console,
@@ -101,7 +102,7 @@ function navigationServer({account=user,projects=[project],records=[]}={}) {
   return {fetcher,calls};
 }
 
-const navigationViews=["overview","topology","states","components","geometry","log","history","shutdown","ignition","chilldown","feed","validation","transient","throttle"];
+const navigationViews=["overview","topology","states","components","geometry","pump_geometry","log","history","shutdown","ignition","chilldown","feed","validation","transient","throttle"];
 for(const view of navigationViews)test(`reload restores ${view} with the selected project and historical design record`,async()=>{
   const other={...project,id:"p2",name:"另一个方案"};
   const records=[

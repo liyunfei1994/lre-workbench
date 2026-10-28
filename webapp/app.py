@@ -358,6 +358,8 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
             row[field] = json.loads(row[field]) if row[field] else None
         from webapp.nozzle_geometry import nozzle_geometry_view
         row["nozzle_geometry"] = nozzle_geometry_view(row["result"], row["id"])
+        from webapp.pump_geometry import pump_geometry_view
+        row["pump_geometry"] = pump_geometry_view(row["result"], row["id"])
         return row
 
     @app.post("/api/jobs/{job_id}/cancel")
@@ -1062,6 +1064,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         media_types = {"bootstrap.js": "text/javascript", "app.js": "text/javascript", "results.js": "text/javascript",
                        "parameter-editor.js": "text/javascript",
                        "nozzle-geometry.js": "text/javascript", "nozzle-geometry.css": "text/css",
+                       "pump-geometry.js": "text/javascript", "pump-geometry.css": "text/css",
                        "thermo-applicability.js": "text/javascript", "thermo-applicability.css": "text/css",
                        "cooling.js": "text/javascript", "cooling.css": "text/css",
                        "cooling-design.js": "text/javascript", "cooling-design.css": "text/css",

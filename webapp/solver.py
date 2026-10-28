@@ -190,6 +190,8 @@ def _calculate(values, progress, input_warnings):
     output["nonfinite_fields"] = missing
     from webapp.nozzle_geometry import nozzle_geometry_view
     output["nozzle_geometry"] = nozzle_geometry_view(output)
+    from webapp.pump_geometry import pump_geometry_view
+    output["pump_geometry"] = pump_geometry_view(output)
     if missing:
         output["warnings"].append("部分结果不是有限数值，已标为缺失；请检查计算和工程警告。")
     json.dumps(output, allow_nan=False)

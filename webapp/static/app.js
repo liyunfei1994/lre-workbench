@@ -12,6 +12,7 @@ import {mountComponentWorkspace} from "./component-analysis.js";
 import {mountFlowWorkspace} from "./flow-analysis.js";
 import {mountCycleWorkspace} from "./cycle-schematic.js";
 import {renderNozzleGeometry,mountNozzleGeometry} from "./nozzle-geometry.js";
+import {renderPumpGeometry,mountPumpGeometry} from "./pump-geometry.js";
 import {savedInputDocument,mergeInputDefaults,methaneThermoSummary,upgradeMethaneDatasetDraft,upgradeCoolingModelDraft,PREBURNER_MODE_KEY,selectPreburnerMode,parameterValue,parameterVisible,parameterGroups,parameterSearchText,parameterLayoutDependency,renderParameterGroups,renderParameterEvidence} from "./parameter-editor.js";
 
 const $ = id => document.getElementById(id);
@@ -39,8 +40,10 @@ let ignitionView=null;
 let shutdownView=null;
 let workspaceUserId=null;
 let nozzleGeometryCleanup=null;
+let pumpGeometryCleanup=null;
 let coolingDesignView=null;
 views.geometry=["推力室与喷管几何","系统级内轮廓 · 几何尺寸、二维剖面与三维曲面"];
+views.pump_geometry=["泵初步几何","保存设计点 · 代表级叶轮主尺寸、子午流道与 CAD 参考坐标"];
 views.shutdown=["关机与再启动分析","连续状态 · 关阀、残余库存、壁面余热、轴系惰转与再次供给"];
 views.ignition=["点火事件与建压分析","气相反应容腔 · 给定外部点火热脉冲、阀门响应与压力建立"];
 views.chilldown=["预冷与充填分析","壁面热惯性 · 真实流体气液库存、两相充填与初始状态快照"];
@@ -142,6 +145,7 @@ async function withEditorLock(task){
   try{return await task();}finally{controls.forEach((el,i)=>el.disabled=disabled[i]);containers.forEach(el=>el.inert=false);editorBusy=false;updateActionState();}
 }
 function showAuth(){
+  if(pumpGeometryCleanup){pumpGeometryCleanup();pumpGeometryCleanup=null;}
   if(nozzleGeometryCleanup){nozzleGeometryCleanup();nozzleGeometryCleanup=null;}
   validationView?.onLeave();
   throttleView?.onLeave();
@@ -189,6 +193,7 @@ async function enterWorkspace(){
   }
 }
 function switchPage(next){
+  if(next!=="project" && pumpGeometryCleanup){pumpGeometryCleanup();pumpGeometryCleanup=null;}
   if(next!=="project" && nozzleGeometryCleanup){nozzleGeometryCleanup();nozzleGeometryCleanup=null;}
   if(next!=="project") validationView?.onLeave();
   if(next!=="project") throttleView?.onLeave();
@@ -338,6 +343,7 @@ async function chooseView(view){
   analysisView=view;renderView();switchPage("project");
 }
 function renderView(){
+  if(pumpGeometryCleanup){pumpGeometryCleanup();pumpGeometryCleanup=null;}
   if(nozzleGeometryCleanup){nozzleGeometryCleanup();nozzleGeometryCleanup=null;}
   coolingDesignView?.dispose();coolingDesignView=null;
   $("analysis-title").textContent=views[analysisView][0];$("analysis-subtitle").textContent=views[analysisView][1];
@@ -363,6 +369,10 @@ function renderView(){
     const geometry=resultRecord?.nozzle_geometry || resultRecord?.result?.nozzle_geometry;
     $("analysis-content").innerHTML=renderNozzleGeometry(geometry);
     nozzleGeometryCleanup=mountNozzleGeometry($("analysis-content"),geometry);
+  } else if(analysisView==="pump_geometry") {
+    const geometry=resultRecord?.pump_geometry || resultRecord?.result?.pump_geometry;
+    $("analysis-content").innerHTML=renderPumpGeometry(geometry);
+    pumpGeometryCleanup=mountPumpGeometry($("analysis-content"),geometry);
   } else if(analysisView==="validation") {
     validationView ||= mountValidation($("validation-content"),{api,getContext:()=>({project:current,draft,dirty,record:resultRecord}),notify:toast});
     Promise.resolve(validationView.refresh()).catch(error=>toast(error.message));

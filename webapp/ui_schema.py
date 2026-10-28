@@ -220,8 +220,14 @@ def _system_groups(groups):
                 elif field["key"] in ("cooling_heat_load", "cooling_dp_pa"):
                     field.update(advanced=True)
         elif group["id"] == "pumps":
-            group["title"] = "涡轮泵·概念选型与转速设定"
-            group["description"] = "指定或按比转速估算转速；尚未依据泵 / 涡轮特性图匹配工作点。压头系数仅保留于完整参数中的概念几何估算，相关诊断待统一。"
+            group["title"] = "泵转速与几何初选"
+            group["description"] = "由保存设计点的流量、入口密度、压差和转速初选代表级离心叶轮流道。以下系数是可编辑的假设；运行设计点后，在“泵初步几何”查看尺寸、二维和三维图并导出坐标。"
+            group["sections"] = [
+                {"id": side, "title": title, "keys": [f"{side}_pump_{suffix}" for suffix in (
+                    "speed_rpm_override", "specific_speed_target", "n_stages", "head_coefficient_psi",
+                    "inlet_flow_coefficient", "outlet_flow_coefficient", "eye_hub_ratio", "axial_length_ratio") ]}
+                for side, title in (("lox", "液氧泵"), ("fuel", "燃料泵"))
+            ]
         elif group["id"] == "chamber_contour":
             group["description"] = "抛物线钟形喷管采用相切圆弧和二次 Bézier 曲线，属于系统级工程近似；指定端点角度不代表已完成推力优化。循环、热侧与冷却共用同一轮廓，尺寸和图示见左侧“推力室与喷管几何”。旧方案保留历史角度方法，切换后保存为新版本。"
         elif group["id"] == "chamber_channels":
@@ -268,7 +274,7 @@ def design_ui_schema():
                    for key, label, unit in EXTRA_FIELDS],
     })
     return {
-        "version": 14, "defaults": defaults, "groups": groups,
+        "version": 15, "defaults": defaults, "groups": groups,
         "parameter_role_labels": dict(ROLE_LABELS),
         "propellant_models": propellant_models(),
         "methane_thermo_datasets": methane_dataset_catalog(),

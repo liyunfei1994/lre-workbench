@@ -319,19 +319,27 @@ class EngineInputs:
     #   Ns = N·sqrt(Q)/H_per_stage^0.75，依赖单位约定，不是无量纲比转速。
     #
     # 压头系数 ψ = g·H / u_tip²：
-    #   高压离心泵典型 0.45–0.55，更小越接近轴流
+    #   示例值用于几何初选，不能单独确定泵型或最优效率；CFturbo Ψ = 2ψ。
     #
     # LOX 泵示例设计设定，未以实机转速、叶轮或特性图验证。
     lox_pump_speed_rpm_override: float = 26500.0   # [rpm] 锁定；置 0 改回按 nq 反推
     lox_pump_specific_speed_target: float = 30.0   # nq(EU)=N·√Q/H^0.75（与 CFTurbo nq(EU) 同口径）
     lox_pump_n_stages: int = 1                  # 用户指定级数假设
     lox_pump_head_coefficient_psi: float = 0.50
+    lox_pump_inlet_flow_coefficient: float = 0.10  # cm1/u2；示例假设
+    lox_pump_outlet_flow_coefficient: float = 0.08  # cm2/u2；无叶片堵塞修正
+    lox_pump_eye_hub_ratio: float = 0.35           # D1h/D1s
+    lox_pump_axial_length_ratio: float = 0.30      # 代表级子午流道 Lz/D2
 
     # 燃料泵示例设计设定；不据此声称机械裕度或效率随转速变化已验证。
     fuel_pump_speed_rpm_override: float = 38000.0
     fuel_pump_specific_speed_target: float = 30.0
     fuel_pump_n_stages: int = 2                 # 用户指定级数假设
     fuel_pump_head_coefficient_psi: float = 0.50
+    fuel_pump_inlet_flow_coefficient: float = 0.10
+    fuel_pump_outlet_flow_coefficient: float = 0.08
+    fuel_pump_eye_hub_ratio: float = 0.35
+    fuel_pump_axial_length_ratio: float = 0.30
 
     # ---------- 涡轮气动设计目标（V10 新增）──────────────
     # U/C0 = 节圆速度 / 等熵喷出速度，反动度涡轮最优 0.45–0.60
@@ -722,10 +730,24 @@ class EngineInputs:
                     self.lox_pump_specific_speed_target, 15.0, 80.0)
         _warn_range("fuel_pump_specific_speed_target（燃料 Ns 目标）",
                     self.fuel_pump_specific_speed_target, 15.0, 80.0)
-        if not isinstance(self.lox_pump_n_stages, int) or self.lox_pump_n_stages < 1:
-            self.lox_pump_n_stages = max(1, int(self.lox_pump_n_stages))
-        if not isinstance(self.fuel_pump_n_stages, int) or self.fuel_pump_n_stages < 1:
-            self.fuel_pump_n_stages = max(1, int(self.fuel_pump_n_stages))
+        for side in ("lox", "fuel"):
+            stage_key = f"{side}_pump_n_stages"
+            stage_value = getattr(self, stage_key)
+            if (isinstance(stage_value, bool) or not isinstance(stage_value, (int, float))
+                    or not math.isfinite(stage_value) or int(stage_value) != stage_value):
+                raise ValidationError(f"{stage_key} 必须为整数，不能自动取整。")
+            setattr(self, stage_key, int(stage_value))
+            # 构造域校验，不表示这些范围已经过效率、汽蚀或制造验证。
+            for suffix in ("head_coefficient_psi", "inlet_flow_coefficient", "outlet_flow_coefficient",
+                           "eye_hub_ratio", "axial_length_ratio"):
+                key = f"{side}_pump_{suffix}"
+                value = getattr(self, key)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value)):
+                    raise ValidationError(f"{key} 必须为有限数值。")
+                _check_range(key, value, lo=0, lo_inclusive=False)
+                if suffix == "eye_hub_ratio":
+                    _check_range(key, value, hi=1, hi_inclusive=False)
         _check_range("lox_pump_n_stages（LOX 泵级数）",
                      float(self.lox_pump_n_stages), lo=1, hi=6)
         _check_range("fuel_pump_n_stages（燃料泵级数）",

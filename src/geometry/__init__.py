@@ -244,7 +244,7 @@ def compute_geometry(
         ox_pump_data.outputs["power_W"],
         shaft_speed_rpm=n_ox_rpm,
         n_stages=n_ox_stages,
-        psi=inputs.lox_pump_head_coefficient_psi,
+        psi=ox_pump_data.outputs.get("psi_head_coefficient", inputs.lox_pump_head_coefficient_psi),
         tip_speed_limit_ms=inputs.pump_tip_speed_limit_ms,
     )
 
@@ -253,7 +253,7 @@ def compute_geometry(
         fuel_pump_data.outputs["power_W"],
         shaft_speed_rpm=n_fuel_rpm,
         n_stages=n_fuel_stages,
-        psi=inputs.fuel_pump_head_coefficient_psi,
+        psi=fuel_pump_data.outputs.get("psi_head_coefficient", inputs.fuel_pump_head_coefficient_psi),
         tip_speed_limit_ms=inputs.pump_tip_speed_limit_ms,
     )
 
