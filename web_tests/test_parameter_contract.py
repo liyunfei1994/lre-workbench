@@ -72,8 +72,8 @@ class ParameterContractTests(unittest.TestCase):
         self.assertIn("贮箱出口", fields["fuel_inlet_temp"]["label"])
         self.assertIn("温升折减", fields["combustion_efficiency"]["label"])
         self.assertNotEqual(fields["lox_pump_specific_speed_target"]["unit"], "—")
-        thermo = next(g for g in schema["system_groups"] if g["id"] == "thermo")
-        self.assertIn("初值", thermo["title"])
+        solver = next(g for g in schema["system_groups"] if g["id"] == "solver")
+        self.assertIn("启动估计", solver["initials_title"])
 
     def test_design_targets_conditions_and_seeds_keep_distinct_roles(self):
         schema = design_ui_schema()

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
-import {numericalDisplayState,renderConvergence,residualPlot} from "../webapp/static/convergence.js";
+import {numericalDisplayState,renderConvergence,residualPlot,renderGasInitialization} from "../webapp/static/convergence.js";
 
 function record() {
   const layer=(residual,tolerance,unit="—")=>({enabled:true,status:"pass",residual,tolerance,unit,iterations:2,termination_reason:"converged"});
@@ -38,10 +38,33 @@ test("unified coupling accepts six physical checks without old gamma or MW resid
   assert.equal(numericalDisplayState(data).status,"pass");
   for(const label of ["冷热侧与供给耦合","供给与冷却压力残差","冷热侧耦合温差","共同几何相对残差","总吸热量相对残差","热气状态向量相对残差","逐单元热量相对残差"])
     assert(html.includes(label),label);
-  assert.match(html,/初值与当前解的差异（不参与收敛验收）/);
+  assert.match(html,/末次求解起点与结果差异（不参与收敛验收）/);
   assert.match(html,/<td>主室温度差<\/td><td>100<\/td>/);
   assert.doesNotMatch(html,/γ 相对残差|M 相对残差|主室温度反馈残差|热外环 0/);
   assert.deepEqual(data,before);
+});
+
+test("startup comparison reads submitted estimates and canonical recorded chamber, never warm starts or draft",()=>{
+  const data=coupledRecord();
+  data.submitted_inputs={chamber_temp_guess:3200,chamber_gamma:1.12,molar_mass:18,cooling_bartz_mode:1};
+  data.calculation.inputs={chamber_temp_guess:3600,chamber_gamma:1.3,molar_mass:28,cooling_bartz_mode:1};
+  data.calculation.states={main_chamber:{temperature:3797,metadata:{gamma:1.1897,molar_mass:22.601}}};
+  data.calculation.summary.chamber_temperature_K=9999; // Not the canonical port.
+  const before=structuredClone(data),html=renderGasInitialization(data);
+  assert.match(html,/<td>3,200<\/td><td>3,797<\/td>/);
+  assert.match(html,/<td>1.12<\/td><td>1.1897<\/td>/);
+  assert.match(html,/<td>18<\/td><td>22.601<\/td>/);
+  assert.match(html,/收敛计算状态/);assert.doesNotMatch(html,/9,999|3,600/);
+  assert.deepEqual(data,before);
+  data.calculation.convergence.layers.inner.status="fail";
+  assert.match(renderGasInitialization(data),/当前迭代状态（未验收）/);
+  delete data.calculation.states.main_chamber.metadata.gamma;
+  assert.match(renderGasInitialization(data),/<td>1.12<\/td><td>—<\/td>/);
+  data.submitted_inputs.cooling_bartz_mode=0;
+  assert.match(renderGasInitialization(data),/未使用这三个冷却启动估计/);
+  const empty=renderGasInitialization({});
+  assert.match(empty,/记录状态（收敛待核）/);
+  assert.doesNotMatch(empty,/3550|3,550|1.18|21/);
 });
 
 test("every new coupled check is mandatory and its source version controls acceptance",()=>{

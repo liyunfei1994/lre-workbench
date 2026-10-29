@@ -10,6 +10,7 @@ import {renderThermoCharts,buildThermoChartSvg} from "../webapp/static/validatio
 import {renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv} from "../webapp/static/property-comparison.js";
 import {renderThermoStations,verifiedCeaComposition} from "../webapp/static/thermo-stations.js";
 import {renderThermodynamicApplicability} from "../webapp/static/thermo-applicability.js";
+import {renderGasHandoff} from "../webapp/static/gas-handoff.js";
 
 const clone=value=>JSON.parse(JSON.stringify(value));
 const inputs={propellant_pair:"lox_kerosene",cycle_type:"gg",gg_layout:"single_shaft",pc:9.7e6,
@@ -146,7 +147,7 @@ function mounted(fetcher,initial=context()){
   const listeners=new Map(),timers=new Map(),calls=[],notifications=[],downloads=[];
   let ctx=initial,nextTimer=1;
   const container={innerHTML:"",addEventListener(type,callback){listeners.set(type,callback);}};
-  const sandbox=vm.createContext({console,Blob,renderThermoStations,verifiedCeaComposition,renderThermoCharts,buildThermoChartSvg,renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv,renderThermodynamicApplicability,URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
+  const sandbox=vm.createContext({console,Blob,renderThermoStations,verifiedCeaComposition,renderThermoCharts,buildThermoChartSvg,renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv,renderThermodynamicApplicability,renderGasHandoff,URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
     document:{createElement:()=>({click(){downloads.push(this.download);}})},
     setTimeout(callback){const id=nextTimer++;timers.set(id,callback);return id;},clearTimeout(id){timers.delete(id);}});
   vm.runInContext(moduleSource+"\n globalThis.mount=mountValidation;",sandbox);
@@ -165,12 +166,12 @@ function mounted(fetcher,initial=context()){
 }
 function standardAPI(path){if(path==="/validation/capabilities")return clone(capabilities);if(path==="/projects/p1/validations")return [];throw Error(`Unexpected ${path}`);}
 
-test("mount shows source differences, missing dependencies and all four tabs without touching engine data",async()=>{
+test("mount shows source differences, missing dependencies and all five tabs without touching engine data",async()=>{
   const ctx=context(),before=clone(ctx),h=mounted(standardAPI,ctx);
   await h.controller.refresh();
   assert.match(h.container.innerHTML,/方案 v2/);assert.match(h.container.innerHTML,/当前草稿或方案版本/);
   assert.match(h.container.innerHTML,/RocketCEA 未安装/);assert.match(h.container.innerHTML,/REFPROP/);
-  for(const tab of ["thermochemistry","conservation","properties","experiment"])assert.match(h.container.innerHTML,new RegExp(`data-validation-tab="${tab}"`));
+  for(const tab of ["gas_handoff","thermochemistry","conservation","properties","experiment"])assert.match(h.container.innerHTML,new RegExp(`data-validation-tab="${tab}"`));
   h.tab("experiment");
   assert.match(h.container.innerHTML,/data-validation-field="conditions_confirmed" type="checkbox" >/);
   assert.match(h.container.innerHTML,/液氧 \/ 煤油/);
@@ -503,4 +504,33 @@ test("historical CEA temperature-range diagnostics are withheld when composition
   const html=renderValidationResult(fixture,"thermochemistry");
   assert.match(html,/组分读取证据不足，需重新校核/);
   assert.doesNotMatch(html,/SUSPECT/);
+});
+
+test("gas tab shows saved design handoff before a validation exists and submits only the source-bound screen",async()=>{
+  const ctx=context();ctx.record.result.gas_handoff={status:"complete",stations:[{id:"ox",label:"保存富氧端口",p_Pa:60e6,T_K:750}]};
+  const before=clone(ctx),h=mounted((path,method)=>method==="POST"?{id:"gas-check",status:"queued"}:standardAPI(path),ctx);
+  await h.controller.refresh();h.tab("gas_handoff");
+  assert.match(h.container.innerHTML,/保存富氧端口/);assert.match(h.container.innerHTML,/运行燃气交接与筛查/);
+  assert.doesNotMatch(h.container.innerHTML,/data-validation-field="T_fuel_K"/);
+  h.click("run");await settle();
+  assert.deepEqual(h.calls.find(call=>call.method==="POST").body,{source_job_id:"design-1",gas_screening:{enabled:true}});
+  assert.deepEqual(ctx,before);h.controller.onLeave();
+});
+
+test("selected historical gas validation cannot borrow handoff from a different current design",async()=>{
+  const ctx=context();ctx.record.result.gas_handoff={stations:[{id:"new",label:"当前记录独有端口"}]};
+  const old={id:"old-check",project_id:"p1",source_job_id:"old-design",revision:1,status:"succeeded",result:{source:{job_id:"old-design"},gas_screening:{status:"unavailable",reason:"历史组成不足"}}};
+  const h=mounted(path=>path==="/validation/capabilities"?capabilities:path==="/projects/p1/validations"?[old]:old,ctx);
+  await h.controller.refresh();h.tab("gas_handoff");
+  assert.match(h.container.innerHTML,/另一设计记录/);assert.match(h.container.innerHTML,/历史组成不足/);
+  assert.match(h.container.innerHTML,/历史记录未保存燃气交接报告/);
+  assert.doesNotMatch(h.container.innerHTML,/当前记录独有端口/);
+  h.click("export");assert.deepEqual(h.downloads,["validation-old-check.json"]);h.controller.onLeave();
+});
+
+test("baseline controls name pure propellant temperatures and direct actual main chamber checks to gas tab",async()=>{
+  const h=mounted(standardAPI);await h.controller.refresh();h.tab("thermochemistry");
+  assert.match(h.container.innerHTML,/纯燃料入口温度/);assert.match(h.container.innerHTML,/纯氧化剂入口温度/);
+  assert.match(h.container.innerHTML,/纯推进剂一次燃烧是独立理论性能基线/);
+  assert.match(h.container.innerHTML,/不复制涡轮排气温度/);h.controller.onLeave();
 });

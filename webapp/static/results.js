@@ -10,15 +10,17 @@ import {renderSteadyClosure, closureDisplayState, pressureContractDisplayState} 
 import {renderThermodynamicApplicability, thermoApplicabilityBadge, thermodynamicDisplayState, thermoRangeDisplayState, pureFluidDisplayState} from "./thermo-applicability.js";
 import {renderCooling} from "./cooling.js";
 import {renderSteadyWorkspace} from "./steady-workspace.js";
-// Preferred engineering aliases first; a missing preferred value never hides a valid fallback.
+import {renderSteadyDesignSummary,renderSteadyDesignBasis} from "./steady-design.js";
+// Canonical SI outputs first: diagrams, handoff and geometry must not choose
+// different numeric copies. Missing SI fields can use historical unit aliases.
 const COMPONENT_ALIASES = [
   ["rho_in_kgm3","rho_kgm3"],
-  ["p_in_MPa","p_in_Pa","p_in_bar"], ["p_out_MPa","p_out_Pa","p_out_bar"],
-  ["power_MW","power_W"], ["turbine_power_MW","turbine_power_W"],
-  ["heat_load_MW","heat_load_W"], ["delta_p_MPa","delta_p_Pa"],
-  ["dp_ox_MPa","dp_ox_Pa"], ["dp_fuel_MPa","dp_fuel_Pa"],
-  ["injector_dp_MPa","injector_dp_Pa","injector_dp_bar"],
-  ["preburner_pressure_MPa","preburner_pressure_Pa"],
+  ["p_in_Pa","p_in_MPa","p_in_bar"], ["p_out_Pa","p_out_MPa","p_out_bar"],
+  ["power_W","power_MW"], ["turbine_power_W","turbine_power_MW"],
+  ["heat_load_W","heat_load_MW"], ["delta_p_Pa","delta_p_MPa"],
+  ["dp_ox_Pa","dp_ox_MPa"], ["dp_fuel_Pa","dp_fuel_MPa"],
+  ["injector_dp_Pa","injector_dp_MPa","injector_dp_bar"],
+  ["preburner_pressure_Pa","preburner_pressure_MPa"],
   ["Cf_sl","Cf"], ["p_exit_Pa","exit_pressure_Pa"],
   ["mach_exit","exit_mach"], ["Ve_ms","exit_velocity_ms"],
 ];
@@ -377,7 +379,7 @@ function steadyAttention(result) {
   return `<div class="steady-attention"><section class="steady-attention-card${failed.length || closureFailed || numerical.status !== "pass" ? " has-issues" : ""}" aria-label="关键校核结论"><div class="steady-card-heading"><h2>约束与闭合</h2><button type="button" data-steady-open="checks">完整校核 →</button></div><ul>${lines.join("")}</ul><p class="fine">${inputs.cycle_type !== "gg" ? "所需泵压不等于固定泵能力；泵与涡轮特性仍待验证。" : "数值收敛与系统约束分别判定。"}</p></section><section class="steady-attention-card" aria-label="模型适用性摘要"><div class="steady-card-heading"><h2>模型适用性</h2><button type="button" data-steady-open="models">检查依据 →</button></div><p class="steady-model-state">${escape(thermo.label)}</p><ul>${evidence.map(text=>`<li>${escape(text)}。</li>`).join("")}</ul><p class="fine">高压燃气状态方程与换热关联式仍需独立验证。</p></section></div>`;
 }
 
-function overview(result) {
+function overview(result, record = {}) {
   const s = result.calculation?.summary || {}, inputs = resultInputs(result), assessment = assessmentDisplayState(result);
   const gg = inputs.cycle_type === "gg";
   const conditions = [["指定燃烧室压力",scaled(inputs.pc,1e-6),"MPa"],["环境压力边界",scaled(inputs.ambient_pressure,1e-6),"MPa"],["指定总氧燃比 O/F",inputs.of_ratio,"—"],["主喷管面积比 Ae/At",inputs.expansion_ratio,"—"]];
@@ -422,11 +424,11 @@ function overview(result) {
   const warnings=allWarnings(result);
   const warningDetails=warnings.length ? `<details class="panel steady-warnings"><summary>本次模型警告（${warnings.length} 项）</summary>${warningList(warnings)}</details>` : "";
   const pages=[
-    {id:"overview",title:"性能总览",content:`<div class="kpi-grid" aria-label="稳态性能摘要">${kpis}</div>${steadyAttention(result)}<div class="summary-grid">${mainGroups}</div>${warningDetails}`},
+    {id:"overview",title:"性能总览",content:`<div class="kpi-grid" aria-label="稳态性能摘要">${kpis}</div>${renderSteadyDesignSummary(record.steady_design??result.steady_design)||steadyAttention(result)}<div class="summary-grid">${mainGroups}</div>${warningDetails}`},
     {id:"checks",title:"系统校核",content:`${engineering}${gg ? "" : renderSteadyClosure(result)}`},
     {id:"cooling",title:"再生冷却",content:renderCooling(result)},
     {id:"convergence",title:"收敛诊断",content:`${renderConvergence(result)}${diagnostics}`},
-    {id:"models",title:"模型与物性",content:renderThermodynamicApplicability(result)},
+    {id:"models",title:"模型与物性",content:renderSteadyDesignBasis(record.steady_design??result.steady_design)+renderThermodynamicApplicability(result)},
   ];
   return `<div class="analysis-stack steady-overview">${study}${statusStrip(result)}${renderSteadyWorkspace(pages)}</div>`;
 }

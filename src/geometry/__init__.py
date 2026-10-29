@@ -200,10 +200,14 @@ def compute_geometry(
     nozzle_flow = analyze_nozzle_flow(nozzle, pc, _pe, _p_amb, _gamma)
 
     # ── 喷注器 ────────────────────────────────────────
-    # GG（开式循环）模式下主燃烧室通流 ≠ 总流量（GG 排气不进主室），
-    # 喷注器孔按主室实际通流设计。
+    # 复用本次主喷注器部件结果；桌面几何不再按流量重新估算单元数量。
+    # 历史结果没有保存部件时显示缺失，不根据当前输入补造。
+    injector_component = comps.get("injector")
     injector = compute_injector(
-        rc, s.get("mdot_chamber_kg_s") or s["mdot_total_kg_s"])
+        rc, s.get("mdot_chamber_kg_s") or s["mdot_total_kg_s"],
+        component_outputs=getattr(injector_component, "outputs", None),
+        component_profile=getattr(injector_component, "profile", None),
+    )
 
     # ── 涡轮泵 ────────────────────────────────────────
     ox_pump_data = comps["ox_pump"]

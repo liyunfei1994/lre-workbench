@@ -74,11 +74,20 @@ class ChamberGeometry:
 
 @dataclass
 class InjectorGeometry:
-    """喷注器几何参数"""
-    face_diameter_m: float
-    face_area_m2: float
-    num_elements: int                # 喷注单元数估算
-    element_spacing_mm: float        # 单元间距
+    """同一计算记录中的主喷注器尺寸；缺失值不以当前默认值补齐。"""
+    face_diameter_m: float | None
+    face_area_m2: float | None
+    num_elements: int | None
+    element_spacing_mm: float | None  # sqrt(A_face / N)，不是已设计的孔中心距
+    d_ox_mm: float | None = None      # 中心流体圆孔直径
+    d_post_mm: float | None = None    # 中心管外径（环缝内边界）
+    d_outer_mm: float | None = None   # 环缝外边界（外筒内径）
+    delta_fuel_mm: float | None = None  # 单侧径向环缝宽
+    post_wall_thickness_mm: float | None = None
+    geometry_closure_passed: bool | None = None
+    geometry_source: str = "unavailable"
+    geometry_status: str = "unavailable"
+    geometry_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass

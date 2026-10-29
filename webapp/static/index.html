@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/static/flow-analysis.css">
   <link rel="stylesheet" href="/static/cycle-schematic.css">
   <link rel="stylesheet" href="/static/validation.css">
+  <link rel="stylesheet" href="/static/gas-handoff.css">
   <link rel="stylesheet" href="/static/validation-charts.css">
   <link rel="stylesheet" href="/static/property-comparison.css">
   <link rel="stylesheet" href="/static/throttle.css">
@@ -26,6 +27,9 @@
   <link rel="stylesheet" href="/static/steady-workspace.css">
   <link rel="stylesheet" href="/static/nozzle-geometry.css">
   <link rel="stylesheet" href="/static/pump-geometry.css">
+  <link rel="stylesheet" href="/static/injector-design.css">
+  <link rel="stylesheet" href="/static/turbine-geometry.css">
+  <link rel="stylesheet" href="/static/turbine-design.css">
   <script defer src="/static/bootstrap.js"></script>
 </head>
 <body>
@@ -78,6 +82,8 @@
         <button data-view="topology">发动机循环原理图</button><button data-view="states">流路状态分析</button><button data-view="components">部件性能分析</button>
         <button data-view="geometry">推力室与喷管几何</button>
         <button data-view="pump_geometry">泵初步几何</button>
+        <button data-view="injector_design">喷注器初步设计</button>
+        <button data-view="turbine_geometry">涡轮总体设计</button>
         <button data-view="validation">热力学校核</button>
         <div class="nav-section"><span>02</span>运行记录</div>
         <button data-view="log">日志与警告</button><button data-view="history">方案与计算记录</button>
@@ -120,6 +126,7 @@
               <div class="analysis-heading"><div><h1 id="analysis-title">稳态性能分析</h1><p class="muted" id="analysis-subtitle">单工况设计点 · 循环匹配、功率平衡与系统约束</p></div><button id="toggle-parameters" aria-expanded="true">收起参数</button></div>
               <div id="result-toolbar" class="result-toolbar"><label>计算记录<select id="result-selector" aria-label="选择计算记录"><option value="">尚无计算记录</option></select></label><button id="export-current-result" hidden>导出结果</button></div>
               <div id="result-context" class="banner" role="status">尚无计算结果。选择参考工况后运行设计点。</div>
+              <div id="result-consistency" hidden></div>
               <div id="analysis-content"></div>
               <div id="validation-content" hidden></div>
               <div id="throttle-content" hidden></div>

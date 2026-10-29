@@ -420,6 +420,7 @@ class GGCycleModel:
         gg_turbines: list[ComponentResult] = []
         if self._dual_shaft():
             turb_ox = Turbine(
+                state_basis=self.inputs.turbine_boundary_basis,
                 name="gg_turbine_ox",
                 inlet_state=gg_gas_state,
                 exhaust_pressure=p_te,
@@ -435,6 +436,7 @@ class GGCycleModel:
                 u_max_ms=self.inputs.turb_ox_u_max_ms,
             )
             turb_fuel = Turbine(
+                state_basis=self.inputs.turbine_boundary_basis,
                 name="gg_turbine_fuel",
                 inlet_state=gg_gas_state,
                 exhaust_pressure=p_te,
@@ -451,6 +453,8 @@ class GGCycleModel:
             )
             turb_ox_out, turb_ox_result = turb_ox.evaluate()
             turb_fuel_out, turb_fuel_result = turb_fuel.evaluate()
+            states["gg_turbine_ox_exhaust"] = turb_ox_out
+            states["gg_turbine_fuel_exhaust"] = turb_fuel_out
             components[turb_ox_result.name] = turb_ox_result
             components[turb_fuel_result.name] = turb_fuel_result
             gg_turbines = [turb_ox_result, turb_fuel_result]
@@ -467,6 +471,7 @@ class GGCycleModel:
             )
         else:
             turbine = Turbine(
+                state_basis=self.inputs.turbine_boundary_basis,
                 name="gg_turbine",
                 inlet_state=gg_gas_state,
                 exhaust_pressure=p_te,
@@ -493,6 +498,8 @@ class GGCycleModel:
                 name="gg_turbine_exhaust", pressure=p_te,
                 temperature=t_te, mass_flow=mdot_gg,
                 composition=turb_out.composition,
+                enthalpy=turb_out.enthalpy,
+                metadata=dict(turb_out.metadata),
             )
         states["gg_turbine_exhaust"] = exhaust_flow
 
@@ -687,7 +694,7 @@ class GGCycleModel:
         )
         injector_result = injector.evaluate()
         injector_result.notes.insert(
-            0, "GG 循环主喷注器为液-液喷注（离心式/互击式），密度取泵后/冷却后真实液态值。")
+            0, "GG 主喷注概念采用中心孔＋外环缝；密度取泵后／冷却后状态，具体相态与喷注构型适用性需另行确认。")
         components[injector_result.name] = injector_result
 
         # ── 功率平衡 & 推力合成 ─────────────────────────────────

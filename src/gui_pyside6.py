@@ -93,6 +93,7 @@ from PySide6.QtWidgets import (
 from ui_metadata import (
     _MATERIAL_FIELD_META, DISPLAY_UNIT_MAP, CYCLE_TYPE_CHOICES, GG_LAYOUT_CHOICES, PROPELLANT_CHOICES,
     NONLINEAR_SOLVER_CHOICES, COMBUSTION_LOSS_CHOICES, THERMO_DATASET_CHOICES,
+    TURBINE_BOUNDARY_CHOICES, TURBINE_MEANLINE_CHOICES, TURBINE_GEOMETRY_STATE_CHOICES,
     FFSC_ONLY_GROUPS, GG_ONLY_GROUPS,
     PARAM_GROUPS, OVERVIEW_GROUPS, OVERVIEW_GROUPS_GG, COMPONENT_ORDER,
     COMPONENT_LABELS, COMPONENT_GROUPS, KEY_LABELS, STATE_LABELS
@@ -285,7 +286,14 @@ GEOMETRY_KEY_LABELS = {
     "face_diameter_m": "喷注面直径 [m]",
     "face_area_m2": "喷注面面积 [m²]",
     "num_elements": "喷注单元数",
-    "element_spacing_mm": "喷注单元间距 [mm]",
+    "element_spacing_mm": "单元等效占用尺度（非排布节距）[mm]",
+    "d_ox_mm": "中心流道直径 [mm]",
+    "d_post_mm": "中心管外径 [mm]",
+    "d_outer_mm": "外环流道外径（外筒内径）[mm]",
+    "delta_fuel_mm": "环缝径向宽度 [mm]",
+    "post_wall_thickness_mm": "中心管壁厚假设 [mm]",
+    "geometry_status": "几何记录状态",
+    "geometry_warnings": "几何说明与告警",
     "impeller_diameter_m": "叶轮直径 [m]",
     "shaft_speed_rpm": "转速 [rpm]",
     "specific_speed": "比转速",
@@ -712,7 +720,8 @@ class MainWindow(QMainWindow):
                 if key in self.input_edits:
                     raise RuntimeError(f"PARAM_GROUPS 重复注册输入字段：{key}")
                 # ── V20：循环方式 / GG 轴系布局选择器（QComboBox，userData=内部 key）──
-                if key in ("cycle_type", "gg_layout", "propellant_pair", "nonlinear_solver", "combustion_loss_model", "methane_thermo_dataset"):
+                if key in ("cycle_type", "gg_layout", "propellant_pair", "nonlinear_solver", "combustion_loss_model", "methane_thermo_dataset",
+                           "turbine_boundary_basis", "turbine_meanline_mode", "ox_turbine_geometry_state_basis", "fuel_turbine_geometry_state_basis"):
                     combo = QComboBox()
                     combo.setObjectName("ParamCombo")
                     choices = {"cycle_type": CYCLE_TYPE_CHOICES,
@@ -720,7 +729,11 @@ class MainWindow(QMainWindow):
                                "propellant_pair": PROPELLANT_CHOICES,
                                "nonlinear_solver": NONLINEAR_SOLVER_CHOICES,
                                "combustion_loss_model": COMBUSTION_LOSS_CHOICES,
-                               "methane_thermo_dataset": THERMO_DATASET_CHOICES}[key]
+                               "methane_thermo_dataset": THERMO_DATASET_CHOICES,
+                               "turbine_boundary_basis": TURBINE_BOUNDARY_CHOICES,
+                               "turbine_meanline_mode": TURBINE_MEANLINE_CHOICES,
+                               "ox_turbine_geometry_state_basis": TURBINE_GEOMETRY_STATE_CHOICES,
+                               "fuel_turbine_geometry_state_basis": TURBINE_GEOMETRY_STATE_CHOICES}[key]
                     default_val = getattr(defaults, key)
                     for i, (val, text) in enumerate(choices):
                         combo.addItem(text, userData=val)
@@ -740,6 +753,8 @@ class MainWindow(QMainWindow):
                             "· 双轴：GG 燃气并联分流至两台涡轮，各驱动一侧泵")
                     elif key == "nonlinear_solver":
                         combo.setToolTip("相同物理方程与残差验收判据；TRF 用于对照。完整收敛仍需所有启用的迭代层通过。")
+                    elif key.startswith("turbine_") or key.endswith("_turbine_geometry_state_basis"):
+                        combo.setToolTip("保存所选涡轮接口与初选假设；选择模型不代表已完成部件验证。")
                     else:
                         combo.setToolTip(
                             "液氧/煤油使用正十二烷替代工质，仅支持 GG 稳态循环与指定吸热量冷却。\n"
@@ -4214,6 +4229,7 @@ class MainWindow(QMainWindow):
         "turb_fuel_disk_material",  "turb_fuel_housing_material",
         # V19：冷却通道沿程分布表（JSON 串，推力室设计工作区维护）
         "cooling_channel_table_json",
+        "turb_ox_stage_work_fractions", "turb_fuel_stage_work_fractions",
     }
     # V10：整数字段
     _INT_FIELDS = {

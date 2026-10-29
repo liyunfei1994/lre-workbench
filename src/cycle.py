@@ -32,7 +32,9 @@ from preburner import Preburner
 from turbine import Turbine
 from injector import Injector
 from thermo_data import model_thermo_scope
-from thermo import CANTERA_AVAILABLE, COOLPROP_AVAILABLE, available_npsh_pressure, reactant_enthalpy, reactant_temperature_from_enthalpy
+from thermo import (CANTERA_AVAILABLE, COOLPROP_AVAILABLE, available_npsh_pressure,
+                    reactant_enthalpy, reactant_temperature_from_enthalpy,
+                    _get_gas, gas_model_identity)
 from steady_network import solve_design, audit_network, pressure_contract
 
 
@@ -645,11 +647,20 @@ class FFSCCycleModel:
             species = "CH4" if branch["id"].startswith("fuel") else "O2"
             temperature = reactant_temperature_from_enthalpy(species, supply.enthalpy,
                                                             branch["destination_pressure_Pa"])
+            branch_model = gas_model_identity(_get_gas())
+            branch_model.update(eos="HEOS", fluid=species,
+                                chemical_reference_eos="ideal-gas", equilibrium_scope="pure_reactant")
             states["branch_" + branch["id"]] = FlowState(
                 name="branch_" + branch["id"], pressure=branch["destination_pressure_Pa"],
                 temperature=temperature, mass_flow=branch["mass_flow_kg_s"],
                 enthalpy=supply.enthalpy, composition=dict(supply.composition),
-                metadata={"process": "adiabatic_isenthalpic_supply_loss"})
+                metadata={"process": "adiabatic_isenthalpic_supply_loss",
+                          "gas_handoff_schema_version": 1, "model": branch_model,
+                          "reference_id": branch_model["enthalpy_reference_id"],
+                          "composition_basis": "mass_fraction", "composition_complete": True,
+                          "source_ports": [branch["source"]],
+                          "state_basis": {"kind": "reservoir_approximation", "velocity_m_s": None,
+                              "reason": "供给支路的集总等焓降压端口；没有解析局部流速或总静转换。"}})
             branch["temperature_K"] = temperature
             branch["temperature_location"] = "after_adiabatic_supply_loss"
         network.update(audit_network(network, total_fuel=mdot_fuel, total_ox=mdot_ox,
@@ -679,12 +690,20 @@ class FFSCCycleModel:
 
         ox_pb_outlet_flow,  ox_pb_gas_state,  ox_preburner_result  = ox_preburner.evaluate()
         fuel_pb_outlet_flow, fuel_pb_gas_state, fuel_preburner_result = fuel_preburner.evaluate()
+        for state, gas, side in ((ox_pb_outlet_flow, ox_pb_gas_state, "opb"),
+                                 (fuel_pb_outlet_flow, fuel_pb_gas_state, "fpb")):
+            ports = [f"branch_ox_to_{side}", f"branch_fuel_to_{side}"]
+            state.metadata["source_ports"] = list(ports)
+            gas.source_ports = list(ports)
+            state.metadata["state_basis"]["downstream_turbine_boundary"] = self.inputs.turbine_boundary_basis
+            gas.state_basis["downstream_turbine_boundary"] = self.inputs.turbine_boundary_basis
 
         # ── 涡轮（V10：贯通转速 + U/C0 + 材料）─────────
         # 关键不变量：
         #   n_lox_rpm  ↔ lox_pump.nr_rpm  ↔ ox_turbine.shaft_speed_rpm
         #   n_fuel_rpm ↔ fuel_pump.nr_rpm ↔ fuel_turbine.shaft_speed_rpm
         ox_turbine = Turbine(
+            state_basis=self.inputs.turbine_boundary_basis,
             name="ox_preburner_turbine",
             inlet_state=ox_pb_gas_state,
             exhaust_pressure=p_ox_turbine_exhaust,
@@ -701,6 +720,7 @@ class FFSCCycleModel:
             u_max_ms=self.inputs.turb_ox_u_max_ms,
         )
         fuel_turbine = Turbine(
+            state_basis=self.inputs.turbine_boundary_basis,
             name="fuel_preburner_turbine",
             inlet_state=fuel_pb_gas_state,
             exhaust_pressure=p_fuel_turbine_exhaust,
@@ -766,7 +786,14 @@ class FFSCCycleModel:
             states["nozzle_exit"] = FlowState("nozzle_exit",
                 nozzle_result.outputs["p_exit_Pa"], nozzle_result.outputs["T_exit_K"], mdot_total,
                 enthalpy=nozzle_result.outputs["h_exit_Jkg"], composition=dict(chamber_state.composition),
-                metadata={"velocity_m_s": nozzle_result.outputs["Ve_ms"]})
+                metadata={"velocity_m_s": nozzle_result.outputs["Ve_ms"],
+                          "model": dict(chamber_state.metadata.get("model", {})),
+                          "reference_id": chamber_state.metadata.get("reference_id"),
+                          "composition_complete": True, "composition_basis": "mass_fraction",
+                          "source_ports": ["main_chamber"],
+                          "state_basis": {"kind": "static", "pressure": "static", "temperature": "static",
+                              "enthalpy": "static", "velocity_m_s": nozzle_result.outputs["Ve_ms"],
+                              "reason": "喷管出口冻结组成流动解；保存的是局部静态焓与独立速度。"}})
 
         # ── 主燃烧室几何参数（从喉部面积反推）──────────────
         # 理论依据：
@@ -1088,8 +1115,10 @@ class FFSCCycleModel:
             for state in states.values():
                 if state.enthalpy is not None:
                     from thermo import enthalpy_reference_id
-                    state.metadata["reference_id"] = enthalpy_reference_id()
-                    state.metadata["thermochemical_data"] = self.inputs.methane_thermo_dataset + ".yaml"
+                    # Gas identities were captured where computed. This is only
+                    # the declared shared reference of legacy pure-fluid ports.
+                    state.metadata.setdefault("reference_id", enthalpy_reference_id())
+                    state.metadata.setdefault("thermochemical_data", self.inputs.methane_thermo_dataset + ".yaml")
         closure = dict(schema_version=1, scope="ffsc_lumped_fixed_resistance" if getattr(self, "_feed_hardware", None) else "ffsc_lumped_design",
             assumptions=[
                 "模型流路假设：全部甲烷先冷却再分流；液氧在主泵后分流。并非 Raptor 实际管路的已验证数据。",

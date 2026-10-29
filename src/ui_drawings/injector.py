@@ -1,130 +1,143 @@
-"""
-ui_drawings.injector —— 喷注器 的二维剖面图 / 3D 模型 / 估算说明（从 ui_drawings.py 拆出）。
-"""
+"""主喷注器已存尺寸的横截面与说明；不补造轴向长度、缩进或旋流孔。"""
 
 from __future__ import annotations
 
+import html
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 from ._common import *  # noqa: F401,F403
 
 
+def _positive(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, TypeError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _display(value, unit="", digits=3):
+    number = _positive(value)
+    return f"{number:.{digits}f}{unit}" if number is not None else "未记录"
+
+
 def _fig_injector(geom: Dict[str, Any]) -> Figure:
-    fig = _make_figure(9.6, 5.0)
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.1])
+    fig = _make_figure(10.2, 5.6)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.15])
     ax_face = fig.add_subplot(gs[0, 0])
     ax_elem = fig.add_subplot(gs[0, 1])
-
     inj = geom.get("injector", {}) or {}
-    c = geom.get("chamber", {}) or {}
-    D = _num(inj.get("face_diameter_m"), _num(c.get("diameter_m"), 0.38))
-    N = max(20, int(_num(inj.get("num_elements"), 160)))
-    R = D / 2
+    diameter = _positive(inj.get("face_diameter_m"))
+    count = _positive(inj.get("num_elements"))
+    count_text = str(int(count)) if count is not None and count.is_integer() else "未记录"
 
-    # ── 正面阵列 ──────────────────────────────────────
-    ax_face.add_patch(Circle((0, 0), R, fill=False, ec="#1e40af", lw=2.2))
-    # 外侧"膜冷却"环（贴壁的小一圈）
-    ax_face.add_patch(Circle((0, 0), R * 0.97, fill=False, ec="#9ca3af", lw=0.8, ls="--"))
-
-    # 按同心环铺点
-    pts = []
-    rings = max(4, min(14, int(round(math.sqrt(N) * 0.7))))
-    for k in range(1, rings + 1):
-        rr = R * 0.92 * k / rings
-        m = max(6, int(2 * math.pi * rr / (R / rings * 0.95)))
-        for i in range(m):
-            a = 2 * math.pi * (i + 0.5 * (k % 2)) / m
-            pts.append((rr * math.cos(a), rr * math.sin(a)))
-    pts = pts[:N]
-    xs, ys = zip(*pts) if pts else ([], [])
-    # 同轴元素用两个同心圆表示
-    elem_outer = R / max(rings, 1) * 0.32
-    elem_inner = elem_outer * 0.55
-    for x, y in pts:
-        ax_face.add_patch(Circle((x, y), elem_outer, fill=False, ec="#dc2626", lw=0.6))
-        ax_face.add_patch(Circle((x, y), elem_inner, color="#2563eb", alpha=0.85))
-    ax_face.text(0, -R * 1.15, f"喷注单元 ≈ {N} 个   面板 D = {D:.3f} m\n"
-                 "蓝点=富氧热气中心管, 红环=富燃热气环缝", ha="center", fontsize=9,
-                 color="#374151")
+    ax_face.set_title("主喷注面布局示意", fontsize=11, fontweight="bold")
+    if diameter is None:
+        ax_face.text(.5, .5, "本记录未保存喷注面尺寸\n不能由当前默认参数补造",
+                     ha="center", va="center", transform=ax_face.transAxes)
+    else:
+        radius = diameter * 500.0  # mm
+        ax_face.add_patch(Circle((0, 0), radius, fill=False, ec="#475569", lw=1.8))
+        # 固定示意符号；不声称实现 N 个元素的逐孔排布或边缘排布校核。
+        points = [(0., 0.)]
+        for ring, amount in ((.34, 6), (.70, 12)):
+            points.extend((radius * ring * math.cos(2 * math.pi * i / amount),
+                           radius * ring * math.sin(2 * math.pi * i / amount))
+                          for i in range(amount))
+        for x, y in points:
+            ax_face.add_patch(Circle((x, y), radius * .075, color="#e88972"))
+            ax_face.add_patch(Circle((x, y), radius * .048, color="#94a3b8"))
+            ax_face.add_patch(Circle((x, y), radius * .036, color="#4678b8"))
+        ax_face.text(0, -radius * 1.15,
+                     f"记录面径 D = {diameter * 1000:.3f} mm\n记录单元数 N = {count_text}\n"
+                     "图示符号数量及间距不代表实际逐孔排布",
+                     ha="center", va="top", fontsize=9, color="#475569")
+        ax_face.set_xlim(-radius * 1.15, radius * 1.15)
+        ax_face.set_ylim(-radius * 1.65, radius * 1.15)
     ax_face.set_aspect("equal")
-    ax_face.set_xlim(-R * 1.25, R * 1.25)
-    ax_face.set_ylim(-R * 1.35, R * 1.20)
     ax_face.axis("off")
-    ax_face.set_title("喷注面正视图（Front view）", fontsize=10, fontweight="bold")
 
-    # ── 单元剖面（同轴旋流型，气-气）────────────────
-    # 比例放大：富氧热气中心管 d_o, 富燃热气环缝 gap, 凹陷 recess
-    d_lox = 0.10
-    d_post = 0.16
-    d_ch4_out = 0.26
-    recess = 0.12
-    L_post = 0.55
-
-    # 喷注面板
-    ax_elem.add_patch(Rectangle((-1.0, 0.42), 2.0, 0.10, color=OUTER_WALL, alpha=0.85))
-    # LOX 中心管（蓝）
-    ax_elem.add_patch(Rectangle((-d_lox/2, -0.05 - L_post + recess), d_lox, L_post,
-                                color="#1d4ed8", alpha=0.9))
-    # LOX post 外壁（不锈钢）
-    ax_elem.add_patch(Rectangle((-d_post/2, -0.10 - L_post + recess), d_post, L_post + 0.05,
-                                fill=False, ec="#1f2937", lw=1.2))
-    # CH4 环缝
-    ax_elem.add_patch(Rectangle((-d_ch4_out/2, 0.0), d_ch4_out, 0.45,
-                                color="#fde68a", alpha=0.5))
-    ax_elem.add_patch(Rectangle((d_post/2, 0.0), (d_ch4_out - d_post)/2, 0.45,
-                                color="#dc2626", alpha=0.45))
-    ax_elem.add_patch(Rectangle((-d_ch4_out/2, 0.0), (d_ch4_out - d_post)/2, 0.45,
-                                color="#dc2626", alpha=0.45))
-
-    # 燃烧区
-    ax_elem.add_patch(Rectangle((-1.0, -0.65 - L_post + recess),
-                                2.0, 0.55 + L_post - recess,
-                                color="#fff7ed", alpha=0.4))
-    # 旋流混合扩张（示意，气-气非液滴喷雾）
-    ax_elem.plot([0, -0.25], [-0.05 - L_post + recess, -0.55],
-                 color="#0891b2", lw=1, ls="--")
-    ax_elem.plot([0,  0.25], [-0.05 - L_post + recess, -0.55],
-                 color="#0891b2", lw=1, ls="--")
-
-    # 标注
-    _dim_arrow(ax_elem, -0.55, 0.05, -0.55, -0.10 - L_post + recess,
-               f"L_post", fontsize=8)
-    _dim_arrow(ax_elem, -d_lox/2, 0.30, d_lox/2, 0.30, "d_o 富氧", fontsize=8)
-    _dim_arrow(ax_elem, -d_ch4_out/2, 0.55, d_ch4_out/2, 0.55, "d_f 富燃(外)", fontsize=8)
-    ax_elem.text(0.34, -0.05 - L_post + recess - 0.04, "recess", fontsize=8, color="#7c2d12")
-    ax_elem.annotate("", xy=(0.30, -0.05 - L_post + recess),
-                     xytext=(0.30, -0.05 - L_post),
-                     arrowprops=dict(arrowstyle="<->", color="#7c2d12", lw=0.7))
-
-    ax_elem.text(-0.95, -0.55, "气-气旋流混合区\ngas-gas swirl mixing",
-                 color="#7c2d12", fontsize=8)
-    ax_elem.text(-0.95, 0.62, "蓝=富氧热气, 红=富燃热气(环缝), 黄=喷注面板",
-                 color="#374151", fontsize=8)
-
-    ax_elem.set_xlim(-1.05, 1.05)
-    ax_elem.set_ylim(-0.95, 0.85)
-    ax_elem.set_aspect("equal")
-    ax_elem.axis("off")
-    ax_elem.set_title("同轴旋流单元剖面 / Coaxial swirl element", fontsize=10, fontweight="bold")
+    ax_elem.set_title("同轴圆孔—环缝单元横截面", fontsize=11, fontweight="bold")
+    d_ox, d_post, d_outer = (_positive(inj.get(key)) for key in
+                            ("d_ox_mm", "d_post_mm", "d_outer_mm"))
+    valid_section = (d_ox is not None and d_post is not None and d_outer is not None
+                     and d_ox < d_post < d_outer)
+    if not valid_section:
+        ax_elem.text(.5, .5, "本记录缺少有效的单元直径\n不生成假定截面或纵向详细图",
+                     ha="center", va="center", transform=ax_elem.transAxes)
+        ax_elem.axis("off")
+    else:
+        radius = d_outer / 2.0
+        # 按实际半径绘制：外筒内边界 -> 富燃环缝 -> 实体隔壁 -> 富氧圆孔。
+        ax_elem.add_patch(Circle((0, 0), radius, facecolor="#e88972", edgecolor="#334155", lw=2))
+        ax_elem.add_patch(Circle((0, 0), d_post / 2, facecolor="#94a3b8", edgecolor="#475569", lw=1))
+        ax_elem.add_patch(Circle((0, 0), d_ox / 2, facecolor="#4678b8", edgecolor="#315984", lw=1))
+        ax_elem.text(0, 0, "中心流体\n富氧热气", ha="center", va="center", fontsize=9, color="white")
+        ax_elem.annotate("富燃热气环缝", xy=(0, (d_post + d_outer) / 4),
+                         xytext=(0, radius * 1.35), ha="center", fontsize=9,
+                         arrowprops=dict(arrowstyle="-", color="#9f4635"))
+        ax_elem.annotate("实体隔壁", xy=((d_ox + d_post) / 4, 0),
+                         xytext=(radius * 1.22, radius * .45), ha="left", fontsize=9,
+                         arrowprops=dict(arrowstyle="-", color="#475569"))
+        ax_elem.annotate("外筒内边界\n壁厚未设计", xy=(radius / math.sqrt(2), -radius / math.sqrt(2)),
+                         xytext=(radius * 1.22, -radius * .45), ha="left", fontsize=9,
+                         arrowprops=dict(arrowstyle="-", color="#475569"))
+        _dim_arrow(ax_elem, -d_ox / 2, -radius * 1.25, d_ox / 2, -radius * 1.25,
+                   f"中心孔 {d_ox:.3f} mm", fontsize=8)
+        _dim_arrow(ax_elem, -d_post / 2, -radius * 1.65, d_post / 2, -radius * 1.65,
+                   f"内管外径 {d_post:.3f} mm", fontsize=8)
+        _dim_arrow(ax_elem, -radius, -radius * 2.05, radius, -radius * 2.05,
+                   f"环缝外径 {d_outer:.3f} mm", fontsize=8)
+        ax_elem.set_xlim(-radius * 1.25, radius * 2.0)
+        ax_elem.set_ylim(-radius * 2.3, radius * 1.65)
+        ax_elem.set_aspect("equal")
+        ax_elem.axis("off")
+    closure = inj.get("geometry_closure_passed")
+    status_text = ("本记录几何与所用流量关系闭合" if closure is True else
+                   "本记录几何流量闭合未通过" if closure is False else
+                   "历史记录：几何流量闭合未验证")
+    fig.suptitle("主喷注器通流初步尺寸 · " + status_text +
+                 "\n轴向长度、缩进、切向孔及真实孔阵列尚未设计", fontsize=10, color="#475569")
     return fig
+
 
 def _explain_injector(geom: Dict[str, Any]) -> str:
     inj = geom.get("injector", {}) or {}
-    nel = int(_num(inj.get("num_elements"))); d = _num(inj.get("face_diameter_m"))
-    sp = _num(inj.get("element_spacing_mm"))
     rows = "".join([
-        _row("面板直径", f"{d:.3f} m", "= 燃烧室内径 Dc", "喷注面与燃烧室同径"),
-        _row("喷注单元数", f"{nel}", "ṁ_total / (~1 kg/s 每单元)", "同轴旋流单元估算个数"),
-        _row("单元间距", f"{sp:.1f} mm", "√(面板面积 / N)", "单元在面板上的平均节距"),
+        _row("喷注面直径", _display(inj.get("face_diameter_m"), " m"),
+             "读取 components.injector.outputs", "与主喷注器部件使用同一计算记录"),
+        _row("喷注单元数", _display(inj.get("num_elements"), digits=0),
+             "读取已计算 N", "不由几何页重新按流量估算"),
+        _row("等效占用尺度", _display(inj.get("element_spacing_mm"), " mm"),
+             "√(A_face / N)", "不是完成孔阵列设计后的真实中心距"),
+        _row("中心流体孔径", _display(inj.get("d_ox_mm"), " mm"),
+             "A_ox = π d_ox² / 4", "FFSC 主喷注器中心富氧热气通道"),
+        _row("中心管外径", _display(inj.get("d_post_mm"), " mm"),
+             "环缝内边界", "与中心孔之间为实体隔壁"),
+        _row("环缝外径", _display(inj.get("d_outer_mm"), " mm"),
+             "A_f = π (d_outer² − d_post²) / 4", "外筒内径；外筒壁厚尚未设计"),
+        _row("单侧径向环缝宽", _display(inj.get("delta_fuel_mm"), " mm"),
+             "δ = (d_outer − d_post) / 2", "FFSC 主喷注器外环富燃热气通道"),
+        _row("中心管壁厚假设", _display(inj.get("post_wall_thickness_mm"), " mm"),
+             "读取已保存假设", "尚未经热、强度及制造校核"),
     ])
-    return (_EXPLAIN_CSS + "<body><p><b>喷注器几何(气-气同轴旋流式)</b>　FFSC 主喷注器进的是"
-            "富氧/富燃两股热气(非液滴雾化)；单元数按总流量估算,面板与燃烧室同径。</p>"
-            "<table width='100%'>"
-            "<tr><th>参数</th><th>当前值</th><th>公式</th><th>物理意义</th></tr>"
-            + rows + "</table><p class='src'>蓝点=富氧热气中心管,红环=富燃热气环缝(图中示意)。</p></body>")
+    warnings = inj.get("geometry_warnings") or []
+    warnings_html = "".join(f"<p>{html.escape(str(value))}</p>" for value in warnings)
+    if inj.get("geometry_closure_passed") is None:
+        warnings_html += "<p>本记录未保存几何流量闭合校核；历史尺寸不在显示时重新修正。</p>"
+    return (_EXPLAIN_CSS + "<body><p><b>主喷注器同轴圆孔—环缝通流尺寸</b>　"
+            "FFSC 主喷注器位于两股涡轮排气与主燃烧室之间。富氧、富燃预燃室各有自己的喷注器；"
+            "本图不代表预燃室喷注器。</p><p>这里给出中心圆孔和外环通道的初步尺寸。"
+            "尚未确定切向孔、槽、旋流室、轴向长度或缩进，因此不能称为已完成的同轴旋流喷注器设计，"
+            "也不代表任何特定发动机的实际构型。</p><table width='100%'>"
+            "<tr><th>参数</th><th>记录值</th><th>定义／来源</th><th>物理意义</th></tr>"
+            + rows + "</table>" + warnings_html +
+            "<p class='src'>左图仅示意同轴单元分布；右图按保存直径绘制横截面。"
+            "流量闭合只说明与所用孔板模型一致，不代表可压缩流、燃烧、结构或制造验证通过。</p></body>")
 
 
-# ── 友好别名 ──
 fig = _fig_injector
 explain = _explain_injector

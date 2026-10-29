@@ -142,6 +142,10 @@ class CfdPanelTests(unittest.TestCase):
         # visible even when the solver's free-form warning list is empty.
         from tests.cooling_profile_fixture import cooling_profile
         self.main.last_results.warnings = []
+        self.main.last_results.inputs.cooling_wall_temp_limit_status = "provisional"
+        self.main.last_results.inputs.cooling_wall_temp_limit_K = 800.0
+        self.main.inputs = deepcopy(self.main.last_results.inputs)
+        self.main._result_signature = self.main._signature()
         self.main.last_results.components["cooling_channel"].profile = cooling_profile(1343)
         self.panel.route_combo.setCurrentIndex(self.panel.route_combo.findData("external"))
         self.panel.refresh_source()

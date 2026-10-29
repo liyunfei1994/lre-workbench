@@ -37,6 +37,8 @@ from task_control import checkpoint
 import warnings
 import math
 import threading
+import hashlib
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
@@ -65,13 +67,20 @@ try:
             filename, phase = model.mechanism, model.phase
         if not hasattr(_GAS_LOCAL, "gases"):
             _GAS_LOCAL.gases = {}
+            _GAS_LOCAL.identities = {}
         key = (filename, phase)
         if key not in _GAS_LOCAL.gases:
             # Cantera's native Windows file lookup can lose non-ASCII path
             # characters. Read its unchanged bundled mechanism through Python's
             # Unicode-aware path handling and pass the exact YAML contents.
             mechanism_file = Path(ct.__file__).resolve().parent / "data" / filename
-            _GAS_LOCAL.gases[key] = ct.Solution(yaml=mechanism_file.read_text(encoding="utf-8"), name=phase)
+            raw = mechanism_file.read_bytes()
+            _GAS_LOCAL.gases[key] = ct.Solution(yaml=raw.decode("utf-8"), name=phase)
+            _GAS_LOCAL.identities[key] = {
+                "mechanism": filename, "phase": phase,
+                "mechanism_sha256": hashlib.sha256(raw).hexdigest(),
+                "cantera_version": ct.__version__,
+            }
             checkpoint()
         return _GAS_LOCAL.gases[key]
 
@@ -248,6 +257,13 @@ class GasState:
     thermo_extrapolation: Dict[str, float] = field(default_factory=dict)
     thermo_range: dict = field(default_factory=dict)
     gas_model: str = "unknown"
+    density: float | None = None
+    cv: float | None = None
+    sound_speed: float | None = None
+    model: dict = field(default_factory=dict)
+    element_mass_fractions: Dict[str, float] = field(default_factory=dict)
+    state_basis: dict = field(default_factory=dict)
+    source_ports: list[str] = field(default_factory=list)
 
 
 class ThermoRangeWarning(RuntimeWarning):
@@ -267,12 +283,19 @@ def _fuel_from_compositions(*compositions: Dict[str, float]) -> str:
 
 
 def _gas_for_state(state: GasState) -> "ct.Solution":
+    gas = None
     if state.mechanism == "nDodecane_Reitz.yaml" and state.phase == "nDodecane_IG":
-        return _get_gas("c12h26")
+        gas = _get_gas("c12h26")
     for dataset, definition in METHANE_DATASETS.items():
         if state.mechanism == definition["file"] and state.phase == definition["phase"]:
-            return _get_gas("CH4", methane_dataset=dataset)
-    raise ValueError(f"未支持的气相机制身份：{state.mechanism}/{state.phase}")
+            gas = _get_gas("CH4", methane_dataset=dataset)
+    if gas is None:
+        raise ValueError(f"未支持的气相机制身份：{state.mechanism}/{state.phase}")
+    actual = gas_model_identity(gas)
+    for key in ("mechanism", "phase", "mechanism_sha256", "eos", "enthalpy_reference_id"):
+        if state.model.get(key) and state.model[key] != actual.get(key):
+            raise ValueError(f"气相状态的保存模型身份与实际物性模型不一致：{key}。")
+    return gas
 
 
 def gas_data_filename(gas):
@@ -281,6 +304,103 @@ def gas_data_filename(gas):
         if instance is gas:
             return filename
     return "nDodecane_Reitz.yaml" if gas.name == "nDodecane_IG" else gas.source
+
+
+def gas_model_identity(gas) -> dict:
+    """Identity of the bytes actually loaded, captured before a state is handed on."""
+    for key, instance in getattr(_GAS_LOCAL, "gases", {}).items():
+        if instance is gas:
+            identity = deepcopy(_GAS_LOCAL.identities[key])
+            break
+    else:
+        # Unknown/in-memory phases cannot borrow the active mechanism's fingerprint.
+        identity = {"mechanism": gas_data_filename(gas), "phase": gas.name,
+                    "mechanism_sha256": None, "cantera_version": ct.__version__}
+    mechanism = identity["mechanism"]
+    if mechanism == "nDodecane_Reitz.yaml":
+        reference = "cantera_ndodecane_coolprop_600K_ideal_reference_v2"
+    else:
+        reference = f"cantera_{Path(mechanism).stem}_coolprop_298p15K_ideal_reference_v2"
+    identity.update(eos=gas.thermo_model, enthalpy_reference_id=reference,
+                    entropy_reference_id=f"cantera_species_standard_entropy:{identity['mechanism_sha256']}:{gas.name}",
+                    composition_basis="mass_fraction", phase_set=[gas.name],
+                    equilibrium_scope="gas_phase_only", high_pressure_validation="not_validated")
+    return identity
+
+
+def gas_flow_metadata(state: GasState, *, basis=None, source_ports=None) -> dict:
+    """Copy a gas state's provenance; never manufacture a different active model."""
+    return {
+        "gas_handoff_schema_version": 1,
+        "model": deepcopy(state.model),
+        "reference_id": state.model.get("enthalpy_reference_id"),
+        "thermochemical_data": state.mechanism,
+        "composition_basis": "mass_fraction", "composition_complete": state.source == "cantera",
+        "entropy_JkgK": state.entropy if state.source == "cantera" else None,
+        "cp_JkgK": state.cp, "cv_JkgK": state.cv, "sound_speed_m_s": state.sound_speed,
+        "property_definitions": {"cp": "dh_dT_at_constant_p_and_composition", "cv": "du_dT_at_constant_v_and_composition",
+                                 "gamma": "cp_over_cv_frozen", "sound_speed": "isentropic_frozen_composition"},
+        "temperature_range_evidence": deepcopy(state.thermo_range),
+        "element_mass_fractions": dict(state.element_mass_fractions),
+        "state_basis": deepcopy(basis if basis is not None else state.state_basis),
+        "source_ports": list(source_ports if source_ports is not None else state.source_ports),
+    }
+
+
+def validate_gas_streams(streams, *, expected_mass_flow=None) -> dict:
+    """Reject incomplete numeric/composition contracts and incompatible known references.
+
+    Legacy callers without identity remain usable, with an explicit incomplete
+    provenance result. A known model must match the selected chemistry; unknown
+    metadata is never filled in from an unrelated stream or active defaults.
+    """
+    if len(streams) != 2:
+        raise ValueError("主室混合需要两股完整入口流。")
+    statuses = []
+    models = []
+    for stream in streams:
+        for name, value, positive in (("质量流量", stream.mass_flow, True),
+                                      ("比焓", stream.enthalpy, False)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or (positive and value <= 0):
+                raise ValueError(f"{stream.name}: {name}必须为{'正' if positive else ''}有限数值。")
+        if not isinstance(stream.composition, dict) or not stream.composition:
+            raise ValueError(f"{stream.name}: 完整入口组成缺失；不得替换为纯 CH4/O2。")
+        model = stream.metadata.get("model", {})
+        if not isinstance(model, dict):
+            raise ValueError(f"{stream.name}: 燃气模型身份格式无效。")
+        if stream.metadata.get("composition_complete") is False:
+            raise ValueError(f"{stream.name}: 入口组成已标为不完整。")
+        ref = model.get("enthalpy_reference_id") or stream.metadata.get("reference_id")
+        if model.get("enthalpy_reference_id") and stream.metadata.get("reference_id") and model["enthalpy_reference_id"] != stream.metadata["reference_id"]:
+            raise ValueError(f"{stream.name}: 端口化学焓基准与其物性模型身份冲突。")
+        models.append((model, ref))
+        statuses.append(bool(model.get("mechanism_sha256") and ref))
+    total = math.fsum(stream.mass_flow for stream in streams)
+    if expected_mass_flow is not None and (not math.isfinite(expected_mass_flow) or
+            not math.isclose(total, expected_mass_flow, rel_tol=1e-10, abs_tol=1e-9)):
+        raise ValueError("主室入口两股质量流量之和与主室出口指定流量不一致。")
+    for key in ("mechanism", "phase", "mechanism_sha256", "eos", "enthalpy_reference_id"):
+        known = [model.get(key) for model, _ref in models if model.get(key) is not None]
+        if len(set(known)) > 1:
+            raise ValueError(f"主室入口燃气模型／化学焓基准不兼容：{key}。")
+    refs = {ref for _model, ref in models if ref}
+    if len(refs) > 1:
+        raise ValueError("主室入口化学焓基准不兼容。")
+    if CANTERA_AVAILABLE:
+        gas = _get_gas(_fuel_from_compositions(*(stream.composition for stream in streams)))
+        active = gas_model_identity(gas)
+        for stream, (model, ref) in zip(streams, models):
+            _dict_to_Y(gas, stream.composition)
+            for key in ("mechanism", "phase", "mechanism_sha256", "eos"):
+                if model.get(key) and model[key] != active.get(key):
+                    raise ValueError(f"{stream.name}: 保存燃气身份与主室所选模型不一致：{key}。")
+            if ref and ref != active["enthalpy_reference_id"]:
+                raise ValueError(f"{stream.name}: 化学焓基准与主室模型不一致。")
+    return {"status": "complete" if all(statuses) else "incomplete",
+            "source_ports": [stream.name for stream in streams],
+            "mass_flow_kg_s": total,
+            "h_mixed_Jkg": math.fsum(stream.mass_flow * stream.enthalpy for stream in streams) / total,
+            "note": "采用两股保存组成与焓；旧接口缺少模型身份时保留缺失标识。"}
 
 
 # =========================================================
@@ -730,6 +850,13 @@ def _cantera_chamber(
     efficiency < 1 时按燃烧温升效率折减温度（见 chamber_equilibrium 文档）。
     """
     checkpoint()
+    if (not all(math.isfinite(v) and v > 0 for v in (ox_mdot, fuel_mdot, ox_T, fuel_T, pressure))
+            or not math.isfinite(heat_loss_W) or heat_loss_W < 0
+            or not math.isfinite(efficiency) or not 0 < efficiency <= 1):
+        raise ValueError("主室入口要求正有限流量、温度、压力及非负有限热汇。")
+    for value in (ox_enthalpy, fuel_enthalpy):
+        if value is not None and (isinstance(value, bool) or not math.isfinite(value)):
+            raise ValueError("主室入口比焓必须是有限数值。")
     gas = _get_gas(_fuel_from_compositions(ox_comp, fuel_comp))
     mdot_total = ox_mdot + fuel_mdot
     f_ox   = ox_mdot   / max(mdot_total, 1e-9)
@@ -811,6 +938,9 @@ def _cantera_turbine(
     gas.TPY = state.temperature, state.pressure, Y
     h_in = gas.enthalpy_mass
     s_in = gas.entropy_mass
+    if state.model and (not math.isfinite(state.enthalpy) or
+                        not math.isclose(h_in, state.enthalpy, rel_tol=1e-8, abs_tol=0.05)):
+        raise ValueError("涡轮入口保存焓与同一模型下的 T/P/Y 不一致；不能静默重建并覆盖。")
 
     # 等熵膨胀到排气压力（冻结组分）
     gas.SP = s_in, p_exhaust
@@ -834,6 +964,7 @@ def _cantera_turbine(
         "composition": _Y_to_dict(gas),
         "mechanism": gas_data_filename(gas),
         "phase": gas.name,
+        "gas_state": _gas_to_state(gas, p_exhaust),
     }
 
 
@@ -921,6 +1052,10 @@ def _gas_to_state(gas: "ct.Solution", pressure: float) -> GasState:
         thermo_extrapolation=extrapolation,
         thermo_range=gas_temperature_applicability(gas),
         gas_model=gas.thermo_model,
+        density=float(gas.density), cv=float(gas.cv_mass),
+        sound_speed=float(gas.sound_speed), model=gas_model_identity(gas),
+        element_mass_fractions={element: float(gas.elemental_mass_fraction(element))
+                                for element in gas.element_names},
     )
 
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {buildCycleModel} from "../webapp/static/cycle-model.js";
 import {buildFlowModel} from "../webapp/static/flow-model.js";
+import {componentAnalysisItems} from "../webapp/static/results.js";
 
 // These are the original topology contracts emitted by cycle.py and gg_cycle.py.
 const topology = type => {
@@ -108,8 +109,8 @@ test("GG dual shaft uses separate component outputs and never relabels aggregate
   assert.equal(value(model,"gg_turbine_fuel","出口温度"),640);
   assert.equal(value(model,"gg_turbine_ox","燃气流量"),5);
   assert.equal(value(model,"gg_turbine_fuel","燃气流量"),3);
-  assert.deepEqual(node(model,"gg_turbine_ox").states,[]);
-  assert.deepEqual(node(model,"gg_turbine_fuel").states,[]);
+  assert.deepEqual(node(model,"gg_turbine_ox").states.map(item=>item.id),["gg_outlet"]);
+  assert.deepEqual(node(model,"gg_turbine_fuel").states.map(item=>item.id),["gg_outlet"]);
   assert.match(model.notes.join(" "),/G06.*总量.*并非.*混合温度/);
   assert.ok(edge(model,"gas_generator","gg_turbine_ox"));
   assert.ok(edge(model,"gas_generator","gg_turbine_fuel"));
@@ -130,6 +131,36 @@ test("metrics preserve correct display units and distinguish main-nozzle thrust 
   assert.equal(value(model,"gg_exhaust_nozzle","出口温度"),null);
   assert.equal(model.summary.find(item=>item.label==="当前环境总推力").value,2453);
   assert.equal(node(model,"ox_pump").metrics.find(item=>item.label==="出口压力").unit,"MPa");
+});
+
+test("canonical SI wins conflicting engineering aliases consistently with the component page",()=>{
+  const result=fixture(),c=result.calculation.components;
+  c.ox_pump.outputs={power_W:37e6,power_MW:99,p_out_Pa:70e6,p_out_MPa:7,p_out_bar:100};
+  c.cooling_channel.outputs={heat_load_W:130e6,heat_load_MW:13};
+  c.ox_preburner.outputs={preburner_pressure_Pa:61e6,preburner_pressure_MPa:6};
+  Object.assign(c.ox_preburner_turbine.outputs,{turbine_power_W:37e6,turbine_power_MW:3.7});
+  delete result.calculation.states.lox_after_pump;delete result.calculation.states.ox_preburner_outlet;
+  const model=build(result),items=componentAnalysisItems(result);
+  for(const [id,label,key,expected,unit] of [["ox_pump","轴功率需求","power_W",37,"MW"],["ox_pump","出口压力","p_out_Pa",70,"MPa"],["cooling_channel","吸热量","heat_load_W",130,"MW"],["ox_preburner","出口压力","preburner_pressure_Pa",61,"MPa"],["ox_preburner_turbine","涡轮功率","turbine_power_W",37,"MW"]]){
+    assert.equal(value(model,id,label),expected);assert.equal(node(model,id).metrics.find(metric=>metric.label===label).unit,unit);
+    assert.equal(items.find(item=>item.id===id).fields.find(field=>field.key===key).value,expected);
+  }
+  c.ox_pump.outputs.power_W=NaN;c.ox_preburner_turbine.outputs.turbine_power_W=Infinity;
+  const fallback=build(result);assert.equal(value(fallback,"ox_pump","轴功率需求"),99);assert.equal(value(fallback,"ox_preburner_turbine","涡轮功率"),3.7);
+});
+
+test("saved dual GG outlets stay linked to their own temperatures and SI powers despite contradictory aliases",()=>{
+  const result=fixture("gg","dual_shaft"),c=result.calculation.components,s=result.calculation.states;
+  s.gg_turbine_ox_exhaust=state(.4e6,620,5);s.gg_turbine_fuel_exhaust=state(.35e6,640,3);
+  Object.assign(c.gg_turbine_ox.outputs,{turbine_power_W:4e6,turbine_power_MW:94});
+  Object.assign(c.gg_turbine_fuel.outputs,{p_out_Pa:.35e6,turbine_power_W:3e6,turbine_power_MW:93});
+  const model=build(result);
+  assert.equal(value(model,"gg_turbine_ox","出口温度"),620);assert.equal(value(model,"gg_turbine_fuel","出口温度"),640);
+  assert.equal(value(model,"gg_turbine_ox","涡轮功率"),4);assert.equal(value(model,"gg_turbine_fuel","涡轮功率"),3);
+  for(const side of ["ox","fuel"]){const linked=node(model,`gg_turbine_${side}`).states;assert.deepEqual(linked.map(item=>item.id),["gg_outlet",`gg_turbine_${side}_exhaust`]);assert.equal(linked[1].temperature,side==="ox"?620:640);assert.equal(linked[1].massFlow,side==="ox"?5:3);}
+  assert.match(model.notes.join(" "),/各自关联已保存的独立出口状态/);assert.doesNotMatch(model.notes.join(" "),/未保存两支路独立出口状态/);
+  delete s.gg_turbine_fuel_exhaust;c.gg_turbine_fuel=component({p_in_Pa:10e6});
+  const partial=build(result);assert.deepEqual(node(partial,"gg_turbine_fuel").states.map(item=>item.id),["gg_outlet"]);assert.equal(value(partial,"gg_turbine_fuel","出口温度"),null);assert.equal(value(partial,"gg_turbine_fuel","出口压力"),null);assert.equal(value(partial,"gg_turbine_fuel","燃气流量"),null);assert.match(partial.notes.join(" "),/仅一条支路保存独立出口/);
 });
 
 test("saved calculation inputs override submitted values and old records fall back to submitted inputs",()=>{
@@ -220,7 +251,10 @@ test("nonfinite and numeric-string values stay missing while real zero is preser
   result.calculation.components.gg_turbine_ox=component({p_in_Pa:Infinity,p_out_Pa:"400000",T_exhaust_K:NaN,mass_flow_kgs:0,turbine_power_W:-Infinity,shaft_speed_rpm:null});
   result.calculation.summary.thrust_N=Infinity;
   const model=build(result);
-  assert.deepEqual(node(model,"gg_turbine_ox").metrics.map(item=>item.value),[null,null,null,0,null,null]);
+  // The valid shared inlet is now linked; it cannot supply the missing outlet.
+  assert.deepEqual(node(model,"gg_turbine_ox").metrics.map(item=>item.value),[10,null,null,0,null,null]);
+  delete result.calculation.states.gg_outlet;
+  assert.deepEqual(node(build(result),"gg_turbine_ox").metrics.map(item=>item.value),[null,null,null,0,null,null]);
   assert.equal(model.summary.find(item=>item.label==="当前环境总推力").value,null);
   assert.match(edge(model,"gas_generator","gg_turbine_ox").label,/0 kg\/s/);
 });

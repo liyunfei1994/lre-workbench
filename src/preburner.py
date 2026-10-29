@@ -30,7 +30,7 @@ V5 历史记录（保留作参考）：
 from __future__ import annotations
 
 from core import ComponentResult, FlowState, ValidationError, _check_range
-from thermo import GasState, combustion_equilibrium
+from thermo import GasState, combustion_equilibrium, gas_flow_metadata
 
 
 class Preburner:
@@ -139,14 +139,22 @@ class Preburner:
                     if self.ox_enthalpy is None else self.ox_enthalpy)
         h_in_liquid_ref = (self.mdot_fuel * h_fuel + self.mdot_ox * h_ox) / mdot
 
+        comb.state_basis = {"kind": "reservoir_approximation", "pressure": "chamber_reservoir",
+                            "temperature": "chamber_reservoir", "enthalpy": "thermodynamic",
+                            "velocity_m_s": None,
+                            "reason": "零维预燃室 HP 平衡储腔状态；未解析出口速度，未进行总静转换。"}
+        comb.source_ports = [f"{self.name}:oxidizer_inlet", f"{self.name}:fuel_inlet"]
+
         combustion_flow_state = FlowState(
             name=f"{self.name}_outlet",
             pressure=self.pressure,
             temperature=t_comb,
             mass_flow=mdot,
             enthalpy=h_out,
+            density=comb.density,
             composition=comb.composition,
             metadata={
+                **gas_flow_metadata(comb),
                 "phi":           self.phi,
                 "fuel_fraction": fuel_frac,
                 "gamma":         gamma,
@@ -189,6 +197,14 @@ class Preburner:
                 f"热力学来源: {comb.source}",
                 "本卡片仅表示预燃室燃烧 (HP) 状态；涡轮膨胀由独立的 Turbine 部件给出。",
             ],
+            profile={"inlet_handoff": {
+                "schema_version": 1, "model": dict(comb.model),
+                "fuel_species": self.fuel_species, "oxidizer_species": "o2" if self.fuel_species == "c12h26" else "O2",
+                "fuel": {"mass_flow_kg_s": self.mdot_fuel, "h_Jkg": h_fuel,
+                         "composition_mass_fractions": {self.fuel_species: 1.0}},
+                "oxidizer": {"mass_flow_kg_s": self.mdot_ox, "h_Jkg": h_ox,
+                             "composition_mass_fractions": {"o2" if self.fuel_species == "c12h26" else "O2": 1.0}},
+                "note": "纯推进剂支路的真实流体焓已对齐所保存的化学参考；不是常温入口替换。"}},
         )
 
         # 保留接口兼容：旧代码可能从 self.combustion_state 读

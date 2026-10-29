@@ -166,7 +166,7 @@ export function parameterSearchText(field, inputs, groupTitle = "") {
     view.provenance?.label, view.provenance?.detail, groupTitle].join(" ").toLocaleLowerCase();
 }
 
-export function renderParameterField(field, inputs) {
+export function renderParameterField(field, inputs, {compact = false} = {}) {
   const view = parameterPresentation(field, inputs), value = parameterValue(view, inputs);
   if(view.read_only && view.key==="cooling_bartz_mode")return `<div data-field="cooling_bartz_mode" data-role="model_assumption"><span class="parameter-label">${escape(view.label)}</span>${renderCoolingModel(inputs)}</div>`;
   const virtualMode = view.virtual && view.key === PREBURNER_MODE_KEY;
@@ -181,7 +181,15 @@ export function renderParameterField(field, inputs) {
     options.map(choice => `<option value="${escape(choice.value)}"${String(value) === String(choice.value) ? " selected" : ""}>${escape(choice.label)}</option>`).join("") + "</select>" :
     view.multiline ? `<textarea rows="5" data-input="${escape(view.key)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>${escape(value)}</textarea>` :
     `<input type="${typeof view.default === "number" ? "number" : "text"}"${typeof view.default === "number" ? ' step="any" required' : ""} data-input="${escape(view.key)}" value="${escape(value)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>`;
-  return `<label data-field="${escape(view.key)}" data-role="${escape(view.role || "")}" title="${escape(view.full_label || view.label)}"><span class="parameter-label">${escape(view.label)}${view.unit ? ` <span class="unit">[${escape(view.unit)}]</span>` : ""}</span>${view.role_label ? `<span class="parameter-role">${escape(view.role_label)}</span>` : ""}${control}${help}${evidence}${legacy ? '<span class="parameter-legacy-note" role="note">当前方案保留旧版自由分流模式与参数。选择指定温度或指定混合比后才转换；加载时不会自动转换。</span>' : ""}</label>${renderWallDatasetInfo(view,inputs)}`;
+  return `<label data-field="${escape(view.key)}" data-role="${escape(view.role || "")}" title="${escape(view.full_label || view.label)}"><span class="parameter-label">${escape(view.label)}${view.unit ? ` <span class="unit">[${escape(view.unit)}]</span>` : ""}</span>${view.role_label && !compact ? `<span class="parameter-role">${escape(view.role_label)}</span>` : ""}${control}${compact ? "" : help + evidence}${legacy ? '<span class="parameter-legacy-note" role="note">当前方案保留旧版自由分流模式与参数。选择指定温度或指定混合比后才转换；加载时不会自动转换。</span>' : ""}</label>${renderWallDatasetInfo(view,inputs)}`;
+}
+
+function renderParameterNotes(fields, inputs) {
+  const notes = fields.map(field => parameterPresentation(field, inputs)).filter(view => view.help || view.provenance?.label);
+  if (!notes.length) return "";
+  return `<details class="parameter-notes"><summary>参数说明与依据</summary><dl>${notes.map(view =>
+    `<dt>${escape(view.label)}</dt><dd>${view.help ? `<span class="field-help" id="parameter-help-${escape(view.key)}">${escape(view.help)}</span>` : ""}${view.provenance?.label ? `<span class="field-provenance" title="${escape(view.provenance.detail || view.provenance.label)}">依据：${escape(view.provenance.label)}</span>` : ""}</dd>`
+  ).join("")}</dl></details>`;
 }
 
 export function parameterGroups(groups, inputs) {
@@ -218,7 +226,10 @@ export function renderParameterGroups(groups, inputs, expanded = new Set()) {
     for (const field of group.fields) {
       (parameterPresentation(field, inputs).role === "initial_guess" ? seeds : field.advanced ? numeric : standard).push(field);
     }
-    const advanced = seeds.length ? `<details class="parameter-initials" data-initials="${escape(group.id)}"${expanded.has(group.id) ? " open" : ""}><summary>高级设置 · 迭代初值（${seeds.length}）</summary><p class="fine">初值用于启动求解。相同物理解分支充分收敛后，结果应在容差范围内一致。</p>${seeds.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
+    const initialHelp = group.initials_help || "用于启动求解，折叠仅为简化日常操作。初值会影响收敛过程；同一物理解分支充分收敛后，结果应在容差范围内一致。";
+    const advanced = !seeds.length ? "" : group.initials_inline
+      ? `<section class="parameter-subsection parameter-initials"><h3>${escape(group.initials_title || "启动估计")}</h3><p class="fine">${escape(initialHelp)}</p>${seeds.map(field => renderParameterField(field, inputs, {compact:true})).join("")}${renderParameterNotes(seeds, inputs)}</section>`
+      : `<details class="parameter-initials" data-initials="${escape(group.id)}"${expanded.has(group.id) ? " open" : ""}><summary>高级设置 · 迭代初值（${seeds.length}）</summary><p class="fine">${escape(initialHelp)}</p>${seeds.map(field => renderParameterField(field, inputs)).join("")}</details>`;
     const numericKey = group.id + "-numerics";
     const numericOnly=numeric.every(field=>field.role==="solver_setting");
     const advancedTitle=group.advanced_title || (numericOnly ? "数值分辨率" : "补充设置");
@@ -226,23 +237,27 @@ export function renderParameterGroups(groups, inputs, expanded = new Set()) {
     const numerics = numeric.length ? `<details class="parameter-initials" data-initials="${escape(numericKey)}"${expanded.has(numericKey) ? " open" : ""}><summary>高级设置 · ${escape(advancedTitle)}（${numeric.length}）</summary><p class="fine">${escape(advancedHelp)}</p>${numeric.map(field => renderParameterField(field, inputs)).join("")}</details>` : "";
     const contexts=Array.isArray(group.configuration_context) ? group.configuration_context : group.configuration_context ? [group.configuration_context] : [];
     const contextText=contexts.map(context=>`<p class="fine wall-configuration-context">${escape(context.label)}：${escape(context.labels?.[inputs[context.key]] || inputs[context.key] || "未指定")}。${escape(context.note)}</p>`).join("");
-    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.description ? `<p class="fine">${escape(group.description)}</p>` : ""}${renderChannelGeometryInfo(group, inputs)}${renderParameterSections(group, standard, inputs)}${contextText}${advanced}${numerics}</fieldset>`;
+    const compact = group.compact === true || ["design", "inlet"].includes(group.id);
+    const controls = renderParameterSections(group, standard, inputs, {compact});
+    const notes = compact ? renderParameterNotes(standard, inputs) : "";
+    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.summary ? `<p class="fine">${escape(group.summary)}</p>` : ""}${group.description && !compact ? `<p class="fine">${escape(group.description)}</p>` : ""}${renderChannelGeometryInfo(group, inputs)}${controls}${contextText}${notes}${advanced}${numerics}</fieldset>`;
   }).join("");
 }
 
-function renderParameterSections(group, fields, inputs) {
-  if (!Array.isArray(group.sections)) return fields.map(field=>renderParameterField(field,inputs)).join("");
+function renderParameterSections(group, fields, inputs, options = {}) {
+  const render = field => renderParameterField(field, inputs, options);
+  if (!Array.isArray(group.sections)) return fields.map(render).join("");
   const rendered=new Set(), sections=[];
   for (const section of group.sections) {
     const keys=new Set(Array.isArray(section.keys)?section.keys:[]);
     const selected=fields.filter(field=>keys.has(field.key)&&!rendered.has(field.key));
     if (!selected.length) continue;
     selected.forEach(field=>rendered.add(field.key));
-    sections.push(`<section class="parameter-subsection" data-parameter-section="${escape(section.id)}"><h3>${escape(section.title)}</h3>${section.description?`<p class="fine">${escape(section.description)}</p>`:""}${selected.map(field=>renderParameterField(field,inputs)).join("")}</section>`);
+    sections.push(`<section class="parameter-subsection" data-parameter-section="${escape(section.id)}"><h3>${escape(section.title)}</h3>${section.description?`<p class="fine">${escape(section.description)}</p>`:""}${selected.map(render).join("")}</section>`);
   }
   // Search filtering and future schema additions must never drop an otherwise
   // visible control merely because it is not assigned to a subsection yet.
-  return sections.join("")+fields.filter(field=>!rendered.has(field.key)).map(field=>renderParameterField(field,inputs)).join("");
+  return sections.join("")+fields.filter(field=>!rendered.has(field.key)).map(render).join("");
 }
 
 export function renderParameterEvidence(evidence, fields = []) {

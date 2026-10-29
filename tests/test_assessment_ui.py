@@ -24,6 +24,10 @@ from tests.cooling_profile_fixture import cooling_profile
 
 def converged_but_infeasible_result():
     inputs = EngineInputs()
+    # This fixture explicitly tests exceeding an enabled scenario limit.
+    # The production default leaves the wall-temperature constraint unset.
+    inputs.cooling_wall_temp_limit_status = "provisional"
+    inputs.cooling_wall_temp_limit_K = 800.0
     inputs.turb_ox_rotor_material = "sx500"
     inputs.turb_ox_stator_material = "sx300"
     summary = {

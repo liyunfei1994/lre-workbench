@@ -25,7 +25,8 @@ const FLOW_IDS = {
   ox_preburner_turbine:["ox_preburner_outlet","ox_turbine_exhaust"],
   fuel_preburner_turbine:["fuel_preburner_outlet","fuel_turbine_exhaust"],
   gas_generator:["gg_outlet"],gg_turbine:["gg_outlet","gg_turbine_exhaust"],
-  gg_turbine_ox:[],gg_turbine_fuel:[],main_chamber:["main_chamber"],nozzle:[],gg_exhaust_nozzle:[],
+  gg_turbine_ox:["gg_outlet","gg_turbine_ox_exhaust"],gg_turbine_fuel:["gg_outlet","gg_turbine_fuel_exhaust"],
+  main_chamber:["main_chamber"],nozzle:[],gg_exhaust_nozzle:[],
 };
 const DEFS = {
   lox_tank:["液氧贮箱","tank","ox"],fuel_tank:["燃料贮箱","tank","fuel"],
@@ -106,18 +107,18 @@ export function buildCycleModel(result, flow = {}, components = []) {
     const kindType=type || definition[1];
     if (kindType==="tank") metrics.push(metric("压力",end.pressure,"MPa"),metric("温度",end.temperature,"K"),metric("总供给流量",end.massFlow,"kg/s"));
     if (kindType==="pump") metrics.push(
-      metric("出口压力",first(end.pressure,info.p_out_MPa,scale(info.p_out_Pa,1e-6),scale(info.p_out_bar,.1)),"MPa"),
+      metric("出口压力",first(end.pressure,scale(info.p_out_Pa,1e-6),info.p_out_MPa,scale(info.p_out_bar,.1)),"MPa"),
       metric("出口温度",first(end.temperature,info.T_out_K),"K"),metric("总流量",end.massFlow,"kg/s"),
-      metric("轴功率需求",first(info.power_MW,scale(info.power_W,1e-6)),"MW"),metric("转速",info.nr_rpm,"rpm"));
+      metric("轴功率需求",first(scale(info.power_W,1e-6),info.power_MW),"MW"),metric("转速",info.nr_rpm,"rpm"));
     if (kindType==="cooling") metrics.push(metric("出口压力",first(end.pressure,scale(info.P_out_Pa,1e-6)),"MPa"),
       metric("出口温度",first(end.temperature,info.T_out_K),"K"),metric("冷却流量",end.massFlow,"kg/s"),
-      metric("吸热量",first(info.heat_load_MW,scale(info.heat_load_W,1e-6)),"MW"));
-    if (kindType==="preburner") metrics.push(metric("出口压力",first(end.pressure,info.preburner_pressure_MPa,scale(info.preburner_pressure_Pa,1e-6)),"MPa"),
+      metric("吸热量",first(scale(info.heat_load_W,1e-6),info.heat_load_MW),"MW"));
+    if (kindType==="preburner") metrics.push(metric("出口压力",first(end.pressure,scale(info.preburner_pressure_Pa,1e-6),info.preburner_pressure_MPa),"MPa"),
       metric("出口温度",first(end.temperature,info.T_combustion_K),"K"),metric("燃气流量",first(end.massFlow,info.mdot_total_kgs),"kg/s"));
     if (kindType==="turbine") metrics.push(metric("入口压力",first(scale(info.p_in_Pa,1e-6),inlet.pressure),"MPa"),
       metric("出口压力",first(scale(info.p_out_Pa,1e-6),end.pressure),"MPa"),
       metric("出口温度",first(info.T_exhaust_K,end.temperature),"K"),metric("燃气流量",first(info.mass_flow_kgs,end.massFlow),"kg/s"),
-      metric("涡轮功率",first(info.turbine_power_MW,scale(info.turbine_power_W,1e-6)),"MW"),metric("转速",info.shaft_speed_rpm,"rpm"));
+      metric("涡轮功率",first(scale(info.turbine_power_W,1e-6),info.turbine_power_MW),"MW"),metric("转速",info.shaft_speed_rpm,"rpm"));
     if (kindType==="chamber") metrics.push(metric("室压",first(end.pressure,scale(summary.chamber_pressure_Pa,1e-6)),"MPa"),
       metric("温度",first(end.temperature,info.T_chamber_K),"K"),metric("主室流量",first(end.massFlow,info.mdot_chamber_kgs),"kg/s"));
     if (kindType==="nozzle") metrics.push(metric("当前环境推力",scale(info.thrust_N,.001),"kN"),metric("真空推力",scale(info.thrust_vac_N,.001),"kN"),
@@ -178,7 +179,8 @@ export function buildCycleModel(result, flow = {}, components = []) {
           connect(id,"gg_exhaust_nozzle","fuelgas",`${text}涡轮排气`,out(id).mass_flow_kgs);
           shaft(id,pump,`${text}：独立涡轮驱动对应泵`);
         }
-        notes.push("双轴 GG 共用燃气入口与背压，燃气并联分流。两涡轮卡片各用自身部件结果；G06 汇总排气记录的流量为总量、温度取液氧侧涡轮出口，并非两股燃气混合温度，未附到任一分支涡轮。 ");
+        const branchOutlets=["gg_turbine_ox_exhaust","gg_turbine_fuel_exhaust"].filter(id=>states.has(id));
+        notes.push(`双轴 GG 共用燃气入口与背压，燃气并联分流。两涡轮卡片各用自身部件结果；${branchOutlets.length===2?"各自关联已保存的独立出口状态。":branchOutlets.length?"仅一条支路保存独立出口，另一出口不由汇总值补齐。":"本记录未保存两支路独立出口状态。"}共用入口节点的流量为总量，不能作为任一支路流量。${states.has("gg_turbine_exhaust")?"G06 汇总排气记录的流量为总量、温度取液氧侧涡轮出口，并非两股燃气混合温度，未附到任一分支涡轮。":""}`);
       }
       nodes.push(node("gg_exhaust_nozzle"));
       notes.push("GG 供料在冷却前从两泵出口分出；涡轮排气独立排出，不进入主燃烧室。涡轮功率为机械损失折减前数值。 ");

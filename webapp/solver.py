@@ -188,10 +188,24 @@ def _calculate(values, progress, input_warnings):
                                       [str(w.message) for w in caught])),
     }, missing)
     output["nonfinite_fields"] = missing
+    from gas_handoff import capture_gas_handoff
+    output["gas_handoff"] = capture_gas_handoff(output)
     from webapp.nozzle_geometry import nozzle_geometry_view
     output["nozzle_geometry"] = nozzle_geometry_view(output)
     from webapp.pump_geometry import pump_geometry_view
     output["pump_geometry"] = pump_geometry_view(output)
+    from webapp.injector_design import injector_design_view
+    output["injector_design"] = injector_design_view(output)
+    from webapp.turbine_geometry import turbine_geometry_view
+    output["turbine_geometry"] = turbine_geometry_view(output)
+    import thermo
+    from webapp.turbine_design import capture_turbine_gas_properties, turbine_design_view
+    output["turbine_gas_properties"] = capture_turbine_gas_properties(output, thermo)
+    output["turbine_design"] = turbine_design_view(output)
+    from webapp.result_consistency import result_consistency_view
+    output["result_consistency"] = result_consistency_view(output)
+    from webapp.steady_design import steady_design_view
+    output["steady_design"] = steady_design_view(output)
     if missing:
         output["warnings"].append("部分结果不是有限数值，已标为缺失；请检查计算和工程警告。")
     json.dumps(output, allow_nan=False)

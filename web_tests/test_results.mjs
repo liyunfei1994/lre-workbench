@@ -183,17 +183,17 @@ test("system view retains cycle quantities and leaves detailed design in the ori
   assert.deepEqual(input,before,"presentation must not delete details or change immutable results");
 });
 
-test("component aliases prefer valid engineering values without discarding a usable fallback", () => {
+test("component aliases prefer saved SI quantities without discarding a usable fallback", () => {
   const input=record();
   input.result.calculation.components.ox_pump.outputs={power_W:2000000,power_MW:null,
-    p_in_Pa:1000000,p_in_MPa:1,delta_p_Pa:5000000};
+    p_in_Pa:1000000,p_in_MPa:999,delta_p_Pa:5000000};
   const fields=componentAnalysisItems(input.result).find(item=>item.id==="ox_pump").fields;
   assert.equal(fields.find(field=>field.key==="power_W").value,2);
   assert(!fields.some(field=>field.key==="power_MW"),"null preferred alias must not shadow the valid fallback");
   assert.equal(fields.find(field=>field.key==="delta_p_Pa").unit,"MPa");
   assert.equal(fields.find(field=>field.key==="delta_p_Pa").value,5);
-  assert(!fields.some(field=>field.key==="p_in_Pa"));
-  assert.equal(fields.find(field=>field.key==="p_in_MPa").value,1);
+  assert(!fields.some(field=>field.key==="p_in_MPa"));
+  assert.equal(fields.find(field=>field.key==="p_in_Pa").value,1);
 });
 
 test("GG labels and nozzle velocity describe the stored quantities accurately", () => {

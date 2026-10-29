@@ -220,8 +220,9 @@ class EngineInputs:
     film_effectiveness_initial: float = 0.9  # 兼容值，当前不生效
     film_decay_length_m: float = 0.0         # 兼容值，当前不生效
 
-    # ---------- 主室热反馈初值（不是焓参考态，也不是实机测量值）----------
-    # 启用热反馈时由求解结果更新；关闭该反馈时成为固定的性能近似输入。
+    # ---------- 燃气状态启动估计（数值初始化，不是设计约束）----------
+    # 无热侧解时初始化准一维冷却/喉部；当前 Cantera 主室不使用它们指定最终状态。
+    # 预算冷却不使用这三个初值。旧经验部件接口仍保留字段，不能与生产热化学路径混同。
     chamber_temp_guess: float = 3550.0  # 主室温度初值 [K]
     chamber_gamma: float = 1.18         # 比热比初值 [-]
     molar_mass: float = 21.0            # 平均摩尔质量初值 [kg/kmol]
@@ -352,6 +353,29 @@ class EngineInputs:
     # 用户指定级数（0 = 自动按 U/C0 选）
     turb_ox_n_stages_user:   int = 0
     turb_fuel_n_stages_user: int = 0
+
+    # Explicit interface convention; historical node states are never relabelled.
+    turbine_boundary_basis: str = "unspecified"
+    turbine_meanline_mode: str = "disabled"
+    turb_ox_meanline_flow_coefficient: float = 0.60
+    turb_fuel_meanline_flow_coefficient: float = 0.60
+    turb_ox_stage_work_fractions: str = "[]"
+    turb_fuel_stage_work_fractions: str = "[]"
+
+    # 轴流涡轮概念流道；只影响几何快照，不改变循环焓降或功率。
+    # 系统节点 P/T 在本几何中按静态参考量使用，并非已确认的 CFD 边界。
+    ox_turbine_inlet_flow_coefficient: float = 0.60   # cm_in / U_mean
+    ox_turbine_outlet_flow_coefficient: float = 0.70  # cm_out / U_mean
+    ox_turbine_stator_axial_chord_ratio: float = 0.12 # L_stator / D_mean
+    ox_turbine_rotor_axial_chord_ratio: float = 0.15  # L_rotor / D_mean
+    ox_turbine_row_gap_ratio: float = 0.04           # gap / D_mean
+    ox_turbine_geometry_state_basis: str = "system_pt_as_static"
+    fuel_turbine_inlet_flow_coefficient: float = 0.60
+    fuel_turbine_outlet_flow_coefficient: float = 0.70
+    fuel_turbine_stator_axial_chord_ratio: float = 0.12
+    fuel_turbine_rotor_axial_chord_ratio: float = 0.15
+    fuel_turbine_row_gap_ratio: float = 0.04
+    fuel_turbine_geometry_state_basis: str = "system_pt_as_static"
 
     # ---------- 涡轮叶尖速度上限（材料强度约束）──────────
     # 用户给定的速度筛查限值；不由材料名自动得到，也不等于转子强度验证。
@@ -774,10 +798,45 @@ class EngineInputs:
             ("turb_fuel_u_max_ms（富燃涡轮 U_max）", self.turb_fuel_u_max_ms),
         ]:
             _check_range(nm, val, lo=100.0, hi=700.0)
-        if not isinstance(self.turb_ox_n_stages_user, int):
-            self.turb_ox_n_stages_user = int(self.turb_ox_n_stages_user)
-        if not isinstance(self.turb_fuel_n_stages_user, int):
-            self.turb_fuel_n_stages_user = int(self.turb_fuel_n_stages_user)
+        if self.turbine_boundary_basis not in ("unspecified", "total_to_total"):
+            raise ValidationError("涡轮接口状态约定仅支持 unspecified 或 total_to_total。")
+        if self.turbine_meanline_mode not in ("disabled", "equal_work", "custom_work"):
+            raise ValidationError("涡轮均径初选模式无效。")
+        for side in ("ox", "fuel"):
+            coefficient = getattr(self, f"turb_{side}_meanline_flow_coefficient")
+            if isinstance(coefficient, bool) or not isinstance(coefficient, (int, float)) or not math.isfinite(coefficient):
+                raise ValidationError(f"turb_{side}_meanline_flow_coefficient 须为有限数值。")
+            _check_range(f"turb_{side}_meanline_flow_coefficient",
+                         coefficient, lo=0.01, hi=5.0)
+            # Validate the distribution even while disabled, so invalid drafts
+            # cannot silently acquire a different interpretation when enabled.
+            import json
+            try:
+                fractions = json.loads(getattr(self, f"turb_{side}_stage_work_fractions"))
+                if not isinstance(fractions, list) or len(fractions) > 6:
+                    raise ValueError
+                if any(isinstance(x, bool) or not isinstance(x, (float, int))
+                       or not 0 < x <= 1 for x in fractions):
+                    raise ValueError
+                if fractions and abs(sum(fractions) - 1.0) > 1e-8:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise ValidationError(f"turb_{side}_stage_work_fractions 须为正数 JSON 数组，比例之和为 1，最多 6 级；未指定时填 []。") from None
+            key = f"turb_{side}_n_stages_user"
+            value = getattr(self, key)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not 0 <= value <= 6 or int(value) != value):
+                raise ValidationError(f"{key} 必须是 0–6 的整数，0 表示采用系统推荐级数。")
+            setattr(self, key, int(value))
+            for suffix in ("inlet_flow_coefficient", "outlet_flow_coefficient",
+                           "stator_axial_chord_ratio", "rotor_axial_chord_ratio", "row_gap_ratio"):
+                key = f"{side}_turbine_{suffix}"
+                value = getattr(self, key)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not 0 < value < float("inf")):
+                    raise ValidationError(f"{key} 必须为有限正数。")
+            if getattr(self, f"{side}_turbine_geometry_state_basis") != "system_pt_as_static":
+                raise ValidationError(f"{side}_turbine_geometry_state_basis 仅支持 system_pt_as_static。")
         _check_range("turb_ox_n_stages_user（富氧级数，0=自动）",
                      float(self.turb_ox_n_stages_user), lo=0, hi=6)
         _check_range("turb_fuel_n_stages_user（富燃级数，0=自动）",

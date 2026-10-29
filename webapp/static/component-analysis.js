@@ -78,7 +78,8 @@ function primaryFields(item) {
 
 function kpis(item) {
   const fields=primaryFields(item);
-  return fields.length ? `<div class="ca-kpis">${fields.map(field=>`<div class="ca-kpi"><span>${escape(field.label)}</span><strong>${escape(format(field.value))}<small>${escape(unitText(field))}</small></strong><span class="ca-symbol">${escape(symbolFor(item,field))}</span></div>`).join("")}</div>` : "";
+  const handoff=item.injectorDesign?`<div class="ca-design-link"><span>三处喷注位置、主喷注单元尺寸和回算依据统一在喷注器初步设计中查看。</span><button type="button" data-ca-injector-design="${escape(item.id)}">喷注器初步设计 →</button></div>`:item.category.id==="shaft"?`<div class="ca-design-link"><span>本页查看循环中的部件结果；设计输入、真实燃气物性与一维初选统一在涡轮总体设计中查看。</span><button type="button" data-ca-turbine-design="${escape(item.id)}">CFturbo 设计任务书 →</button></div>`:"";
+  return handoff+(fields.length ? `<div class="ca-kpis">${fields.map(field=>`<div class="ca-kpi"><span>${escape(field.label)}</span><strong>${escape(format(field.value))}<small>${escape(unitText(field))}</small></strong><span class="ca-symbol">${escape(symbolFor(item,field))}</span></div>`).join("")}</div>` : "");
 }
 
 function stateBlock(title, fields, empty) {
@@ -176,6 +177,8 @@ function inspector(item, selected) {
 
 export function renderComponentWorkspace(source) {
   const items=prepareItems(source);
+  const ffsc=items.some(i=>i.id==="ox_preburner")&&items.some(i=>i.id==="fuel_preburner");
+  items.forEach(i=>{i.injectorDesign=ffsc&&["injector","main_chamber","ox_preburner","fuel_preburner"].includes(i.id);});
   if (!items.length) return '<section class="ca-workspace ca-empty-workspace" aria-label="部件性能分析"><span class="ca-empty-mark" aria-hidden="true">▤</span><h2>暂无部件性能结果</h2><p>当前计算记录未返回可展示的系统部件。完成设计点计算后，可在此查看各部件的性能量。</p></section>';
   const categories=[...CATEGORIES,...(items.some(item=>item.category.id==="other") ? [OTHER_CATEGORY] : [])];
   return `<section class="ca-workspace" aria-label="部件性能分析"><div class="ca-toolbar"><div class="ca-toolbar-label"><span class="ca-workspace-mark" aria-hidden="true">▤</span><b>部件工作区</b><span>${items.length} 个部件</span></div><span class="ca-toolbar-context">稳态设计点 · 系统计算结果</span></div><div class="ca-categories" role="group" aria-label="部件类别"><button type="button" class="ca-category is-selected" data-ca-category="all" aria-pressed="true">全部<span>${items.length}</span></button>${categories.map(category=>{
@@ -190,7 +193,7 @@ export function renderComponentWorkspace(source) {
 const mountHandlers=new WeakMap();
 
 /** Call after replacing host.innerHTML. The host persists; no detached panel listener survives a render. */
-export function mountComponentWorkspace(host, recordId) {
+export function mountComponentWorkspace(host, recordId, {onTurbineDesign,onInjectorDesign}={}) {
   if (!host?.querySelector || !host.dataset) return;
   const previous=mountHandlers.get(host);
   if (previous) host.removeEventListener("click",previous);
@@ -233,6 +236,10 @@ export function mountComponentWorkspace(host, recordId) {
   update();
   if (!buttons.length) return;
   const handler=event=>{
+    const injector=event.target?.closest?.("[data-ca-injector-design]");
+    if(injector?.dataset?.caInjectorDesign && workspace.contains(injector)){onInjectorDesign?.(injector.dataset.caInjectorDesign);return;}
+    const handoff=event.target?.closest?.("[data-ca-turbine-design]");
+    if(handoff?.dataset?.caTurbineDesign && workspace.contains(handoff)){onTurbineDesign?.(handoff.dataset.caTurbineDesign);return;}
     const target=event.target?.closest?.("[data-ca-category], [data-ca-object]");
     if (!target || !workspace.contains(target) || target.disabled) return;
     if (target.dataset.caCategory!=null) category=target.dataset.caCategory;

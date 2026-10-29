@@ -20,6 +20,25 @@ const fields = [mode,
 ];
 const groups=[{id:"pb",title:"预燃室",cycles:["ffsc"],fields}];
 
+test("numerical initialization is visible without nested folding and retains compact accessible explanations",()=>{
+  const inputs=Object.freeze({...base,chamber_temp_guess:3200,chamber_gamma:1.12,molar_mass:18});
+  const seeds=["chamber_temp_guess","chamber_gamma","molar_mass"].map(key=>({key,label:key,
+    default:inputs[key],role:"initial_guess",help:"首轮估计；最终由焓与组成计算",
+    visibility:{all:[{key:"cooling_bartz_mode",op:"gt",value:0}]}}));
+  const group={id:"solver",title:"数值求解",compact:true,initials_inline:true,
+    initials_title:"燃气状态启动估计",initials_help:"影响收敛过程",fields:seeds};
+  const html=renderParameterGroups(parameterGroups([group],inputs),inputs);
+  assert.match(html,/<section class="parameter-subsection parameter-initials">/);
+  assert.match(html,/燃气状态启动估计/);
+  assert.doesNotMatch(html,/data-initials="solver"|高级设置 · 迭代初值/);
+  for(const key of seeds.map(f=>f.key)){
+    assert.match(html,new RegExp(`data-input="${key}"`));
+    assert.equal(html.split(`id="parameter-help-${key}"`).length,2);
+  }
+  assert.deepEqual(parameterGroups([group],{...inputs,cooling_bartz_mode:0}),[]);
+  assert.equal(inputs.chamber_temp_guess,3200);
+});
+
 test("cooling model is read-only for routine designs and budget conversion is explicit",()=>{
   const group=[{id:"cooling",title:"再生冷却模型",fields:[{key:"cooling_bartz_mode",label:"当前冷却模型",read_only:true}]}];
   const modern=Object.freeze({...base,propellant_pair:"lox_methane"});

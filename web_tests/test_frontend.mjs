@@ -63,6 +63,10 @@ function harness(fetcher,{storage=memoryStorage()}={}) {
     mountCycleWorkspace() {},
     renderNozzleGeometry:()=>"geometry",mountNozzleGeometry:()=>()=>{},
     renderPumpGeometry:()=>"pump_geometry",mountPumpGeometry:()=>()=>{},
+    renderInjectorDesign:()=>"injector_design",mountInjectorDesign:()=>()=>{},
+    renderTurbineGeometry:()=>"turbine_geometry",mountTurbineGeometry:()=>()=>{},
+    renderTurbineDesign:()=>"turbine_design",mountTurbineDesign:()=>()=>{},
+    renderResultConsistency:()=>"consistency",
     mountSteadyWorkspace,
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, confirm: () => {confirmations++;return true;},
     FormData: class {}, console,
@@ -81,12 +85,36 @@ function harness(fetcher,{storage=memoryStorage()}={}) {
 
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => copy(data)});
 
-function navigationServer({account=user,projects=[project],records=[]}={}) {
+test("switching records clears previous quantities and a late response cannot overwrite the selected record",async()=>{
+  const pending=new Map();
+  const h=harness(url=>new Promise(resolve=>pending.set(url,resolve)));
+  const old=h.app.loadRecord("old");
+  pending.get("/api/jobs/old")(response({id:"old",project_id:"p1",result:{calculation:{summary:{temperature:500}}}}));await old;
+  const slow=h.app.loadRecord("slow");
+  assert.equal(h.app.state().resultRecord,null);
+  assert.match(h.nodes.get("result-context").textContent,/正在读取/);
+  const selected=h.app.loadRecord("selected");
+  pending.get("/api/jobs/selected")(response({id:"selected",project_id:"p1",result:{calculation:{summary:{temperature:800}}}}));await selected;
+  pending.get("/api/jobs/slow")(response({id:"slow",project_id:"p1",result:{calculation:{summary:{temperature:600}}}}));await slow;
+  assert.equal(h.app.state().resultRecord.id,"selected");
+  assert.equal(h.app.state().resultRecord.result.calculation.summary.temperature,800);
+});
+
+test("failed record selection leaves previous values cleared and explains the failed load",async()=>{
+  let fail=false;
+  const h=harness(async()=>{if(fail)throw new Error("offline");return response({id:"old",project_id:"p1",result:{calculation:{}}});});
+  await h.app.loadRecord("old");fail=true;
+  await assert.rejects(h.app.loadRecord("new"),/offline|服务/);
+  assert.equal(h.app.state().resultRecord,null);
+  assert.match(h.nodes.get("result-context").textContent,/读取失败/);
+});
+
+function navigationServer({account=user,projects=[project],records=[],uiInfo=info}={}) {
   const calls=[];
   const fetcher=async(url,options)=>{
     calls.push(url);assert.equal(options.method,"GET","Navigation must never save or run a calculation");
     if(url==="/api/auth/status")return response({initialized:true,user:account});
-    if(url==="/api/info")return response(info);
+    if(url==="/api/info")return response(uiInfo);
     if(url==="/api/projects")return response(projects);
     if(url==="/api/members")return response([]);
     if(url==="/api/jobs")return response(records);
@@ -102,7 +130,62 @@ function navigationServer({account=user,projects=[project],records=[]}={}) {
   return {fetcher,calls};
 }
 
-const navigationViews=["overview","topology","states","components","geometry","pump_geometry","log","history","shutdown","ignition","chilldown","feed","validation","transient","throttle"];
+const navigationViews=["overview","topology","states","components","geometry","pump_geometry","injector_design","turbine_geometry","log","history","shutdown","ignition","chilldown","feed","validation","transient","throttle"];
+const parameterNavigationInfo={...info,ui_schema:{...schema,groups:[
+  {id:"cycle",title:"循环方式",fields:[fields[0]]},
+  {id:"design",title:"设计目标与工况",fields:fields.slice(1)},
+  {id:"ffsc-only",title:"预燃室",cycles:["ffsc"],fields:[fields[1]]},
+]}};
+
+test("saved thermal group navigates to numerical settings after relocation without changing the case",async()=>{
+  const newInfo=copy(parameterNavigationInfo);
+  newInfo.ui_schema.groups.push({id:"solver",title:"数值求解",fields:[fields[3]]});
+  const storage=memoryStorage();
+  storage.setItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`,"thermo");
+  const server=navigationServer({uiInfo:newInfo}),h=harness(server.fetcher,{storage});
+  h.app.reset();await h.app.initialize();
+  assert.equal(h.nodes.get("parameter-group").value,"solver");
+  assert.equal(storage.getItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`),"solver");
+  assert.deepEqual(copy(h.app.state().draft),defaults);
+  assert.equal(h.app.state().dirty,false);
+});
+
+test("reload restores the selected parameter group without changing inputs or the analysis view",async()=>{
+  const server=navigationServer({uiInfo:parameterNavigationInfo}),first=harness(server.fetcher);
+  first.app.reset();await first.app.initialize();
+  assert.equal(first.nodes.get("parameter-group").value,"cycle");
+  first.nodes.get("parameter-group").value="design";first.nodes.get("parameter-group").onchange();
+  await first.app.chooseView("topology");
+  const reloaded=harness(server.fetcher,{storage:first.storage});reloaded.app.reset();await reloaded.app.initialize();
+  assert.equal(reloaded.nodes.get("parameter-group").value,"design");
+  assert.equal(reloaded.app.state().analysisView,"topology");
+  assert.deepEqual(copy(reloaded.app.state().draft),defaults);
+  assert.equal(reloaded.app.state().dirty,false);
+});
+
+test("parameter group memory is isolated by project and account",async()=>{
+  const other={...project,id:"p2"};
+  const server=navigationServer({uiInfo:parameterNavigationInfo,projects:[project,other]}),h=harness(server.fetcher);
+  h.app.reset();await h.app.initialize();
+  h.nodes.get("parameter-group").value="design";h.nodes.get("parameter-group").onchange();
+  await h.app.openProject(other.id);assert.equal(h.nodes.get("parameter-group").value,"cycle");
+  await h.app.openProject(project.id);assert.equal(h.nodes.get("parameter-group").value,"design");
+  const memberServer=navigationServer({uiInfo:parameterNavigationInfo,account:{...user,id:"u2"}});
+  const member=harness(memberServer.fetcher,{storage:h.storage});member.app.reset();await member.app.initialize();
+  assert.equal(member.nodes.get("parameter-group").value,"cycle");
+  assert.equal(h.storage.getItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`),"design");
+});
+
+test("removed or cycle-incompatible parameter groups fall back to an available group",async()=>{
+  for(const saved of ["removed","ffsc-only","{broken"]){
+    const storage=memoryStorage(),server=navigationServer({uiInfo:parameterNavigationInfo});
+    storage.setItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`,saved);
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.nodes.get("parameter-group").value,"cycle");
+    assert.equal(h.app.state().dirty,false);
+  }
+});
+
 for(const view of navigationViews)test(`reload restores ${view} with the selected project and historical design record`,async()=>{
   const other={...project,id:"p2",name:"另一个方案"};
   const records=[

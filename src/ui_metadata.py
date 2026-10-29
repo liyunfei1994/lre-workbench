@@ -64,13 +64,26 @@ NONLINEAR_SOLVER_CHOICES: List[Tuple[str, str]] = [
 ]
 
 COMBUSTION_LOSS_CHOICES: List[Tuple[str, str]] = [
-    ("adiabatic", "焓平衡（不附加经验燃烧损失）"),
+    ("adiabatic", "定压焓平衡（化学平衡）"),
     ("legacy_temperature_rise", "历史兼容：温升折减模型"),
 ]
 
 THERMO_DATASET_CHOICES: List[Tuple[str, str]] = [
     ("gri30", "GRI30（历史数据）"),
     ("gri30_highT", "GRI30 高温热化学数据"),
+]
+
+TURBINE_BOUNDARY_CHOICES = [
+    ("unspecified", "系统节点 · 总／静态尚未指定"),
+    ("total_to_total", "显式采用总态接口近似 · 总总压比"),
+]
+TURBINE_MEANLINE_CHOICES = [
+    ("disabled", "关闭 · 仅交付总体设计点"),
+    ("equal_work", "等比功分配 · 均径运动学校核"),
+    ("custom_work", "自定义比功分配 · 均径运动学校核"),
+]
+TURBINE_GEOMETRY_STATE_CHOICES = [
+    ("system_pt_as_static", "系统 P/T 按静态参考量初算"),
 ]
 
 
@@ -106,29 +119,29 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
         ],
     ),
     (
-        "入口与效率 / Inlet & efficiency",
+        "供给边界与部件假设 / Supply & component assumptions",
         [
-            ("fuel_inlet_temp",        "燃料贮箱出口温度 / Fuel tank outlet T",     "K"),
-            ("ox_inlet_temp",          "液氧贮箱出口温度 / LOX tank outlet T",      "K"),
-            ("tank_pressure_pa",       "贮箱压力边界 / Tank pressure",  "bar"),
-            ("inlet_pressure",         "增压泵出口压力 / Boost outlet pressure",  "MPa"),
-            ("feed_line_dp_pa",        "增压泵→主泵短管压降 / Boost→pump duct ΔP",         "bar"),
+            ("fuel_inlet_temp",        "燃料贮箱出口液温 / Fuel tank liquid T",     "K"),
+            ("ox_inlet_temp",          "液氧贮箱出口液温 / LOX tank liquid T",      "K"),
+            ("tank_pressure_pa",       "贮箱出口绝压（两路共用） / Tank outlet pressure",  "bar"),
+            ("inlet_pressure",         "前置增压泵出口绝压 / Boost outlet pressure",  "MPa"),
+            ("feed_line_dp_pa",        "增压泵至主泵压降预算 / Feed duct ΔP budget",         "bar"),
             ("boost_pump_efficiency",  "增压泵等熵效率 / Boost pump η",                "—"),
             ("pump_efficiency_ox",     "液氧泵等熵效率 / LOX pump η",                "—"),
             ("pump_efficiency_fuel",   "燃料泵等熵效率 / Fuel pump η",         "—"),
-            ("turbine_efficiency_ox",  "氧侧涡轮效率 / Ox-side turbine η", "—"),
-            ("turbine_efficiency_fuel","燃料侧涡轮效率 / Fuel-side turbine η", "—"),
+            ("turbine_efficiency_ox",  "氧侧涡轮等熵效率 / Ox-side turbine η", "—"),
+            ("turbine_efficiency_fuel","燃料侧涡轮等熵效率 / Fuel-side turbine η", "—"),
             ("methane_thermo_dataset", "甲烷燃气热化学数据", ""),
-            ("combustion_loss_model",  "主室燃烧损失模型",  ""),
+            ("combustion_loss_model",  "主室热化学处理",  ""),
             ("combustion_efficiency",  "历史温升折减系数（非 c* 效率）",  "—"),
         ],
     ),
     (
-        "热力反馈初值（高级） / Thermo initial guesses",
+        "燃气状态启动估计 / Gas initialization",
         [
-            ("chamber_temp_guess",  "主燃烧室温度猜测 / T_c guess",        "K"),
-            ("chamber_gamma",       "比热比初值 / γ initial",             "—"),
-            ("molar_mass",          "平均摩尔质量初值 / MW initial",          "kg/kmol"),
+            ("chamber_temp_guess",  "主室温度启动估计 / T_c initial",        "K"),
+            ("chamber_gamma",       "比热比启动估计 γ / Gamma initial",             "—"),
+            ("molar_mass",          "平均摩尔质量启动估计 / MW initial",          "kg/kmol"),
         ],
     ),
     (
@@ -249,6 +262,12 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
     (
         "涡轮气动设计 / Turbine aero design",
         [
+            ("turbine_boundary_basis", "涡轮接口状态约定", ""),
+            ("turbine_meanline_mode", "均径速度三角形初选", ""),
+            ("turb_ox_meanline_flow_coefficient", "氧侧均径轴向流量系数 ca/U", "—"),
+            ("turb_fuel_meanline_flow_coefficient", "燃料侧／共轴均径轴向流量系数 ca/U", "—"),
+            ("turb_ox_stage_work_fractions", "氧侧各级实际比功比例 JSON", ""),
+            ("turb_fuel_stage_work_fractions", "燃料侧／共轴各级实际比功比例 JSON", ""),
             ("turb_ox_u_over_c_target",
              "富氧涡轮 U/C0 目标 / O-rich U/C0 target",   "—"),
             ("turb_ox_reaction_degree",
@@ -257,6 +276,12 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
              "富氧涡轮级数 (0=自动) / O-rich stages",       "—"),
             ("turb_ox_u_max_ms",
              "富氧涡轮 U_max / O-rich U max",               "m/s"),
+            ("ox_turbine_inlet_flow_coefficient", "氧侧涡轮入口速度比 cm1/U", "—"),
+            ("ox_turbine_outlet_flow_coefficient", "氧侧涡轮出口速度比 cm2/U", "—"),
+            ("ox_turbine_stator_axial_chord_ratio", "氧侧涡轮静叶轴向弦长比 Ls/Dm", "—"),
+            ("ox_turbine_rotor_axial_chord_ratio", "氧侧涡轮动叶轴向弦长比 Lr/Dm", "—"),
+            ("ox_turbine_row_gap_ratio", "氧侧涡轮叶栅间距比 gap/Dm", "—"),
+            ("ox_turbine_geometry_state_basis", "氧侧涡轮几何状态约定", ""),
             ("turb_fuel_u_over_c_target",
              "富燃涡轮 U/C0 目标 / F-rich U/C0 target",   "—"),
             ("turb_fuel_reaction_degree",
@@ -265,6 +290,12 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
              "富燃涡轮级数 (0=自动) / F-rich stages",       "—"),
             ("turb_fuel_u_max_ms",
              "富燃涡轮 U_max / F-rich U max",               "m/s"),
+            ("fuel_turbine_inlet_flow_coefficient", "燃料侧／共轴涡轮入口速度比 cm1/U", "—"),
+            ("fuel_turbine_outlet_flow_coefficient", "燃料侧／共轴涡轮出口速度比 cm2/U", "—"),
+            ("fuel_turbine_stator_axial_chord_ratio", "燃料侧／共轴涡轮静叶轴向弦长比 Ls/Dm", "—"),
+            ("fuel_turbine_rotor_axial_chord_ratio", "燃料侧／共轴涡轮动叶轴向弦长比 Lr/Dm", "—"),
+            ("fuel_turbine_row_gap_ratio", "燃料侧／共轴涡轮叶栅间距比 gap/Dm", "—"),
+            ("fuel_turbine_geometry_state_basis", "燃料侧／共轴涡轮几何状态约定", ""),
         ],
     ),
     # V19：原「燃烧室几何」「燃烧室壁面」「推力室壁材料」三组已整体迁入
@@ -468,9 +499,9 @@ KEY_LABELS = {
     "h_in_Jkg": "入口混合焓 [J/kg]",
     "h_combustion_Jkg": "燃烧后焓 [J/kg]",
     "h_out_Jkg": "出口焓 [J/kg]",
-    "cp_Jkgk": "定压比热 cp [J/(kg·K)]",
-    "cp_Jgk": "定压比热 cp [J/(kg·K)]",
-    "gamma": "比热比 γ",
+    "cp_Jkgk": "冻结组成定压比热 cp [J/(kg·K)]",
+    "cp_Jgk": "冻结组成定压比热 cp [J/(kg·K)]",
+    "gamma": "冻结组成 cp/cv",
     "T_chamber_K": "主燃烧室温度 [K]",
     "molar_mass_kg_per_kmol": "平均摩尔质量 [kg/kmol]",
     "h_chamber_Jkg": "燃烧室焓 [J/kg]",
@@ -579,7 +610,7 @@ KEY_LABELS = {
     "cc_mass_flux_throat_kg_m2s" : "喉部流量密度 ṁ/A_t [kg/(m²·s)]",
     "cc_chamber_gas_density_kgm3": "室内燃气密度 ρ_c [kg/m³]",
     "cc_conv_half_angle_deg"     : "收缩段半锥角 β [°]",
-    "cc_sound_speed_ms"          : "室内声速 a_c [m/s]",
+    "cc_sound_speed_ms"          : "室内冻结声速 a_c [m/s]",
     "cc_acoustic_1T_Hz"          : "一阶切向声学模态 1T [Hz]（稳定性筛查）",
     "cc_acoustic_1L_Hz"          : "一阶纵向声学模态 1L [Hz]",
     # ── 再生冷却沿程 marching（V15 后处理）──────────────
@@ -615,7 +646,7 @@ KEY_LABELS = {
     "face_diameter_m":      "喷注面直径 [m]",
     "face_area_m2":         "喷注面面积 [m²]",
     "num_elements":         "喷注元件数",
-    "element_spacing_mm":   "元件间距 [mm]",
+    "element_spacing_mm":   "单元等效占用尺度（非排布节距）[mm]",
     "dp_ox_Pa":             "氧化剂压降 [MPa]",
     "dp_ox_MPa":            "氧化剂压降 [MPa]",
     "dp_ox_ratio":          "氧化剂压降比 ΔP/pc [-]",
@@ -627,19 +658,34 @@ KEY_LABELS = {
     "d_ox_mm":              "氧孔直径 d_ox [mm]",
     "d_post_mm":            "氧化剂 post 外径 [mm]",
     "delta_fuel_mm":        "燃料环缝宽度 δ [mm]",
-    "d_outer_mm":           "元件外径 [mm]",
+    "d_outer_mm":           "外环流道外径（外筒内径）[mm]",
+    "post_wall_thickness_mm": "中心管壁厚假设 [mm]",
+    "a_ox_required_per_element_m2": "中心流道单元所需面积 [m²]",
+    "a_fuel_required_per_element_m2": "环缝单元所需面积 [m²]",
+    "a_ox_geometry_per_element_m2": "中心流道尺寸回算面积 [m²]",
+    "a_fuel_geometry_per_element_m2": "环缝尺寸回算面积 [m²]",
+    "mdot_ox_geometry_kgs": "中心流道几何回算总流量 [kg/s]",
+    "mdot_fuel_geometry_kgs": "环缝几何回算总流量 [kg/s]",
+    "mass_flow_relative_error_ox": "中心流道回算相对误差 [-]",
+    "mass_flow_relative_error_fuel": "环缝回算相对误差 [-]",
+    "rho_ox_kgm3": "喷注中心流道定尺寸密度 [kg/m³]",
+    "rho_fuel_kgm3": "喷注环缝定尺寸密度 [kg/m³]",
+    "geometry_closure_passed": "同模型几何连续性通过（1/0）",
+    "geometry_range_warning_count": "尺寸经验范围告警数",
+    "geometry_layout_warning_count": "面板布置告警数",
+    "element_envelope_area_fraction": "单元外包圆总面积／面板面积 [-]",
     "mdot_ox_per_element_kgs":   "单元件氧化剂流量 [kg/s]",
     "mdot_fuel_per_element_kgs": "单元件燃料流量 [kg/s]",
     "momentum_flux_ratio_J":     "动量通量比 J [-]",
-    "swirl_number_ox":           "旋流数 S_ox [-]",
-    "swirl_number_fuel":         "旋流数 S_fuel [-]",
+    "swirl_number_ox":           "经验旋流假设 S_ox（孔槽未设计）[-]",
+    "swirl_number_fuel":         "经验旋流假设 S_fuel（孔槽未设计）[-]",
     "cd_ox":                     "氧化剂流量系数 Cd [-]",
     "cd_fuel":                   "燃料流量系数 Cd [-]",
     "face_heat_flux_MWm2":       "喷注面热流密度 [MW/m²]",
     # ── V10：涡轮 CFTurbo 输入参数 ────────────────────────
     "mass_flow_kgs":             "涡轮质量流量 [kg/s]",
-    "cp_in_Jkgk":                "入口工质 cp [J/(kg·K)]",
-    "gamma_in":                  "入口工质 γ [-]",
+    "cp_in_Jkgk":                "入口冻结组成 cp [J/(kg·K)]",
+    "gamma_in":                  "入口冻结组成 cp/cv [-]",
     "molar_mass_in":             "入口工质摩尔质量 [kg/kmol]",
     # ── V10：涡轮速度三角形 & 几何 ────────────────────────
     "C0_spouting_ms":            "等熵喷出速度 C₀ [m/s]",

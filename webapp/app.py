@@ -360,6 +360,16 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         row["nozzle_geometry"] = nozzle_geometry_view(row["result"], row["id"])
         from webapp.pump_geometry import pump_geometry_view
         row["pump_geometry"] = pump_geometry_view(row["result"], row["id"])
+        from webapp.injector_design import injector_design_view
+        row["injector_design"] = injector_design_view(row["result"], row["id"])
+        from webapp.turbine_geometry import turbine_geometry_view
+        row["turbine_geometry"] = turbine_geometry_view(row["result"], row["id"])
+        from webapp.turbine_design import turbine_design_view
+        row["turbine_design"] = turbine_design_view(row["result"], row["id"])
+        from webapp.result_consistency import result_consistency_view
+        row["result_consistency"] = result_consistency_view(row["result"], row["id"])
+        from webapp.steady_design import steady_design_view
+        row["steady_design"] = steady_design_view(row["result"], row["id"], consistency=row["result_consistency"])
         return row
 
     @app.post("/api/jobs/{job_id}/cancel")
@@ -1065,16 +1075,22 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
                        "parameter-editor.js": "text/javascript",
                        "nozzle-geometry.js": "text/javascript", "nozzle-geometry.css": "text/css",
                        "pump-geometry.js": "text/javascript", "pump-geometry.css": "text/css",
+                       "injector-design.js": "text/javascript", "injector-design.css": "text/css",
+                       "turbine-geometry.js": "text/javascript", "turbine-geometry.css": "text/css",
+                       "turbine-design.js": "text/javascript", "turbine-design.css": "text/css",
+                       "result-consistency.js": "text/javascript",
                        "thermo-applicability.js": "text/javascript", "thermo-applicability.css": "text/css",
                        "cooling.js": "text/javascript", "cooling.css": "text/css",
                        "cooling-design.js": "text/javascript", "cooling-design.css": "text/css",
                        "convergence.js": "text/javascript", "convergence.css": "text/css",
                        "steady-closure.js": "text/javascript", "steady-closure.css": "text/css",
                        "steady-workspace.js": "text/javascript", "steady-workspace.css": "text/css",
+                       "steady-design.js": "text/javascript",
                        "component-analysis.js": "text/javascript", "component-analysis.css": "text/css",
                        "cycle-model.js": "text/javascript", "cycle-schematic.js": "text/javascript", "cycle-schematic.css": "text/css",
                        "flow-model.js": "text/javascript", "flow-analysis.js": "text/javascript", "flow-analysis.css": "text/css",
                        "validation.js": "text/javascript", "validation.css": "text/css",
+                       "gas-handoff.js": "text/javascript", "gas-handoff.css": "text/css",
                        "thermo-stations.js": "text/javascript",
                        "throttle.js": "text/javascript", "throttle.css": "text/css",
                        "transient.js": "text/javascript", "transient.css": "text/css",

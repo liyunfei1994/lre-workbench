@@ -22,6 +22,8 @@ const NODE_SPECS = {
   fuel_turbine_exhaust: ["G04", "gas", "富燃涡轮出口"],
   gg_outlet: ["G05", "gas", "燃气发生器出口（涡轮入口）"],
   gg_turbine_exhaust: ["G06", "gas", "GG 涡轮排气"],
+  gg_turbine_ox_exhaust: ["G07", "gas", "GG 液氧泵涡轮出口"],
+  gg_turbine_fuel_exhaust: ["G08", "gas", "GG 燃料泵涡轮出口"],
   main_chamber: ["C01", "chamber", "主燃烧室"],
 };
 
@@ -65,7 +67,7 @@ function metadataRows(metadata) {
   });
 }
 
-function componentsFor(id, available, gg) {
+function componentsFor(id, available, gg, independentGG=false) {
   const candidates = {
     lox_pump_inlet: ["ox_pump"],
     fuel_pump_inlet: ["fuel_pump"],
@@ -77,7 +79,9 @@ function componentsFor(id, available, gg) {
     ox_turbine_exhaust: ["ox_preburner_turbine", "injector"],
     fuel_turbine_exhaust: ["fuel_preburner_turbine", "injector"],
     gg_outlet: ["gas_generator", "gg_turbine", "gg_turbine_ox", "gg_turbine_fuel"],
-    gg_turbine_exhaust: ["gg_turbine", "gg_turbine_ox", "gg_turbine_fuel", "gg_exhaust_nozzle"],
+    gg_turbine_exhaust: independentGG ? ["gg_exhaust_nozzle"] : ["gg_turbine", "gg_turbine_ox", "gg_turbine_fuel", "gg_exhaust_nozzle"],
+    gg_turbine_ox_exhaust: ["gg_turbine_ox", "gg_exhaust_nozzle"],
+    gg_turbine_fuel_exhaust: ["gg_turbine_fuel", "gg_exhaust_nozzle"],
     main_chamber: ["injector", "main_chamber", "nozzle"],
   };
   return (own(candidates, id) ? candidates[id] : []).filter(key => available.has(key));
@@ -110,7 +114,8 @@ export function buildFlowModel(states, {labels = {}, inputs = {}, componentIds =
     ? value.replace(/甲烷|燃料/g, "煤油").replace(/CH₄|CH4/g, "C₁₂H₂₆")
     : value.replace(/燃料/g, "甲烷");
   const gg = parameters.cycle_type === "gg" || own(source, "gg_outlet") || available.has("gas_generator");
-  const splitGG = available.has("gg_turbine_ox") && available.has("gg_turbine_fuel");
+  const branchOutlets=["gg_turbine_ox_exhaust","gg_turbine_fuel_exhaust"].filter(id=>own(source,id));
+  const splitGG = parameters.gg_layout==="dual_shaft" || branchOutlets.length>0 || available.has("gg_turbine_ox") && available.has("gg_turbine_fuel");
   const known = Object.keys(NODE_SPECS).filter(id => own(source, id));
   const unknown = Object.keys(source).filter(id => !own(NODE_SPECS, id)).sort();
   const nodes = [...known, ...unknown].map(id => {
@@ -123,24 +128,33 @@ export function buildFlowModel(states, {labels = {}, inputs = {}, componentIds =
       pressure: numeric(state.pressure, 1e-6), temperature: numeric(state.temperature),
       massFlow: numeric(state.mass_flow), density: numeric(state.density), enthalpy: numeric(state.enthalpy, 1e-3),
       composition: Object.fromEntries(Object.entries(object(state.composition)).map(([key, value]) => [key, numeric(value)])),
-      metadata: metadataRows(state.metadata), componentIds: componentsFor(id, available, gg),
+      metadata: metadataRows(state.metadata), componentIds: componentsFor(id, available, gg,branchOutlets.length>0),
     };
   });
   const discrete = "离散接口状态；节点间距不表示空间距离。";
+  const aggregateNote=own(source,"gg_turbine_exhaust")?"G06 汇总排气记录的流量为总量、温度取液氧侧涡轮出口，并非混合温度。":"";
+  const dualCaption=branchOutlets.length
+    ? `GG 燃气并联驱动双涡轮。${branchOutlets.length===2?"两条独立出口分别展示各自的温度与流量。":"已记录的独立出口按所属支路展示；另一支路出口未记录。"}${aggregateNote}`
+    : "GG 燃气并联驱动双涡轮。排气记录为总质量流量，温度取液氧侧涡轮出口；并非混合温度，未提供两支路独立出口状态。";
   const definitions = [
     {id: "ox", title: "液氧供给", color: "#427ca4", caption: `${discrete}贮箱 → 增压泵出口 → 主泵入口 → 主泵出口。`},
     {id: "fuel", title: "燃料供给与冷却", color: "#b28b46", caption: `${discrete}${fuel}${fuel === "煤油" ? "（正十二烷替代物）" : ""}供给及再生冷却；分流前后质量流量可能不同。`},
     {id: "gas", title: "燃气流路", color: "#9270a8", caption: `${discrete}${gg
-      ? splitGG ? "GG 燃气并联驱动双涡轮。排气记录为总质量流量，温度取液氧侧涡轮出口；并非混合温度，未提供两支路独立出口状态。"
+      ? splitGG ? dualCaption
         : "燃气发生器 → 涡轮排气；排气进入独立排气喷管，不进入主燃烧室。"
       : "富氧、富燃预燃室各自驱动对应涡轮；两条燃气支路分开展示，之后进入主燃烧室。"}`},
     {id: "chamber", title: "主燃烧室", color: "#b96359", caption: `${discrete}主燃烧室集总状态；不表示室内温度场或喷管沿程分布。`},
     {id: "other", title: "其他记录节点", color: "#778596", caption: `${discrete}连接关系未定义，各记录独立展示。`},
   ];
   const present = new Set(nodes.map(node => node.id));
+  // Independent branch outlets replace the legacy aggregate route. The aggregate,
+  // when retained by the solver, is an isolated report rather than a third branch.
+  const gasRoutes=branchOutlets.length
+    ? [...ROUTES.gas.slice(0,2),...branchOutlets.map(id=>["gg_outlet",id]),...(present.has("gg_turbine_exhaust")?[["gg_turbine_exhaust"]]:[])]
+    : ROUTES.gas;
   const groups = definitions.filter(group => nodes.some(node => node.group === group.id)).map(group => ({
     ...group, segments: group.id === "other" ? unknown.map(id => [id])
-      : ROUTES[group.id].flatMap(route => presentSegments(route, present)),
+      : (group.id==="gas"?gasRoutes:ROUTES[group.id]).flatMap(route => presentSegments(route, present)),
   }));
   return {nodes, groups};
 }

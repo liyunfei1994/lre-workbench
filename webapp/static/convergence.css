@@ -47,6 +47,9 @@
 .cv-legend .cv-legend-tolerance:before { border-color:#a6793f; border-top-style:dashed; }
 .cv-chart-note { font-size:10px; color:#80929f; line-height:1.7; padding:5px 14px 10px; margin:0; }
 .cv-inner { border-top:1px solid #dbe4eb; padding-top:2px; }
+.cv-gas-initialization { border:1px solid #d3dfe8; padding:12px; }
+.cv-gas-initialization h3 { margin:0 0 6px; font-size:13px; }
+.cv-gas-initialization .cv-description { margin-bottom:8px; }
 .cv-method { border:1px solid #d3dfe8; background:#f8fafc; padding:12px; }
 .cv-method-metrics { display:flex; flex-wrap:wrap; gap:18px 28px; margin-bottom:12px; }
 .cv-method-metrics>div { display:flex; flex-direction:column; gap:7px; }

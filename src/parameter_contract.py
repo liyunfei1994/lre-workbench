@@ -52,17 +52,17 @@ PARAMETER_CONTRACT = {
     "gg_exhaust_expansion_ratio": _meta("design_input", "GG 涡轮排气所用独立喷管的出口面积 / 喉部面积；参与 GG 排气推力计算，不定义主推力室型面或主喷管冷却覆盖。"),
     "ambient_pressure": _meta("boundary", "用于压力推力项；目标推力必须与这一环境压力使用相同口径。", source="方案边界"),
     "target_isp": _meta("initial_guess", "仅通过 F/(g₀ Isp) 构造总流量初值；最终比冲由模型计算。", source=None),
-    "fuel_inlet_temp": _meta("boundary", "燃料贮箱侧温度。FFSC 与 GG 的增压泵出口及主泵入口温度均由泵焓升和管路等焓过程计算；不是在各节点沿用该温度。"),
-    "ox_inlet_temp": _meta("boundary", "液氧贮箱侧温度。FFSC 与 GG 主泵入口温度均由增压泵焓升及短管压力变化计算；检查 HEOS 声明范围、相态与可用熔化线。"),
-    "tank_pressure_pa": _meta("boundary", "贮箱侧压力边界；自生增压过程本身不由稳态循环模型求解。"),
-    "inlet_pressure": _meta("boundary", "增压泵出口压力；扣除入口短管损失后才是主泵入口压力。"),
-    "feed_line_dp_pa": _meta("model_assumption", "增压泵至主泵短管的给定压降预算；不是数值初值。"),
+    "fuel_inlet_temp": _meta("boundary", "贮箱出口液体的接口温度，由贮存、过冷及供给条件确定。100 K 是液甲烷示例假设，不是通用推荐值或实机实测值。结合该处绝压检查相态、饱和温度与可用熔化线；后续温度由泵焓升和管路等焓过程计算。", source="方案供给边界；示例值待接口数据确认"),
+    "ox_inlet_temp": _meta("boundary", "贮箱出口液体的接口温度。70 K 是过冷液氧示例假设，不是氧的常压沸点，也不是实机实测值。按该处绝压检查相态与过冷度；加注和贮存系统能否维持此温度需另行确认。主泵入口温度由供给链计算。", source="方案供给边界；示例值待接口数据确认"),
+    "tank_pressure_pa": _meta("boundary", "当前用一个绝对压力描述两路贮箱出口液体边界，不是表压，也不是已求解的气枕压力。自生增压、液柱/加速度和贮箱至前置泵的吸入管损未单独求解；工程交接应分别给出燃料、氧化剂接口条件。", source="两路共用的集总边界假设"),
+    "inlet_pressure": _meta("design_input", "当前供给方案显式包含前置低压增压泵，位置在贮箱与主泵之间，用于提高主泵入口压力。出口绝压为设计要求，扣除短管预算后得到主泵入口压力；尚未证明泵能实现该压升。增压功按外部功源记入整机能量账，不计入两根主涡轮轴。增压泵不是 FFSC 循环的必备构型，也不等同于贮箱气体增压系统或主泵诱导轮。", source="前置增压方案假设；驱动及吸入性能待设计"),
+    "feed_line_dp_pa": _meta("model_assumption", "初步设计用给定压降闭合压力预算；该段按绝热等焓计算出口温度，不能当作等温。固定硬件变工况需由管径、长度、粗糙度和局部阻力或实测曲线求压降；当前短管仍用固定预算，不是管路能力验证。", source="设计点管路压降预算；待水力模型或试验替换"),
     "methane_thermo_dataset": _meta("model_assumption", "高温版保留 GRI30 的 53 个物种并使用其高温热化学数据；CHO 物种共同温区为 300–5000 K，仍逐物种检查实际温区。气相仍为理想气体混合物，高压状态方程适用性尚未验证；高温热化学数据不构成高温反应动力学认证。历史方案沿用原数据，不自动切换。", source="Cantera 随附 GRI30 / GRI30 high-T 数据；版本随计算记录保存", propellants=["lox_methane"]),
-    "combustion_loss_model": _meta("model_assumption", "焓平衡模式按实际入口焓求化学平衡，不附加经验温升折减。预算冷却热在主室扣除，准一维模式在空间热侧扣除，不能重复计入；部件闭合不等于全系统验证。历史模式保留折减行为，不能解释为 c* 效率或燃料燃尽率。", source="模型选择；历史方案不自动切换"),
+    "combustion_loss_model": _meta("model_assumption", "在指定主室压力下，以实际来流的完整组成、元素和统一化学焓为约束求平衡温度与产物（HP 平衡）。FFSC 来流为两股涡轮排气，不重新从常温甲烷/氧气燃烧。无附加经验损失不等于燃尽率或 c* 效率为 100%；平衡仍包含解离。预算冷却在主室扣热，准一维冷却沿热侧扣热，只记一次。未解析混合、有限速率和燃烧稳定性；历史温升折减仅用于旧方案复现。", source="守恒与化学平衡基线；历史方案不自动切换"),
     "combustion_efficiency": _meta("legacy", "仅历史温升折减模型生效：保持平衡组成后降温，将焓差记为经验损失；它不是 c* 效率或燃料燃尽率，亦未由试验验证。", visibility={"all": [{"key": "combustion_loss_model", "op": "eq", "value": "legacy_temperature_rise"}]}),
-    "chamber_temp_guess": _meta("initial_guess", "准一维冷却与循环热反馈的主室温度初值；不是指定最终燃烧温度，也不是焓参考态。", source=None),
-    "chamber_gamma": _meta("initial_guess", "热反馈的比热比初值，随后更新为热化学结果；不是固定喷管比热比。", source=None),
-    "molar_mass": _meta("initial_guess", "热反馈的平均摩尔质量初值，随后更新；不是化学焓基准。", source=None),
+    "chamber_temp_guess": _meta("initial_guess", "尚无热侧沿程解时，用于首轮冷却热侧与喉部尺寸估算。当前 Cantera 主室按实际入口组成、焓和压力求温度，不以此值指定燃烧温度。启动估计会影响收敛路径、耗时及成功率；过差时应检查失败原因。它不是设计温度上限或焓参考态。", source=None),
+    "chamber_gamma": _meta("initial_guess", "γ=cp/cv 的启动估计，与温度和平均摩尔质量共同初始化冷却热侧及喉部尺寸。随后使用当前热化学及热侧沿程解，不固定整个喷管的比热比。同一物理解分支充分收敛后，合理初值改变不应显著改变结果，须以多初值复核确认。", source=None),
+    "molar_mass": _meta("initial_guess", "用于首轮气体常数及冷却、喉部尺寸估算；单位 kg/kmol。最终平均摩尔质量由产物完整组成计算，不是设计约束或化学焓基准。改变它可能影响数值收敛，不能用启动估计调节最终性能。预算冷却不使用这三个冷却启动估计。", source=None),
     "use_target_preburner_temp": _meta("legacy", "由网页预燃室设计方式统一设置，保留旧方案字段。", source=None, hidden=True),
     "use_target_preburner_mr": _meta("legacy", "温度模式优先；由网页设计方式统一设置，保留旧方案字段。", source=None, hidden=True),
     "cooling_heat_load": _meta("model_assumption", "仅给定 Q 与 Δp 的预算模式生效；该模式计算端口焓差，不生成沿程曲线。准一维模式的吸热量由统一几何、Bartz 热侧关联和冷却侧换热计算。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]}),
@@ -81,7 +81,7 @@ PARAMETER_CONTRACT = {
 }
 
 for key in ("boost_pump_efficiency", "pump_efficiency_ox", "pump_efficiency_fuel"):
-    PARAMETER_CONTRACT[key] = _meta("model_assumption", "给定的泵等熵效率假设，参与轴功与出口状态计算；不是初值，也未由实际泵图验证。")
+    PARAMETER_CONTRACT[key] = _meta("model_assumption", "定义 ηp=(h出口等熵−h入口)/(h出口−h入口)，轴功与出口状态使用同一焓升。设计点常效率可作为初选，需用同类部件或试验数据定标并做敏感性分析；该数值不是预测结果或性能图。轴承、密封等损失未独立分解，应与外部效率数据的功率口径核对。", source="设计点常效率假设；未由部件特性图校准")
 
 for key in ("chamber_contraction_ratio", "chamber_l_star_m", "chamber_conv_half_angle_deg", "nozzle_bell_fraction"):
     PARAMETER_CONTRACT[key] = _meta("design_input", "系统级内轮廓几何假设；热侧、冷却覆盖面积与通道水力长度使用同一几何。设计点定尺寸后，固定硬件计算保留该轮廓。")
@@ -137,7 +137,7 @@ for key, help_text in (
             {"key": "cooling_wall_temp_limit_status", "op": "eq", "value": "provisional"},
             {"key": "cooling_wall_temp_limit_status", "op": "eq", "value": "documented"}]})
 for key in ("turbine_efficiency_ox", "turbine_efficiency_fuel"):
-    PARAMETER_CONTRACT[key] = _meta("model_assumption", "给定的涡轮效率假设，参与焓降和轴功计算；不是初值，需部件数据支持。")
+    PARAMETER_CONTRACT[key] = _meta("model_assumption", "定义 ηt=(h入口−h出口)/(h入口−h出口等熵)，按同一出口压力计算等熵焓降。设计点采用常效率假设，需部件性能图或试验定标；总对总/总对静口径必须与涡轮交接中的状态定义一致，不能直接互换。该值不是叶型计算结果，也不自动包含独立传动损失。", source="设计点常效率假设；未由部件特性图校准")
 
 for key in ("chamber_temp_guess", "chamber_gamma", "molar_mass"):
     PARAMETER_CONTRACT[key]["visibility"] = {"all": [
@@ -199,6 +199,40 @@ for side in ("lox", "fuel"):
     }.items():
         PARAMETER_CONTRACT[f"{side}_pump_{suffix}"] = _meta(
             "component_sizing", help_text, source="可编辑的示例几何假设；不代表已验证的推荐值")
+
+
+PARAMETER_CONTRACT["turbine_boundary_basis"] = _meta("model_assumption",
+    "未指定时只交付系统节点量。显式采用总态接口近似后，新记录将涡轮两端节点解释为总态储腔条件，压比为总总压比；这是零维接口假设，不是由流速完成的总静转换，不会更改循环数值或历史记录。CFturbo仍需根据实际截面设计求静态。", source="须按项目接口定义选择")
+PARAMETER_CONTRACT["turbine_meanline_mode"] = _meta("component_sizing",
+    "默认关闭。启用后按保存中径/转速、反动度目标、轴向速度系数和实际比功分配构造均径Euler速度三角形。仅代数/运动学校核，不计算级压比、静态、损失、壅塞、金属角或性能图。")
+
+for side, label in (("ox", "氧侧"), ("fuel", "燃料侧／共轴")):
+    visibility = ({"any": [{"key": "cycle_type", "op": "eq", "value": "ffsc"},
+                            {"key": "gg_layout", "op": "eq", "value": "dual_shaft"}]}
+                  if side == "ox" else {})
+    PARAMETER_CONTRACT[f"turb_{side}_meanline_flow_coefficient"] = _meta("component_sizing",
+        "ca/U：可选均径三角形采用动叶进出口相同轴向速度，与概念流道的端面速度假设相互独立。", visibility=deepcopy(visibility))
+    PARAMETER_CONTRACT[f"turb_{side}_stage_work_fractions"] = _meta("component_sizing",
+        "自定义模式使用此JSON数组，例如 [0.6,0.4]；各项为实际比功比例，数量必须等于本记录级数、和为1。不自动归一化，不将比例当压比或效率分配。", visibility=deepcopy(visibility))
+    for suffix, help_text in {
+        "inlet_flow_coefficient": "cm1/U：入口轴向速度与保存节圆速度之比。与保存流量及参考静态密度共同确定入口环形面积。",
+        "outlet_flow_coefficient": "cm2/U：出口轴向速度与保存节圆速度之比。出口密度由保存出口压力、温度和冻结组成分子量估算；不沿用入口密度。",
+        "stator_axial_chord_ratio": "Ls/Dm：各静叶排的轴向弦长包络与保存中径之比。只定位叶排，不产生叶型、叶片数或安装角。",
+        "rotor_axial_chord_ratio": "Lr/Dm：各动叶排的轴向弦长包络与保存中径之比。只用于轴向布局，不是优化后的叶片弦长。",
+        "row_gap_ratio": "gap/Dm：相邻叶排轴向间距与中径之比；包括级内静动叶间距和级间间距，不包含轴承、密封或进排气蜗壳。",
+        "geometry_state_basis": "本概念几何把保存系统节点 P/T 当作静态参考量计算密度，采用冻结组成理想气体；系统未解析端口速度，尚不能确认实际总压／静压。CFD 前需重新确认边界口径。",
+    }.items():
+        PARAMETER_CONTRACT[f"{side}_turbine_{suffix}"] = _meta(
+            "component_sizing", help_text,
+            source="可编辑的轴流几何初算假设；不代表已验证的实机尺寸", visibility=deepcopy(visibility))
+    for suffix, title, help_text in (
+        ("u_over_c_target", "U/C₀ 目标", "沿用系统按总等熵焓降定义的速比与中径初选，C₀=√(2Δh_s)。不是分级焓降设计；现有系统中径有 0.05–0.80 m 限幅，几何页会提示偏离目标的情况。"),
+        ("reaction_degree", "反动度目标", "保存的设计约束，不是求解得到的最优反动度。可选均径三角形据此校核动叶静焓降/级比功，解释为级反动度需重复级假设；未据此分配级内压降或设计叶型。"),
+        ("n_stages_user", "级数（0=系统推荐）", "正整数指定级数；0 沿用系统经验推荐。启用均径初选时用于分配比功并构造速度三角形；级数本身不代表逐级压力、损失和气动性能已匹配。"),
+        ("u_max_ms", "节圆速度参考上限", "用于现有系统节圆速度检查；它不是材料许用叶尖速度，几何页另列叶尖速度供后续结构分析。"),
+    ):
+        PARAMETER_CONTRACT[f"turb_{side}_{suffix}"] = _meta(
+            "component_sizing", help_text, label=f"{label}涡轮 {title}", visibility=deepcopy(visibility))
 
 
 def parameter_metadata(key):
