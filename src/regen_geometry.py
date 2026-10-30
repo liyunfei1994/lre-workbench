@@ -22,7 +22,9 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                          n_points=120, counterflow=True, n_channels=300,
                          channel_width_m=1.5e-3, channel_height_m=5e-3,
                          wall_thickness_m=0.5e-3, channel_table=None,
-                         material_boundaries_m=()):
+                         material_boundaries_m=(),
+                         nozzle_contour_method="legacy_log_v1",
+                         nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0):
     """Return channel-boundary nodes and cells in coolant-flow order.
 
     ``s_m`` is distance along the coolant path; ``x_m`` remains the common gas
@@ -59,7 +61,9 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
     contour = full_hot_gas_geometry(
         r_t, r_t * math.sqrt(eps), r_c, eps, L_cyl,
         bell_fraction=bell_fraction, theta_conv_deg=conv_half_angle_deg,
-        n_points=int(n_points), n_cyl=max(6, int(n_points) // 8))
+        n_points=int(n_points), n_cyl=max(6, int(n_points) // 8),
+        nozzle_contour_method=nozzle_contour_method, nozzle_initial_angle_deg=nozzle_initial_angle_deg,
+        nozzle_exit_angle_deg=nozzle_exit_angle_deg)
     xs, rs, x_throat = (contour[k] for k in ("contour_x", "contour_r", "x_throat_m"))
     full_exit = xs[-1]
     clipped = []
@@ -156,7 +160,14 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                     area_ratio=(cell["r_m"]/r_t)**2,
                     n_channels=a["n_channels"], supersonic=cell["x_m"] > x_throat)
         cells.append(cell)
-    return dict(version=2, source=contour["source"],
+    return dict(version=3, source=contour["source"],
+                nozzle_contour_method=contour["nozzle_contour_method"],
+                initial_expansion_angle_deg=contour["initial_expansion_angle_deg"],
+                exit_angle_deg=contour["exit_angle_deg"], angle_source=contour["angle_source"],
+                method_note=contour["method_note"], coordinate_origin="injector_face",
+                L_nozzle_m=contour["L_nozzle_m"],
+                chamber_blend_radius_m=contour["chamber_blend_radius_m"],
+                convergent_tangent_continuity=contour["convergent_tangent_continuity"],
                 flow_direction="counterflow" if counterflow else "coflow",
                 nodes=nodes, cells=cells, x_throat_m=x_throat,
                 r_t_m=r_t, r_c_m=r_c, L_cyl_m=L_cyl,

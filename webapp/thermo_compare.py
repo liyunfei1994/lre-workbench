@@ -147,7 +147,8 @@ def _provenance(model, request):
     filename = "nasa_gas.yaml" if request["cantera_dataset"] == "nasa_gas_candidate" else production_file
     mechanism = Path(thermo.ct.__file__).resolve().parent / "data" / filename if thermo.CANTERA_AVAILABLE else None
     result = {"cantera_version": _version("cantera"), "coolprop_version": _version("CoolProp"),
-              "rocketcea_version": _version("rocketcea"), "mechanism": filename, "phase": model.phase,
+              "rocketcea_version": _version("rocketcea"), "mechanism": filename,
+              "phase": "comparison_cho16" if request["product_policy"] == "matched_cho_gas" else model.phase,
               "product_policy": request["product_policy"], "cantera_dataset": request["cantera_dataset"],
               "common_product_species": list(COMMON_CHO_SPECIES) if request["product_policy"] == "matched_cho_gas" else None,
               "gas_equation_of_state": "ideal-gas (both backends)",
@@ -214,8 +215,14 @@ def _cea_species_metadata():
                 continue
             intervals = [lines[index+2+3*offset] for offset in range(count)]
             limits = [(float(row[:11]), float(row[11:22])) for row in intervals]
+            elements = {}
+            for start in range(10, 50, 8):
+                symbol = header[start:start+2].strip()
+                amount = float(header[start+2:start+8])
+                if symbol and amount:
+                    elements[symbol] = amount
             result[line[:18].strip()] = {"min_K": min(x[0] for x in limits), "max_K": max(x[1] for x in limits),
-                "molecular_weight_kg_kmol": float(header[52:65])}
+                "molecular_weight_kg_kmol": float(header[52:65]), "elements": elements}
         except (ValueError, IndexError):
             continue
     for element, weight in CEA_ATOMIC_WEIGHTS.items():
@@ -297,12 +304,26 @@ def _cea_object(request, ox_name, fuel_name):
         thermo._add_new_ox(restricted_ox, "\n".join(oxCards[ox_name]))
     if restricted_fuel not in fuelCards:
         thermo._add_new_fuel(restricted_fuel, "\n".join(fuelCards[fuel_name]))
-    cea = thermo._CEA_Obj(oxName=restricted_ox, fuelName=restricted_fuel, makeOutput=1)
+    class RestrictedCEA(thermo._CEA_Obj):
+        def setupCards(self, *args, **kwargs):
+            # INPUT reparses ONLY into Prod in input order on every call, but
+            # RocketCEA's readData=0 shortcut retains MW/coefficients in database
+            # order. Reload SEARCH together with the names, even for the same
+            # object/condition; otherwise HCO can be reported as H2O (and vice
+            # versa) while the mass-fraction sum still equals one. Restrict this
+            # workaround to ONLY problems; do not patch the installed library.
+            import rocketcea.cea_obj as cea_module
+            with _LOCK:
+                cea_module._last_called = None
+                self.readDatafileOnce = 0
+                return super().setupCards(*args, **kwargs)
+
+    cea = RestrictedCEA(oxName=restricted_ox, fuelName=restricted_fuel, makeOutput=1)
     cea.cea_deck.append("only " + " ".join(COMMON_CHO_SPECIES))
     return cea
 
 
-def _cea_mass_fractions(cea, arguments, flags):
+def _cea_mass_fractions(cea, arguments, flags, species_metadata):
     """Read all products, including RocketCEA 1.2.3's omitted final product.
 
     Its public getter loops range(ngc), although the character name common block
@@ -314,14 +335,21 @@ def _cea_mass_fractions(cea, arguments, flags):
     count = int(py_cea.indx.ngc)
     if py_cea.cdata.prod[0].decode("ascii").strip():
         raise RuntimeError("CEA 物种名称数组布局已改变；需复核接口后才能读取组分。")
-    result = {}
+    result, unverified = {}, []
     indices = [cea.i_injface, cea.i_chm, cea.i_thrt, cea.i_exit]
     for index in range(count):
         name = py_cea.cdata.prod[index+1].decode("ascii").strip()
         if not name:
             raise ValueError("CEA 产品集合出现未命名物种，不能确认组成。")
         weight = float(py_cea.therm.mw[index])
+        metadata = species_metadata.get(name.lstrip("*"))
+        if metadata is None:
+            unverified.append(name)
+        elif not math.isclose(weight, metadata["molecular_weight_kg_kmol"], rel_tol=1e-9, abs_tol=1e-7):
+            raise ValueError(f"CEA 物种名称与分子量错位：{name}，回读 {weight:g}，数据库 {metadata['molecular_weight_kg_kmol']:g} kg/kmol。")
         fractions = [float(py_cea.comp.en[index, station])*weight for station in indices]
+        if any(not math.isfinite(value) or value < 0 for value in fractions):
+            raise ValueError(f"CEA 物种 {name} 返回非有限或负的质量分数。")
         if flags["frozen"]:
             fractions = ([fractions[0], fractions[1], fractions[2], fractions[2]] if flags["frozenAtThroat"]
                          else [fractions[0]]*4)
@@ -331,7 +359,41 @@ def _cea_mass_fractions(cea, arguments, flags):
         residual = sum(values[station] for values in result.values())-1.0
         if abs(residual) > 1e-7:
             raise ValueError(f"CEA 报告组分质量分数不闭合：截面 {station} 残差 {residual:g}。")
-    return result
+    return result, unverified
+
+
+def _cea_element_conservation(stations, metadata, reactants, of):
+    """Check named compositions against the feed, not just sum(Y)=1.
+
+    Missing metadata leaves composition unverified without discarding otherwise
+    usable station/performance values. A measured inconsistency is an error.
+    """
+    fuel_atoms = {"C": 12, "H": 26} if reactants["fuel_species"] == "c12h26" else {"C": 1, "H": 4}
+    expected = {element: count*CEA_ATOMIC_WEIGHTS[element]/reactants["fuel_molecular_weight_kg_kmol"]/(1+of)
+                for element, count in fuel_atoms.items()}
+    expected["O"] = of/(1+of)
+    residuals, missing = {}, set()
+    for section, state in stations.items():
+        fractions = dict.fromkeys(CEA_ATOMIC_WEIGHTS, 0.0)
+        for name, fraction in state["mass_fractions"].items():
+            item = metadata.get(name.lstrip("*"))
+            if not item or not item.get("elements"):
+                missing.add(name)
+                continue
+            for element, count in item["elements"].items():
+                if element == "E":  # Charge is not a feed element; neutral totals cancel electron mass.
+                    continue
+                if element not in CEA_ATOMIC_WEIGHTS:
+                    raise ValueError(f"CEA 产品 {name} 含入口未提供的元素 {element}。")
+                fractions[element] += fraction*count*CEA_ATOMIC_WEIGHTS[element]/item["molecular_weight_kg_kmol"]
+        if not missing:
+            residuals[section] = {element: value-expected[element] for element, value in fractions.items()}
+    if missing:
+        return {"verified": False, "unverified_species": sorted(missing), "residuals": {}, "max_residual": None}
+    maximum = max(abs(value) for section in residuals.values() for value in section.values())
+    if maximum > 1e-7:
+        raise ValueError(f"CEA 燃烧室/喷管元素质量守恒残差超限：{maximum:g}；不能采用该组分回读。")
+    return {"verified": True, "unverified_species": [], "residuals": residuals, "max_residual": maximum}
 
 
 def _cea_point(request, of, eps, reactants):
@@ -361,7 +423,7 @@ def _cea_point(request, of, eps, reactants):
     p_exit = request["pc_pa"] / cea.get_PcOvPe(**arguments, **flags)
     # The documented throat pressure getter only supports equilibrium. For the
     # frozen case use the identity c*=Pc/(rho_t*a_t), not an equilibrium pressure.
-    mass_fractions = _cea_mass_fractions(cea, arguments, flags)
+    mass_fractions, unverified_names = _cea_mass_fractions(cea, arguments, flags, species_metadata)
     rho_chamber = float(densities[0]) * 0.45359237 / 0.3048**3
     a_chamber = float(sound_speeds[0]) * 0.3048
     chamber_gamma = a_chamber*a_chamber*rho_chamber/request["pc_pa"]
@@ -376,6 +438,15 @@ def _cea_point(request, of, eps, reactants):
     stations["chamber"].update({"pressure_Pa": request["pc_pa"], "MW_kg_kmol": float(chamber_mw),
                                  "gamma_isentropic": chamber_gamma})
     stations["exit"].update({"pressure_Pa": p_exit, "MW_kg_kmol": float(exit_mw)})
+    element_check = _cea_element_conservation(stations, species_metadata, reactants, of)
+    composition_verified = not unverified_names and element_check["verified"]
+    composition_verification = {
+        "status": "verified" if composition_verified else "unverified", "reader_version": 2,
+        "name_value_readback_verified": not unverified_names,
+        "element_conservation_verified": element_check["verified"],
+        "max_element_mass_fraction_residual": element_check["max_residual"],
+        "unverified_species": sorted(set(unverified_names) | set(element_check["unverified_species"])),
+    }
     raw = cea.get_full_cea_output(**arguments, **flags, short_output=0, show_transport=0, show_mass_frac=True)
     restricted = request["product_policy"] == "matched_cho_gas"
     if restricted:
@@ -408,12 +479,14 @@ def _cea_point(request, of, eps, reactants):
             "gas_equation_of_state": "ideal-gas",
             "station_temperature_ranges": temperature_ranges,
             "chamber_enthalpy_residual_Jkg": enthalpy_residual,
+            "composition_verification": composition_verification,
+            "element_mass_fraction_residuals": element_check["residuals"],
             "reported_mass_fraction_sum_residuals": {section: sum(state["mass_fractions"].values())-1
                                                        for section, state in stations.items()},
             "product_species_metadata": {name: species_metadata.get(name.lstrip("*")) for name in mass_fractions},
             "product_species_reported": sorted(mass_fractions),
             "species_reporting_min_fraction": 0.0,
-            "species_reader": "CEA common block; all ngc names, including final product; mass-sum checked without renormalization",
+            "species_reader": "CEA common block v2; ONLY names and coefficients reloaded together; name/MW and feed-element conservation checked without renormalization",
             "cea_output": raw}, "warnings": []}
 
 

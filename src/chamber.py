@@ -16,7 +16,7 @@ V5 修改记录：
 from __future__ import annotations
 
 from core import ComponentResult, FlowState, ValidationError, _check_range
-from thermo import chamber_equilibrium
+from thermo import chamber_equilibrium, gas_flow_metadata, validate_gas_streams
 
 
 class MainChamber:
@@ -58,6 +58,7 @@ class MainChamber:
         经验模式：
             · 焓混合 + 温度猜测（与 V3 一致）
         """
+        handoff = validate_gas_streams([ox_stream, fuel_stream], expected_mass_flow=self.mdot_total)
         # 热端冷却抽热与可选历史温升折减分别记账。
         energy_diagnostics = {}
         chamber_gas = chamber_equilibrium(
@@ -93,6 +94,10 @@ class MainChamber:
 
         # 保存 GasState，供 cycle.py 传给 Nozzle 做 Cantera 膨胀
         self.gas_state = chamber_gas
+        chamber_gas.source_ports = [ox_stream.name, fuel_stream.name]
+        chamber_gas.state_basis = {"kind": "reservoir_approximation", "pressure": "chamber_reservoir",
+            "temperature": "chamber_reservoir", "enthalpy": "thermodynamic",
+            "velocity_m_s": None, "reason": "零维主室混合／HP 平衡储腔近似；未解析主室速度。"}
 
         state = FlowState(
             name="main_chamber",
@@ -100,8 +105,11 @@ class MainChamber:
             temperature=t_chamber,
             mass_flow=self.mdot_total,
             enthalpy=chamber_gas.enthalpy,
+            density=chamber_gas.density,
             composition=chamber_gas.composition,
             metadata={
+                **gas_flow_metadata(chamber_gas),
+                "inlet_handoff_status": handoff["status"],
                 "gamma":        gamma_calc,
                 "molar_mass":   mw_calc,
                 "cp":           chamber_gas.cp,
@@ -123,13 +131,19 @@ class MainChamber:
             },
             notes=[
                 f"热力学来源: {chamber_gas.source}",
-                "再生冷却热端采用集中等效抽热；仅闭合零维总焓账，不代表分布式喷管换热模型。",
+                "本部件只扣除显式传入的 heat_loss_W；准一维冷却在后续热侧沿程扣热，主室不重复扣除。具体热损分配以本记录冷却和喷管模型为准。",
                 "可选历史温升折减的焓亏损单独列为 combustion_loss_W；不与再生冷却吸热合并。",
                 f"T_chamber = {t_chamber:.0f} K, γ = {gamma_calc:.4f}, MW = {mw_calc:.2f}",
                 (f"历史温升折减系数 = {eta:.3f} → 平衡 {t_chamber_ideal:.0f} K 折减 "
                  f"{t_chamber_ideal - t_chamber:.0f} K" if eta < 1.0
                  else "按焓求化学平衡（含解离），未附加经验温升折减；不声明燃尽率或 c* 效率。"),
             ],
+            profile={"inlet_handoff": {**handoff,
+                "streams": [{"source_port": stream.name, "mass_flow_kg_s": stream.mass_flow,
+                             "h_Jkg": stream.enthalpy, "composition_mass_fractions": dict(stream.composition),
+                             "model": dict(stream.metadata.get("model", {})),
+                             "state_basis": dict(stream.metadata.get("state_basis", {}))}
+                            for stream in (ox_stream, fuel_stream)]}},
         )
 
         return state, result

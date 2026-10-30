@@ -10,15 +10,17 @@ import {renderSteadyClosure, closureDisplayState, pressureContractDisplayState} 
 import {renderThermodynamicApplicability, thermoApplicabilityBadge, thermodynamicDisplayState, thermoRangeDisplayState, pureFluidDisplayState} from "./thermo-applicability.js";
 import {renderCooling} from "./cooling.js";
 import {renderSteadyWorkspace} from "./steady-workspace.js";
-// Preferred engineering aliases first; a missing preferred value never hides a valid fallback.
+import {renderSteadyDesignSummary,renderSteadyDesignBasis} from "./steady-design.js";
+// Canonical SI outputs first: diagrams, handoff and geometry must not choose
+// different numeric copies. Missing SI fields can use historical unit aliases.
 const COMPONENT_ALIASES = [
   ["rho_in_kgm3","rho_kgm3"],
-  ["p_in_MPa","p_in_Pa","p_in_bar"], ["p_out_MPa","p_out_Pa","p_out_bar"],
-  ["power_MW","power_W"], ["turbine_power_MW","turbine_power_W"],
-  ["heat_load_MW","heat_load_W"], ["delta_p_MPa","delta_p_Pa"],
-  ["dp_ox_MPa","dp_ox_Pa"], ["dp_fuel_MPa","dp_fuel_Pa"],
-  ["injector_dp_MPa","injector_dp_Pa","injector_dp_bar"],
-  ["preburner_pressure_MPa","preburner_pressure_Pa"],
+  ["p_in_Pa","p_in_MPa","p_in_bar"], ["p_out_Pa","p_out_MPa","p_out_bar"],
+  ["power_W","power_MW"], ["turbine_power_W","turbine_power_MW"],
+  ["heat_load_W","heat_load_MW"], ["delta_p_Pa","delta_p_MPa"],
+  ["dp_ox_Pa","dp_ox_MPa"], ["dp_fuel_Pa","dp_fuel_MPa"],
+  ["injector_dp_Pa","injector_dp_MPa","injector_dp_bar"],
+  ["preburner_pressure_Pa","preburner_pressure_MPa"],
   ["Cf_sl","Cf"], ["p_exit_Pa","exit_pressure_Pa"],
   ["mach_exit","exit_mach"], ["Ve_ms","exit_velocity_ms"],
 ];
@@ -194,12 +196,42 @@ const fuelLabel = (text, inputs) => fuelInfo(inputs).surrogate
 const cycleName = result => resultInputs(result).cycle_type === "gg" ? "燃气发生器循环（GG，开式）" : "全流量分级燃烧循环（FFSC，闭式）";
 const isSystemAssessment = result => result.assessment?.scope === "system";
 const legacySystemLimits = result => isSystemAssessment(result) && !(result.calculation_scope?.version >= 3);
+const preburnerSide = check => /^(ox|fuel)_preburner_T_combustion_K$/.exec(check?.key || "")?.[1];
+function preburnerLimit(result, side, check) {
+  const inputs=resultInputs(result),key=`${side}_preburner_temp_limit`;
+  const row=check || result.assessment?.checks?.find(item=>item.key===`${side}_preburner_T_combustion_K`);
+  const historical=!Object.hasOwn(row || {},"limit_status")&&!Object.hasOwn(inputs,`${key}_status`);
+  const status=row?.limit_status ?? inputs[`${key}_status`] ?? "provisional";
+  const basis=String(row?.limit_basis ?? inputs[`${key}_basis`] ?? "").trim();
+  const limit=status==="unset" ? null : Object.hasOwn(row || {},"limit") ? row.limit : inputs[key];
+  const valid=["unset","provisional","documented"].includes(status) && (status==="unset" || finite(limit)&&limit>0) && (status!=="documented" || basis!=="");
+  return {status,basis,limit,historical,valid};
+}
+function preburnerLimitLabel(evidence) {
+  if (!evidence.valid) return "上限设置无效（未评估）";
+  if (evidence.status==="unset") return "上限未设定（未评估）";
+  if (evidence.status==="documented") return `上限 ${number(evidence.limit)} K（已填写依据，未验证）`;
+  return `${evidence.historical?"历史暂定":"暂定"}上限 ${number(evidence.limit)} K（待核实）`;
+}
 const assessmentDisplayState = result => {
   const saved = result.assessment || {};
+  const checks=(saved.checks || []).map(check=>{
+    const side=preburnerSide(check);
+    if (!side || resultInputs(result).cycle_type==="gg") return check;
+    const evidence=preburnerLimit(result,side,check);
+    const status=!evidence.valid || evidence.status==="unset" ? "unknown" :
+      evidence.status==="provisional" && check.status==="pass" ? "review" : check.status;
+    return {...check,status,preburner_limit_evidence:{...evidence,saved_check_status:check.status}};
+  });
+  let display={...saved,checks};
+  if(saved.status==="pass" && checks.some(check=>check.preburner_limit_evidence && check.status!=="pass")) {
+    const unknown=checks.some(check=>check.preburner_limit_evidence && check.status==="unknown");
+    display={...display,status:unknown?"unknown":"review",label:unknown?"系统约束未完成评估":"系统约束待核实"};
+  }
   // Keep immutable historical rows; an older pass did not include the common
   // cooling profile's thermal limits and cannot stand in for today's scope.
   return legacySystemLimits(result) && saved.status === "pass"
-    ? {...saved,status:"unknown",label:"历史系统约束范围，需重算"} : saved;
+    ? {...display,status:"unknown",label:"历史系统约束范围，需重算"} : display;
 };
 const scopeNotice = result => result.calculation_scope?.id === "engine_system"
   ? '<p class="fine">系统设计 · 稳态设计点，用于循环匹配与设计约束检查。</p>' + (legacySystemLimits(result) ? '<div class="banner">历史系统校核未覆盖统一冷却剖面的沿程壁温限值；保留原校核表，需重新计算后按当前范围判定。</div>' : '')
@@ -326,14 +358,14 @@ function steadyAttention(result) {
   const assessment=assessmentDisplayState(result), numerical=numericalDisplayState(result), inputs=resultInputs(result);
   const checks=Array.isArray(assessment.checks) ? assessment.checks : [];
   const failed=checks.filter(check=>check.status === "fail"), uncertain=checks.filter(check=>!["pass","fail"].includes(check.status));
-  const lines=failed.map(check=>`<li><b>${escape(fuelLabel(check.label,inputs))}</b><span>${number(check.value)} ${escape(check.unit)} · 要求 ${check.criterion === "minimum" ? "≥" : "≤"} ${number(check.limit)} ${escape(check.unit)}</span></li>`);
+  const lines=failed.map(check=>`<li><b>${escape(fuelLabel(check.label,inputs))}</b><span>${number(check.value)} ${escape(check.unit)} · ${check.preburner_limit_evidence ? escape(preburnerLimitLabel(check.preburner_limit_evidence)) : `要求 ${check.criterion === "minimum" ? "≥" : "≤"} ${number(check.limit)} ${escape(check.unit)}`}</span></li>`);
   if(numerical.status !== "pass") lines.unshift(`<li><b>${escape(numerical.label || "数值收敛待确认")}</b><span>本次性能仅用于诊断，需检查收敛过程。</span><button type="button" data-steady-open="convergence">查看收敛诊断 →</button></li>`);
   const closure=closureDisplayState(result), pressure=pressureContractDisplayState(closure.closure?.feed_network?.pressure_contract);
   const closureFailed=closure.feed === "fail" || closure.energy === "fail" || pressure === "fail";
   if(closureFailed)
     lines.push(`<li><b>${[closure.feed === "fail" ? "供给支路" : "",closure.energy === "fail" ? "能量收支" : "",pressure === "fail" ? "压力关系" : ""].filter(Boolean).join("、")}校核未通过</b><span>查看保存的分项残差与数据来源。</span></li>`);
   if(!lines.length) lines.push(`<li>${escape(assessment.status === "pass" ? "本记录已检查的系统约束通过。" : assessment.label || "系统约束证据待确认。")}</li>`);
-  if(uncertain.length) lines.push(`<li>${uncertain.length} 项约束未判定，需查看缺失证据。</li>`);
+  if(uncertain.length) lines.push(`<li>${uncertain.length} 项约束待核实或未评估，需查看依据与设置。</li>`);
   const thermo=thermodynamicDisplayState(result), states=Array.isArray(thermo.evidence?.states) ? thermo.evidence.states : [], pure=Array.isArray(thermo.evidence?.pure_fluid_states) ? thermo.evidence.pure_fluid_states : [];
   const extrapolated=states.filter(state=>thermoRangeDisplayState(state)==="extrapolated").length;
   const invalid=pure.filter(state=>pureFluidDisplayState(state)==="invalid_or_unavailable").length;
@@ -347,21 +379,39 @@ function steadyAttention(result) {
   return `<div class="steady-attention"><section class="steady-attention-card${failed.length || closureFailed || numerical.status !== "pass" ? " has-issues" : ""}" aria-label="关键校核结论"><div class="steady-card-heading"><h2>约束与闭合</h2><button type="button" data-steady-open="checks">完整校核 →</button></div><ul>${lines.join("")}</ul><p class="fine">${inputs.cycle_type !== "gg" ? "所需泵压不等于固定泵能力；泵与涡轮特性仍待验证。" : "数值收敛与系统约束分别判定。"}</p></section><section class="steady-attention-card" aria-label="模型适用性摘要"><div class="steady-card-heading"><h2>模型适用性</h2><button type="button" data-steady-open="models">检查依据 →</button></div><p class="steady-model-state">${escape(thermo.label)}</p><ul>${evidence.map(text=>`<li>${escape(text)}。</li>`).join("")}</ul><p class="fine">高压燃气状态方程与换热关联式仍需独立验证。</p></section></div>`;
 }
 
-function overview(result) {
+function overview(result, record = {}) {
   const s = result.calculation?.summary || {}, inputs = resultInputs(result), assessment = assessmentDisplayState(result);
   const gg = inputs.cycle_type === "gg";
-  const conditions = [["燃烧室压力",scaled(inputs.pc,1e-6),"MPa"],["环境压力",scaled(inputs.ambient_pressure,1e-6),"MPa"],["设定 O/F",inputs.of_ratio,"—"],["喷管膨胀比",inputs.expansion_ratio,"—"]];
+  const conditions = [["指定燃烧室压力",scaled(inputs.pc,1e-6),"MPa"],["环境压力边界",scaled(inputs.ambient_pressure,1e-6),"MPa"],["指定总氧燃比 O/F",inputs.of_ratio,"—"],["主喷管面积比 Ae/At",inputs.expansion_ratio,"—"]];
   const study = `<section class="steady-study" aria-label="稳态计算工况"><div class="steady-study-mode"><span>STEADY STATE</span><b>单工况 · 稳态设计点</b><small>本页显示稳态设计点；热态扰动见瞬态响应分析</small></div><dl>${conditions.map(([label,value,unit])=>`<div><dt>${label}</dt><dd>${number(value)} <small>${unit}</small></dd></div>`).join("")}</dl></section>`;
-  const tempHint = (side) => `${s.preburner_temp_target_mode >= .5 ? `目标 ${number(s[`${side}_preburner_temp_target_K`])} / ` : ""}上限 ${number(inputs[`${side}_preburner_temp_limit`])} K`;
+  // The non-vacuum summary follows the saved operating pressure, which can be
+  // vacuum or any other boundary. An absent field is not a sea-level default.
+  const ambientHint = finite(inputs.ambient_pressure)
+    ? `pₐ = ${number(scaled(inputs.ambient_pressure,1e-3))} kPa` : "环境压力未记录";
+  const tempHint = side => {
+    const temperatureMode=finite(s.preburner_temp_target_mode)?s.preburner_temp_target_mode>=.5:inputs.use_target_preburner_temp>=.5;
+    const target=finite(s[`${side}_preburner_temp_target_K`])?s[`${side}_preburner_temp_target_K`]:inputs[`${side}_preburner_temp_target`];
+    const mr=finite(s[`${side}_preburner_mr_target`])?s[`${side}_preburner_mr_target`]:inputs[`${side}_preburner_mr_target`];
+    const targetText=temperatureMode?`目标 ${number(target)} K · `:inputs.use_target_preburner_mr>=.5?`指定 O/F ${number(mr)} · `:"";
+    return targetText+preburnerLimitLabel(preburnerLimit(result,side));
+  };
   const kpis = [
-    kpi("真空推力", scaled(s.thrust_vac_N,.001), "kN", `海平面 ${number(scaled(s.thrust_N,.001))} kN · 目标误差 ${number(s.thrust_error_percent)}%`),
-    kpi("真空比冲 Isp", s.Isp_vac_s, "s", `海平面 ${number(s.Isp_s)} s`),
+    kpi("计算真空推力", scaled(s.thrust_vac_N,.001), "kN", `工况计算值 ${number(scaled(s.thrust_N,.001))} kN（${ambientHint}）· 工况推力目标误差 ${number(s.thrust_error_percent)}%`),
+    kpi("计算真空比冲 Isp", s.Isp_vac_s, "s", `工况计算值 ${number(s.Isp_s)} s（${ambientHint}）`),
     kpi("总质量流量", s.mdot_total_kg_s, "kg/s", `LOX + ${fuelInfo(inputs).symbol}${fuelInfo(inputs).surrogate ? "（煤油替代物）" : ""}`),
     kpi("主燃烧室温度", s.chamber_temperature_K, "K", "燃气温度"),
     gg ? kpi("燃气发生器温度", s.gg_T_combustion_K, "K", `${inputs.use_target_gg_temp >= .5 ? `目标 ${number(inputs.gg_temp_target)} / ` : ""}上限 ${number(inputs.gg_temp_limit)} K`) : kpi("富氧预燃室温度", s.ox_preburner_T_combustion_K, "K", tempHint("ox")),
     gg ? kpi("GG 涡轮排气温度", s.gg_turbine_exhaust_T_K, "K", `涡轮压比 πt = ${number(s.gg_turbine_pi_t)}`) : kpi("富燃预燃室温度", s.fuel_preburner_T_combustion_K, "K", tempHint("fuel")),
   ].join("");
-  const checks = (assessment.checks || []).map(check => `<tr class="constraint-row" data-status="${escape(check.status)}"><td title="${escape(fuelLabel(check.detail,inputs))}">${escape(fuelLabel(check.label,inputs))}</td><td class="constraint-value">${number(check.value)} ${escape(check.unit)}</td><td class="constraint-limit">${check.criterion === "minimum" ? "≥" : "≤"} ${number(check.limit)} ${escape(check.unit)}</td><td>${badge(check.status)}</td></tr>`);
+  const checks = (assessment.checks || []).map(check => {
+    const evidence=check.preburner_limit_evidence;
+    const criterion=evidence ? escape(preburnerLimitLabel(evidence))+
+      (evidence.status==="documented"&&evidence.basis?`<small class="field-help">依据（用户声明）：${escape(evidence.basis)}</small>`:"")+
+      (evidence.historical?`<small class="field-help">历史保存判定：${escape(statusNames[evidence.saved_check_status] || evidence.saved_check_status || "未记录")}。历史记录按当时限值判定；限值未登记依据，当前按暂定展示，原记录不变。</small>`:"") :
+      `${check.criterion === "minimum" ? "≥" : "≤"} ${number(check.limit)} ${escape(check.unit)}`;
+    const label=evidence && check.status==="unknown" ? "未评估" : evidence && check.status==="review" ? "暂定，待核实" : evidence && check.status==="pass" ? "数值满足给定上限" : undefined;
+    return `<tr class="constraint-row" data-status="${escape(check.status)}"><td title="${escape(fuelLabel(check.detail,inputs))}">${escape(fuelLabel(check.label,inputs))}</td><td class="constraint-value">${number(check.value)} ${escape(check.unit)}</td><td class="constraint-limit">${criterion}</td><td>${badge(check.status,label)}</td></tr>`;
+  });
   const engineering = panel(isSystemAssessment(result) ? "系统约束校核" : "历史工程校核", `<div class="panel-heading">${badge(assessment.status, assessment.label || "校核结果待确认")}<span class="muted">独立于数值收敛</span></div>${checks.length ? table(["校核项","当前值","判据","状态"],checks) : '<p class="muted">本记录未包含约束校核数据。</p>'}<p class="fine">${escape((assessment.limitations || ["数值收敛不代表整机工程可行。"]).join(" "))}</p>`);
   const groups = desktopSchema.overview_groups[gg ? "gg" : "ffsc"].map(([title, fields],index) => ({
     diagnostic:fields.length > 0 && fields.every(([key])=>DIAGNOSTIC_KEYS.has(key)),
@@ -374,11 +424,11 @@ function overview(result) {
   const warnings=allWarnings(result);
   const warningDetails=warnings.length ? `<details class="panel steady-warnings"><summary>本次模型警告（${warnings.length} 项）</summary>${warningList(warnings)}</details>` : "";
   const pages=[
-    {id:"overview",title:"性能总览",content:`<div class="kpi-grid" aria-label="稳态性能摘要">${kpis}</div>${steadyAttention(result)}<div class="summary-grid">${mainGroups}</div>${warningDetails}`},
+    {id:"overview",title:"性能总览",content:`<div class="kpi-grid" aria-label="稳态性能摘要">${kpis}</div>${renderSteadyDesignSummary(record.steady_design??result.steady_design)||steadyAttention(result)}<div class="summary-grid">${mainGroups}</div>${warningDetails}`},
     {id:"checks",title:"系统校核",content:`${engineering}${gg ? "" : renderSteadyClosure(result)}`},
     {id:"cooling",title:"再生冷却",content:renderCooling(result)},
     {id:"convergence",title:"收敛诊断",content:`${renderConvergence(result)}${diagnostics}`},
-    {id:"models",title:"模型与物性",content:renderThermodynamicApplicability(result)},
+    {id:"models",title:"模型与物性",content:renderSteadyDesignBasis(record.steady_design??result.steady_design)+renderThermodynamicApplicability(result)},
   ];
   return `<div class="analysis-stack steady-overview">${study}${statusStrip(result)}${renderSteadyWorkspace(pages)}</div>`;
 }

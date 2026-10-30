@@ -16,11 +16,13 @@ from wall_thermal import material_for_cell, audit_cell, material_summary
 from wall_materials import GRCOP84_DATASET_ID
 
 
-def physical_source_fixture(*, material_zones=(), cover_eps=0.):
+def physical_source_fixture(*, material_zones=(), cover_eps=0.,
+                            contour_method="parabolic_bell_explicit_v1"):
     source = source_fixture()
     c = source["result"]["calculation"]
     v = c["inputs"]
     v.update(cooling_bartz_mode=1., cooling_grid_points=24., cooling_cover_eps=cover_eps,
+             nozzle_contour_method=contour_method,
              wall_material_zones_json=json.dumps(list(material_zones)),
              wall_thermal_dataset_id=GRCOP84_DATASET_ID)
     boundaries = sorted({z[key] for z in material_zones for key in ("x_start_m", "x_end_m")})
@@ -32,7 +34,9 @@ def physical_source_fixture(*, material_zones=(), cover_eps=0.):
         expansion_ratio=v["expansion_ratio"],n_points=24,
         n_channels=v["cooling_n_channels"],channel_width_m=v["cooling_channel_width_m"],
         channel_height_m=v["cooling_channel_height_m"],wall_thickness_m=v["cooling_wall_thickness_m"],
-        cover_eps=cover_eps, material_boundaries_m=boundaries)
+        cover_eps=cover_eps, material_boundaries_m=boundaries,
+        nozzle_contour_method=v["nozzle_contour_method"],
+        nozzle_initial_angle_deg=v["nozzle_initial_angle_deg"], nozzle_exit_angle_deg=v["nozzle_exit_angle_deg"])
     geom_nodes = [dict(geometry["nodes"][0],A_flow_m2=None),*geometry["nodes"],
                   dict(geometry["nodes"][-1],A_flow_m2=None)]
     geom_cells = [dict(kind="inlet_manifold"),
@@ -119,6 +123,42 @@ class ThrottleCoolingContractTests(unittest.TestCase):
         self.assertEqual(source,before)
         hardware["geometry"]["nodes"][0]["height_m"] = 999.
         self.assertEqual(source,before)
+
+    def test_v2_legacy_record_still_audits_without_rewriting_saved_data(self):
+        source = physical_source_fixture(contour_method="legacy_log_v1")
+        c = source["result"]["calculation"]
+        c["inputs"].pop("nozzle_contour_method")
+        g = c["components"]["cooling_channel"]["profile"]["geometry"]
+        g["version"] = 2
+        for key in ("nozzle_contour_method", "initial_expansion_angle_deg", "exit_angle_deg",
+                    "angle_source", "method_note", "coordinate_origin", "L_nozzle_m",
+                    "chamber_blend_radius_m", "convergent_tangent_continuity"):
+            g.pop(key)
+        before = deepcopy(source)
+        values, baseline = source_baseline(source)
+        self.assertEqual(values["nozzle_contour_method"], "legacy_log_v1")
+        self.assertEqual(baseline["cooling_hardware"]["geometry"], g)
+        self.assertEqual(source, before)
+        g["full_nodes"][-1]["r_m"] *= 1.01
+        with self.assertRaisesRegex(ValueError, "不一致"):
+            source_baseline(source)
+
+    def test_legacy_geometry_cannot_be_relabelled_as_explicit_inputs(self):
+        for version in (2, 3):
+            with self.subTest(version=version):
+                source = physical_source_fixture(contour_method="legacy_log_v1")
+                c = source["result"]["calculation"]
+                c["inputs"]["nozzle_contour_method"] = "parabolic_bell_explicit_v1"
+                c["components"]["cooling_channel"]["profile"]["geometry"]["version"] = version
+                with self.assertRaisesRegex(ValueError, "不一致"):
+                    source_baseline(source)
+
+    def test_v3_requires_all_new_contour_metadata(self):
+        source = physical_source_fixture()
+        g = source["result"]["calculation"]["components"]["cooling_channel"]["profile"]["geometry"]
+        g.pop("nozzle_contour_method")
+        with self.assertRaisesRegex(ValueError, "不一致"):
+            source_baseline(source)
 
     def test_old_physical_records_must_be_recalculated_but_budget_remains_honest(self):
         source = source_fixture()

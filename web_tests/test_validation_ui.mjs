@@ -8,7 +8,9 @@ import {createValidationForm,buildValidationRequest,renderValidationResult,scanV
 import {renderThermoCharts,buildThermoChartSvg} from "../webapp/static/validation-charts.js";
 
 import {renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv} from "../webapp/static/property-comparison.js";
+import {renderThermoStations,verifiedCeaComposition} from "../webapp/static/thermo-stations.js";
 import {renderThermodynamicApplicability} from "../webapp/static/thermo-applicability.js";
+import {renderGasHandoff} from "../webapp/static/gas-handoff.js";
 
 const clone=value=>JSON.parse(JSON.stringify(value));
 const inputs={propellant_pair:"lox_kerosene",cycle_type:"gg",gg_layout:"single_shaft",pc:9.7e6,
@@ -106,11 +108,12 @@ test("experiment requires confirmed conditions and real measurements with explic
 
 test("results expose unavailable backends, per-point failures and comparison mismatches without claiming pass",()=>{
   const html=renderValidationResult(result,"thermochemistry");
-  assert.match(html,/独立后端缺失/);assert.match(html,/CEA 点计算失败/);assert.match(html,/不可直接对比/);
+  assert.match(html,/独立后端缺失/);assert.match(html,/CEA 点计算失败/);assert.match(html,/产物范围不同/);
   assert.match(html,/产品集不同/);assert.match(html,/<svg/);assert.match(html,/1 \/ 2 点具有双后端结果/);
-  assert.match(html,/版本与数据库指纹/);assert.match(html,/Cantera 版本/);assert.match(html,/CEA 数据库 thermo.lib/);
+  assert.match(html,/本次校核使用的软件与数据/);assert.match(html,/Cantera/);assert.match(html,/CEA 数据库 thermo.lib/);
   assert.match(html,/mechanism-fingerprint/);assert.match(html,/cea-database-fingerprint/);
-  assert.match(html,/&quot;provenance&quot;/);
+  assert.doesNotMatch(html,/原始诊断与口径|&quot;provenance&quot;/);
+  assert.match(html,/校验码.*不是精度评分/s);
   assert.doesNotMatch(html,/validation-pass/);
   const conservation=renderValidationResult(result,"conservation");
   assert.match(conservation,/kg\/s/);assert.match(conservation,/缺少统一边界焓/);
@@ -144,7 +147,7 @@ function mounted(fetcher,initial=context()){
   const listeners=new Map(),timers=new Map(),calls=[],notifications=[],downloads=[];
   let ctx=initial,nextTimer=1;
   const container={innerHTML:"",addEventListener(type,callback){listeners.set(type,callback);}};
-  const sandbox=vm.createContext({console,Blob,renderThermoCharts,buildThermoChartSvg,renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv,renderThermodynamicApplicability,URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
+  const sandbox=vm.createContext({console,Blob,renderThermoStations,verifiedCeaComposition,renderThermoCharts,buildThermoChartSvg,renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv,renderThermodynamicApplicability,renderGasHandoff,URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
     document:{createElement:()=>({click(){downloads.push(this.download);}})},
     setTimeout(callback){const id=nextTimer++;timers.set(id,callback);return id;},clearTimeout(id){timers.delete(id);}});
   vm.runInContext(moduleSource+"\n globalThis.mount=mountValidation;",sandbox);
@@ -155,18 +158,20 @@ function mounted(fetcher,initial=context()){
     tab(value){listeners.get("click")({target:{closest:()=>({dataset:{validationTab:value}})}});},
     field(key,value){listeners.get("input")({target:{dataset:{validationField:key},type:typeof value==="boolean"?"checkbox":"text",value,checked:value}});},
     changeField(key,value){listeners.get("change")({target:{dataset:{validationField:key},value}});},
+    station(value){listeners.get("change")({target:{value,hasAttribute:key=>key==="data-thermo-station"}});},
+    thermoPoint(value){listeners.get("change")({target:{value,hasAttribute:key=>key==="data-thermo-point"}});},
     group(value){listeners.get("change")({target:{value,hasAttribute:key=>key==="data-property-group"}});},
     record(value){listeners.get("change")({target:{value,hasAttribute:key=>key==="data-validation-record"}});},
     async tick(){const entry=timers.entries().next().value;if(entry){timers.delete(entry[0]);entry[1]();await settle();}}};
 }
 function standardAPI(path){if(path==="/validation/capabilities")return clone(capabilities);if(path==="/projects/p1/validations")return [];throw Error(`Unexpected ${path}`);}
 
-test("mount shows source differences, missing dependencies and all four tabs without touching engine data",async()=>{
+test("mount shows source differences, missing dependencies and all five tabs without touching engine data",async()=>{
   const ctx=context(),before=clone(ctx),h=mounted(standardAPI,ctx);
   await h.controller.refresh();
   assert.match(h.container.innerHTML,/方案 v2/);assert.match(h.container.innerHTML,/当前草稿或方案版本/);
   assert.match(h.container.innerHTML,/RocketCEA 未安装/);assert.match(h.container.innerHTML,/REFPROP/);
-  for(const tab of ["thermochemistry","conservation","properties","experiment"])assert.match(h.container.innerHTML,new RegExp(`data-validation-tab="${tab}"`));
+  for(const tab of ["gas_handoff","thermochemistry","conservation","properties","experiment"])assert.match(h.container.innerHTML,new RegExp(`data-validation-tab="${tab}"`));
   h.tab("experiment");
   assert.match(h.container.innerHTML,/data-validation-field="conditions_confirmed" type="checkbox" >/);
   assert.match(h.container.innerHTML,/液氧 \/ 煤油/);
@@ -455,10 +460,77 @@ test("changing comparison product scope resets the inapplicable candidate datase
 test("thermochemical range evidence exposes both extrapolated and unverified species",()=>{
   const fixture=clone(result);
   fixture.thermochemistry.points[0].cantera.diagnostics={station_temperature_ranges:{chamber:{temperature_K:3800,outside_species:{H2O:{min_K:200,max_K:3500,mass_fraction:.3}}}}};
-  fixture.thermochemistry.points[0].cea.diagnostics={station_temperature_ranges:{chamber:{temperature_K:3801,outside_species:{},unverified_species:["<unknown>"]}}};
+  fixture.thermochemistry.points[0].cea.diagnostics={composition_verification:{status:"verified",reader_version:2,name_value_readback_verified:true,element_conservation_verified:true},station_temperature_ranges:{chamber:{temperature_K:3801,outside_species:{},unverified_species:["<unknown>"]}}};
   const html=renderValidationResult(fixture,"thermochemistry");
   assert.match(html,/发生温区外推/);
   assert.match(html,/H2O：200–3,500 K/);
   assert.match(html,/存在未核实物种/);
   assert.match(html,/&lt;unknown&gt;/);
+});
+
+
+test("methane comparisons initially align species while saved records retain their original policy",()=>{
+  const ctx=context();ctx.record.inputs.propellant_pair="lox_methane";
+  assert.equal(createValidationForm(ctx).product_policy,"matched_cho_gas");
+  const old=clone(result);old.thermochemistry.provenance.product_policy="native_databases";
+  const before=clone(old),html=renderValidationResult(old,"thermochemistry");
+  assert.match(html,/产物范围未统一，差值包含模型差异/);
+  assert.match(html,/也不表示本次一定生成了固体碳/);
+  assert.deepEqual(old,before);
+});
+
+test("station selectors retain selected point and section and reset on record switch",async()=>{
+  const record={id:"check-1",project_id:"p1",revision:2,status:"succeeded",result:clone(result)};
+  record.result.thermochemistry.points[0].cantera.stations={chamber:{temperature_K:3600},exit:{temperature_K:1200}};
+  record.result.thermochemistry.points[1].cantera.stations={chamber:{temperature_K:3700},exit:{temperature_K:1300}};
+  const h=mounted(path=>path==="/validation/capabilities"?clone(capabilities):path==="/projects/p1/validations"?[record]:record);
+  await h.controller.refresh();h.station("exit");h.thermoPoint("1");
+  assert.match(h.container.innerHTML,/data-thermo-stations open/);
+  assert.match(h.container.innerHTML,/value="exit" selected/);
+  assert.match(h.container.innerHTML,/value="1" selected>2 · O\/F/);
+  assert.match(h.container.innerHTML,/1,300/);
+  assert.match(h.container.innerHTML,/本次校核关联的设计记录/);
+  assert.doesNotMatch(h.container.innerHTML,/原始诊断与口径/);
+  h.record("check-1");await settle();
+  assert.match(h.container.innerHTML,/value="chamber" selected/);
+  assert.match(h.container.innerHTML,/value="0" selected>1 · O\/F/);
+  h.controller.onLeave();
+});
+
+
+test("historical CEA temperature-range diagnostics are withheld when composition readback is unverified",()=>{
+  const fixture=clone(result);
+  fixture.thermochemistry.points[0].cea.diagnostics={station_temperature_ranges:{chamber:{temperature_K:3801,outside_species:{SUSPECT:{min_K:200,max_K:3500,mass_fraction:.3}}}}};
+  const html=renderValidationResult(fixture,"thermochemistry");
+  assert.match(html,/组分读取证据不足，需重新校核/);
+  assert.doesNotMatch(html,/SUSPECT/);
+});
+
+test("gas tab shows saved design handoff before a validation exists and submits only the source-bound screen",async()=>{
+  const ctx=context();ctx.record.result.gas_handoff={status:"complete",stations:[{id:"ox",label:"保存富氧端口",p_Pa:60e6,T_K:750}]};
+  const before=clone(ctx),h=mounted((path,method)=>method==="POST"?{id:"gas-check",status:"queued"}:standardAPI(path),ctx);
+  await h.controller.refresh();h.tab("gas_handoff");
+  assert.match(h.container.innerHTML,/保存富氧端口/);assert.match(h.container.innerHTML,/运行燃气交接与筛查/);
+  assert.doesNotMatch(h.container.innerHTML,/data-validation-field="T_fuel_K"/);
+  h.click("run");await settle();
+  assert.deepEqual(h.calls.find(call=>call.method==="POST").body,{source_job_id:"design-1",gas_screening:{enabled:true}});
+  assert.deepEqual(ctx,before);h.controller.onLeave();
+});
+
+test("selected historical gas validation cannot borrow handoff from a different current design",async()=>{
+  const ctx=context();ctx.record.result.gas_handoff={stations:[{id:"new",label:"当前记录独有端口"}]};
+  const old={id:"old-check",project_id:"p1",source_job_id:"old-design",revision:1,status:"succeeded",result:{source:{job_id:"old-design"},gas_screening:{status:"unavailable",reason:"历史组成不足"}}};
+  const h=mounted(path=>path==="/validation/capabilities"?capabilities:path==="/projects/p1/validations"?[old]:old,ctx);
+  await h.controller.refresh();h.tab("gas_handoff");
+  assert.match(h.container.innerHTML,/另一设计记录/);assert.match(h.container.innerHTML,/历史组成不足/);
+  assert.match(h.container.innerHTML,/历史记录未保存燃气交接报告/);
+  assert.doesNotMatch(h.container.innerHTML,/当前记录独有端口/);
+  h.click("export");assert.deepEqual(h.downloads,["validation-old-check.json"]);h.controller.onLeave();
+});
+
+test("baseline controls name pure propellant temperatures and direct actual main chamber checks to gas tab",async()=>{
+  const h=mounted(standardAPI);await h.controller.refresh();h.tab("thermochemistry");
+  assert.match(h.container.innerHTML,/纯燃料入口温度/);assert.match(h.container.innerHTML,/纯氧化剂入口温度/);
+  assert.match(h.container.innerHTML,/纯推进剂一次燃烧是独立理论性能基线/);
+  assert.match(h.container.innerHTML,/不复制涡轮排气温度/);h.controller.onLeave();
 });

@@ -9,7 +9,7 @@ import math
 
 from propellants import get_propellant
 from thermo_data import methane_dataset_scope, METHANE_DATASETS
-from fluid_properties import state_tp as pure_state_tp
+from fluid_properties import state_tp as pure_state_tp, supply_liquid_screen
 
 
 GAS_STATIONS = {
@@ -58,7 +58,7 @@ def _build_thermodynamic_applicability(result):
                    "description": "生产主喷管固定主室组成；不在喉部才冻结，不沿程恢复化学平衡。再生冷却总热量集中在主室扣除，喷管本身按绝热等熵膨胀。"},
         "combustion": {
             "id": mode,
-            "label": "焓平衡（不附加经验燃烧损失）" if mode == "adiabatic" else "历史温升折减（兼容）",
+            "label": "定压焓平衡（化学平衡）" if mode == "adiabatic" else "历史温升折减（兼容）",
             "description": ("按入口总焓及单独记账的冷却抽热求 HP 平衡；不乘温升系数。化学平衡含解离，不等同于燃尽率 100%。"
                 if mode == "adiabatic" else "先求 HP 平衡，再冻结组成折减温升；焓差显式列为经验损失。这不是 c* 效率、燃尽率或已验证的损失模型。"),
             "legacy_factor": inputs.combustion_efficiency if mode == "legacy_temperature_rise" else None,
@@ -129,6 +129,9 @@ def _build_thermodynamic_applicability(result):
             row.update(status=checked["range_status"], phase=checked["phase"], limits=checked["limits"],
                        melting_boundary=checked["melting_boundary"],
                        description="已检查声明温压范围、单相与可用熔化线；未认证实验精度、完整相平衡或汽蚀裕度。")
+            if key in ("fuel_tank", "lox_tank", "fuel_boost_out", "lox_boost_out",
+                       "fuel_pump_inlet", "lox_pump_inlet"):
+                row["supply_screen"] = supply_liquid_screen(species, state.temperature, state.pressure)
         except Exception as exc:
             row.update(status="invalid_or_unavailable", reason=str(exc))
         report["pure_fluid_states"].append(row)

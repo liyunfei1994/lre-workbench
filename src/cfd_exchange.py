@@ -219,12 +219,22 @@ def _geometry_reference(geometry, inputs):
         theta = _number(nozzle.get("convergent_half_angle_deg", inputs.get("chamber_conv_half_angle_deg", 30.0)),
                         "convergent_half_angle_deg", 1, 89)
         bell = _number(nozzle.get("bell_fraction", inputs.get("nozzle_bell_fraction", 0.8)), "bell_fraction", 0.1, 1.5)
-        xs, rs, throat = full_hot_gas_contour(rt, re, rc, expansion, length,
-                                            theta_conv_deg=theta, bell_fraction=bell)
+        if nx:
+            # Saved contour coordinates own geometry; do not re-evaluate a
+            # historical method or substitute mutable parameter defaults.
+            throat = length - nx[0]
+            xs = [0.] + [x + throat for x in nx]
+            rs = [rc] + nr
+        else:
+            xs, rs, throat = full_hot_gas_contour(rt, re, rc, expansion, length,
+                theta_conv_deg=theta, bell_fraction=bell,
+                nozzle_contour_method=nozzle.get("nozzle_contour_method", inputs.get("nozzle_contour_method", "legacy_log_v1")),
+                nozzle_initial_angle_deg=nozzle.get("initial_expansion_angle_deg", inputs.get("nozzle_initial_angle_deg", 35.)),
+                nozzle_exit_angle_deg=nozzle.get("exit_angle_deg", inputs.get("nozzle_exit_angle_deg", 10.)))
         xs, rs = _contour(list(xs), list(rs))
         contour = {"x_m": xs, "radius_m": rs, "coordinate_origin": "injection_face_origin",
                    "includes_cylindrical_chamber": True, "throat_x_m": throat,
-                   "source": "geometry.nozzle.full_hot_gas_contour",
+                   "source": "saved_nozzle_contour_with_cylinder" if nx else "geometry.nozzle.full_hot_gas_contour",
                    "note": "圆筒、收缩、喉部及钟形段的轴对称燃气侧参考型面；非 CAD 实体或 CFD 网格。"}
     return {"snapshot": geometry, "contour": contour,
             "nozzle_contour": {"x_m": nx, "radius_m": nr, "coordinate_origin": "nozzle_throat_origin"},

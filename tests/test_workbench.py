@@ -104,6 +104,23 @@ class DesktopTests(unittest.TestCase):
         self.assertNotIn("预燃室(FFSC) / Preburners", titles)
         self.assertTrue(w.input_edits["gg_layout"].isEnabled())
 
+    def test_turbine_design_options_and_work_fractions_save_as_strings(self):
+        w = self.window
+        for key, value in (("turbine_boundary_basis", "total_to_total"),
+                           ("turbine_meanline_mode", "custom_work"),
+                           ("ox_turbine_geometry_state_basis", "system_pt_as_static"),
+                           ("fuel_turbine_geometry_state_basis", "system_pt_as_static")):
+            combo = w.input_edits[key]
+            self.assertIsInstance(combo, QComboBox)
+            combo.setCurrentIndex(combo.findData(value))
+        w.input_edits["turb_ox_stage_work_fractions"].setText("[0.4, 0.6]")
+        w.input_edits["turb_fuel_stage_work_fractions"].setText("[1.0]")
+        saved = w.case_document()["inputs"]
+        self.assertEqual(saved["turbine_boundary_basis"], "total_to_total")
+        self.assertEqual(saved["turbine_meanline_mode"], "custom_work")
+        self.assertEqual(saved["turb_ox_stage_work_fractions"], "[0.4, 0.6]")
+        self.assertEqual(saved["turb_fuel_stage_work_fractions"], "[1.0]")
+
     def test_case_roundtrip_preserves_units_and_hidden_fields(self):
         w = self.window
         w.input_edits["thrust"].setText("2450.12345")

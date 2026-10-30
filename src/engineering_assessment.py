@@ -10,6 +10,7 @@ import math
 
 from materials import material_evidence
 from convergence import numerical_convergence
+from core import preburner_temperature_constraint, wall_temperature_constraint
 
 
 def _finite(value):
@@ -192,19 +193,49 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0, *, scope: 
               power_tolerance_percent, "%", "maximum",
               f"绝对功率差 ≤ {power_tolerance_percent:g}%；GG 比值已含机械效率；不包含外部增压/补压泵。")
 
-    temperatures = ([('gg_T_combustion_K', 'gg_temp_limit', '燃气发生器出口温度')]
-                    if cycle_type == "gg" else
-                    [('ox_preburner_T_combustion_K', 'ox_preburner_temp_limit', '富氧预燃室出口温度'),
-                     ('fuel_preburner_T_combustion_K', 'fuel_preburner_temp_limit', '富燃预燃室出口温度')])
-    for result_key, input_key, label in temperatures:
-        check(result_key, label, summary.get(result_key), getattr(inputs, input_key, None), "K", "maximum",
-              "与当前工况设定的出口温度上限比较。" if scope == "system" else
-              "与当前工况设定的材料温度上限比较。")
+    if cycle_type == "gg":
+        check("gg_T_combustion_K", "燃气发生器出口温度", summary.get("gg_T_combustion_K"),
+              getattr(inputs, "gg_temp_limit", None), "K", "maximum",
+              "与当前工况设定的气体出口温度上限比较；气体温度不等于金属温度。")
+    else:
+        for side, label in (("ox", "富氧"), ("fuel", "富燃")):
+            constraint = preburner_temperature_constraint(inputs, side)
+            result_key = f"{side}_preburner_T_combustion_K"
+            check(result_key, f"{label}预燃室出口温度", summary.get(result_key),
+                  constraint["limit_K"], "K", "maximum")
+            row = checks[-1]
+            row.update(limit_status=constraint["status"], limit_basis=constraint["basis"])
+            if constraint["status"] == "unset":
+                row["detail"] = "该项尚未评估：未设定出口温度上限，保存的旧数值不参与判断。"
+            elif constraint["status"] == "provisional":
+                if row["status"] == "pass":
+                    row["status"] = "review"
+                row["detail"] = "仅与方案暂定上限比较；限值依据待核实，处于暂定上限内不代表工程验收通过。"
+            elif constraint["status"] == "documented" and constraint["basis"]:
+                row["detail"] = ("与已有用户填写依据的方案上限比较。气体温度不等于金属温度；"
+                                 "填写依据不等于已完成材料、寿命或氧相容性验证。")
+            else:
+                row["status"] = "unknown"
+                row["detail"] = "温度约束状态无效或缺少依据，该项尚未评估。"
 
     hydraulic, wall, cooling_detail = _cooling_profile_evidence(components.get("cooling_channel"), inputs)
     check("cooling_hydraulics", "冷却通道水力可行性", hydraulic, 0.0, "", "maximum", cooling_detail)
+    wall_constraint = wall_temperature_constraint(inputs)
     check("wall_temperature", "沿程热面壁温峰值", wall,
-          getattr(inputs, "cooling_wall_temp_limit_K", None), "K", "maximum", cooling_detail)
+          wall_constraint["limit_K"], "K", "maximum", cooling_detail)
+    row = checks[-1]
+    row.update(limit_status=wall_constraint["status"], limit_basis=wall_constraint["basis"])
+    if wall_constraint["status"] == "unset":
+        row["detail"] += " 该项尚未评估：未设定方案壁温上限，保留的示例数值不参与判断。"
+    elif wall_constraint["status"] == "provisional":
+        if row["status"] == "pass":
+            row["status"] = "review"
+        row["detail"] += " 仅与方案暂定上限比较，限值依据待核实；它不是材料数据温区上限。"
+    elif wall_constraint["status"] == "documented" and wall_constraint["basis"]:
+        row["detail"] += " 与登记了来源和适用条件的方案壁温上限比较；不代表材料、结构或寿命认证。"
+    else:
+        row["status"] = "unknown"
+        row["detail"] += " 温度约束状态无效或缺少依据，该项尚未评估。"
 
     material_records = {}
     for name in (vars(inputs) if scope == "engineering" else ()):
@@ -219,24 +250,25 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0, *, scope: 
                                           "estimated": True, "oxygen_compatibility_status": "unknown"}
     failures = sum(row["status"] == "fail" for row in checks)
     unknown = sum(row["status"] == "unknown" for row in checks)
+    review = sum(row["status"] == "review" for row in checks)
     placeholder = any(record["status"] in ("placeholder", "unknown") for record in material_records.values())
-    status = "fail" if failures else ("unknown" if unknown else ("review" if placeholder else "pass"))
+    status = "fail" if failures else ("unknown" if unknown else ("review" if review or placeholder else "pass"))
     numerical = numerical_convergence(results)
     if numerical["status"] != "pass" and status == "pass":
         status = "unknown"
-    label = {"fail": "工程约束未通过", "unknown": "工程约束待确认", "review": "材料数据待核实",
+    label = {"fail": "工程约束未通过", "unknown": "工程约束待确认", "review": "工程约束依据待核实",
              "pass": "已检查的工程约束通过"}[status]
     limitations = ["本校核只覆盖模型已有的供给压力、轴功率与温度约束，不代表整机设计认证。",
                    "材料数据为简化工程数据；富氧相容性需要具体压力、温度、表面状态下的试验依据。",
                    "未完成结构疲劳、燃烧稳定性、完整瞬态、寿命及试验验证。"]
     if scope == "system":
-        label = {"fail": "系统约束未通过", "unknown": "系统约束待确认",
+        label = {"fail": "系统约束未通过", "unknown": "系统约束待确认", "review": "系统约束依据待核实",
                  "pass": "已检查的系统约束通过"}[status]
         limitations = ["本校核覆盖稳态设计点的供给压力、轴功率、预燃室／燃气发生器出口温度，以及统一冷却剖面的水力与沿程壁温限值。",
                        "沿程壁温属于系统热设计约束，与数值收敛独立判定；预算模式或缺少完整剖面时标记待确认。此项不是材料强度、结构或疲劳验证。",
                        "系统约束通过不代表部件设计或重复使用能力已验证；启动、关机、再启动瞬态、疲劳寿命和试验验证需后续完成。"]
     return {"schema_version": 1, "scope": scope, "cycle_type": cycle_type, "numerical": numerical,
             "status": status, "label": label, "checks": checks, "failure_count": failures,
-            "unknown_count": unknown, "materials": material_records,
+            "unknown_count": unknown, "review_count": review, "materials": material_records,
             "limitations": limitations,
             "model_warnings": list(results.warnings)}

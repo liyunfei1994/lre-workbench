@@ -58,7 +58,7 @@ from core import (
     ValidationError,
 )
 from cooling import CoolingChannel
-from regen_coupling import close_regen_cycle, cooling_arguments
+from regen_coupling import close_regen_cycle, cooling_arguments, fixed_contour_inputs
 from chamber_sizing import size_combustion_chamber
 from pump import Pump, fluid_density
 from nozzle import Nozzle
@@ -329,6 +329,7 @@ class GGCycleModel:
                         states["lox_pump_inlet"].temperature, self.inputs.pump_efficiency_ox,
                         nr_rpm=n_lox_rpm,
                         n_stages=self.inputs.lox_pump_n_stages,
+                        head_coefficient_psi=self.inputs.lox_pump_head_coefficient_psi,
                         tip_speed_limit_ms=self.inputs.pump_tip_speed_limit_ms,
                         npsh_available_pa=npshA_lox,
                         impeller_material=getattr(self.inputs, "lox_pump_impeller_material", None),
@@ -338,6 +339,7 @@ class GGCycleModel:
                          states["fuel_pump_inlet"].temperature, self.inputs.pump_efficiency_fuel,
                          nr_rpm=n_fuel_rpm,
                          n_stages=self.inputs.fuel_pump_n_stages,
+                         head_coefficient_psi=self.inputs.fuel_pump_head_coefficient_psi,
                          tip_speed_limit_ms=self.inputs.pump_tip_speed_limit_ms,
                          npsh_available_pa=npshA_fuel,
                          impeller_material=getattr(self.inputs, "fuel_pump_impeller_material", None),
@@ -418,6 +420,7 @@ class GGCycleModel:
         gg_turbines: list[ComponentResult] = []
         if self._dual_shaft():
             turb_ox = Turbine(
+                state_basis=self.inputs.turbine_boundary_basis,
                 name="gg_turbine_ox",
                 inlet_state=gg_gas_state,
                 exhaust_pressure=p_te,
@@ -433,6 +436,7 @@ class GGCycleModel:
                 u_max_ms=self.inputs.turb_ox_u_max_ms,
             )
             turb_fuel = Turbine(
+                state_basis=self.inputs.turbine_boundary_basis,
                 name="gg_turbine_fuel",
                 inlet_state=gg_gas_state,
                 exhaust_pressure=p_te,
@@ -449,6 +453,8 @@ class GGCycleModel:
             )
             turb_ox_out, turb_ox_result = turb_ox.evaluate()
             turb_fuel_out, turb_fuel_result = turb_fuel.evaluate()
+            states["gg_turbine_ox_exhaust"] = turb_ox_out
+            states["gg_turbine_fuel_exhaust"] = turb_fuel_out
             components[turb_ox_result.name] = turb_ox_result
             components[turb_fuel_result.name] = turb_fuel_result
             gg_turbines = [turb_ox_result, turb_fuel_result]
@@ -465,6 +471,7 @@ class GGCycleModel:
             )
         else:
             turbine = Turbine(
+                state_basis=self.inputs.turbine_boundary_basis,
                 name="gg_turbine",
                 inlet_state=gg_gas_state,
                 exhaust_pressure=p_te,
@@ -491,6 +498,8 @@ class GGCycleModel:
                 name="gg_turbine_exhaust", pressure=p_te,
                 temperature=t_te, mass_flow=mdot_gg,
                 composition=turb_out.composition,
+                enthalpy=turb_out.enthalpy,
+                metadata=dict(turb_out.metadata),
             )
         states["gg_turbine_exhaust"] = exhaust_flow
 
@@ -685,7 +694,7 @@ class GGCycleModel:
         )
         injector_result = injector.evaluate()
         injector_result.notes.insert(
-            0, "GG 循环主喷注器为液-液喷注（离心式/互击式），密度取泵后/冷却后真实液态值。")
+            0, "GG 主喷注概念采用中心孔＋外环缝；密度取泵后／冷却后状态，具体相态与喷注构型适用性需另行确认。")
         components[injector_result.name] = injector_result
 
         # ── 功率平衡 & 推力合成 ─────────────────────────────────
@@ -1578,6 +1587,7 @@ class GGCycleModel:
         # Web studies use an immutable source design. Never silently fall back
         # to proportional pressure when that explicitly supplied baseline fails.
         if design_baseline is not None:
+            frozen_contour = fixed_contour_inputs(design_baseline)
             At_design = float(design_baseline.get("throat_area_m2", 0))
             if not math.isfinite(At_design) or At_design <= 0:
                 raise ValueError("固定喉部基准面积必须为有限正数。")
@@ -1587,11 +1597,17 @@ class GGCycleModel:
                 if not math.isfinite(frozen_h_m) or frozen_h_m <= 1e-4:
                     raise ValueError("冷却通道冻结高度无效。")
         else:
+            frozen_contour = {key: getattr(self.inputs, key) for key in (
+                "nozzle_contour_method", "nozzle_initial_angle_deg", "nozzle_exit_angle_deg",
+                "nozzle_bell_fraction", "chamber_conv_half_angle_deg", "expansion_ratio")}
             At_design = None
             frozen_h_m = None
             try:
                 _design = GGCycleModel(copy.deepcopy(self.inputs)).evaluate(
                     include_cooling_marching=include_cooling_marching)
+                profile = getattr(_design.components.get("cooling_channel"), "profile", None) or {}
+                frozen_contour = fixed_contour_inputs({"contour_inputs": frozen_contour,
+                    "cooling_hardware": {"geometry": profile.get("geometry", {})}})
                 At_design = float(_design.components["nozzle"].outputs.get("At_m2", 0.0)) or None
                 if (bool(getattr(self.inputs, "cooling_channel_auto_size", 1.0))
                         and bool(getattr(self.inputs, "cooling_bartz_mode", True))):
@@ -1604,6 +1620,8 @@ class GGCycleModel:
 
         def _solve_at(thrust_target: float, pc_val: float):
             pi = copy.deepcopy(self.inputs)
+            for key, value in frozen_contour.items():
+                setattr(pi, key, value)
             pi.thrust = thrust_target
             pi.pc = pc_val
             pi.cooling_marching_enable = 0.0

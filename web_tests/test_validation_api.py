@@ -40,6 +40,21 @@ class ValidationAPITests(unittest.TestCase):
     def submit(self, **parts):
         return self.admin.post(self.endpoint, json={"source_job_id": self.source_id, **parts})
 
+    def test_design_basis_projection_is_record_bound_and_does_not_write_history(self):
+        source = deepcopy(self.source)
+        source["calculation"]["inputs"].update(cycle_type="ffsc", propellant_pair="lox_methane")
+        saved = json.dumps(source)
+        self.app.state.store.execute("UPDATE jobs SET result=? WHERE id=?", (saved, self.source_id))
+        response = self.admin.get("/api/jobs/" + self.source_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        view = response.json()["steady_design"]
+        self.assertEqual(view["record_id"], self.source_id)
+        self.assertEqual(view["schema_version"], 1)
+        self.assertEqual(view["validation_status"], "not_certified")
+        self.assertTrue(all(m["value"] == "未记录" for m in view["models"]))
+        after = self.app.state.store.one("SELECT result FROM jobs WHERE id=?", (self.source_id,))
+        self.assertEqual(after["result"], saved)
+
     def test_snapshot_separate_history_and_revision(self):
         payload = {key: deepcopy(self.project[key]) for key in ("name", "description", "revision", "inputs")}
         payload["inputs"]["thrust"] *= 1.01
@@ -77,6 +92,38 @@ class ValidationAPITests(unittest.TestCase):
         self.app.state.store.execute("UPDATE jobs SET status='running' WHERE id=?", (self.source_id,))
         self.assertEqual(self.submit().status_code, 422)
 
+    def test_gas_handoff_worker_preserves_source_and_keeps_baseline_separate(self):
+        from tests.test_gas_handoff import fixture
+        source = fixture()
+        source["calculation"]["inputs"] = {"cycle_type": "ffsc", "propellant_pair": "lox_methane",
+                                             "methane_thermo_dataset": "gri30_highT"}
+        source["submitted_inputs"] = source["calculation"]["inputs"]
+        self.app.state.store.execute("UPDATE jobs SET result=?,inputs=? WHERE id=?",
+            (json.dumps(source), json.dumps(source["submitted_inputs"]), self.source_id))
+        response = self.submit(gas_screening={"enabled": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        key = response.json()["id"]
+        queue = JobQueue(self.app.state.store, timeout=90)
+        queue.start()
+        try:
+            end = time.monotonic()+95
+            while time.monotonic() < end:
+                record = self.admin.get("/api/validations/"+key).json()
+                if record["status"] not in ("queued", "running"): break
+                time.sleep(.2)
+            self.assertEqual(record["status"], "succeeded", record)
+        finally:
+            queue.stop()
+        result = record["result"]
+        self.assertIsNone(result["thermochemistry"])
+        self.assertEqual(result["gas_handoff"]["status"], "complete")
+        self.assertEqual(result["chamber_handoff_comparison"]["status"], "ok")
+        self.assertEqual(len(result["gas_screening"]["stations"]), 4)
+        self.assertTrue(all(s["status"] == "screened_with_limitations" for s in result["gas_screening"]["stations"]))
+        self.assertEqual(self.admin.get("/api/jobs/"+self.source_id).json()["result"], source)
+        for filename in ("gas-handoff.js", "gas-handoff.css"):
+            self.assertEqual(self.admin.get("/static/"+filename).status_code, 200)
+
     def test_auth_csrf_cancel_and_shared_queue(self):
         guest = client(self.app)
         self.addCleanup(guest.close)
@@ -93,7 +140,7 @@ class ValidationAPITests(unittest.TestCase):
         self.assertEqual(guest.post("/api/validations/"+keys[0]+"/cancel", json={}).status_code, 403)
         self.assertEqual(self.admin.post("/api/validations/"+keys[0]+"/cancel", json={}).status_code, 200)
         self.assertEqual(self.admin.post("/api/validations/"+keys[0]+"/cancel", json={}).status_code, 409)
-        for filename in ("validation.js", "validation.css", "validation-charts.js", "validation-charts.css", "property-comparison.js", "property-comparison.css", "component-analysis.js", "component-analysis.css", "flow-model.js", "flow-analysis.js", "flow-analysis.css", "cycle-model.js", "cycle-schematic.js", "cycle-schematic.css"):
+        for filename in ("validation.js", "thermo-stations.js", "validation.css", "validation-charts.js", "validation-charts.css", "property-comparison.js", "property-comparison.css", "component-analysis.js", "component-analysis.css", "flow-model.js", "flow-analysis.js", "flow-analysis.css", "cycle-model.js", "cycle-schematic.js", "cycle-schematic.css"):
             self.assertEqual(self.admin.get("/static/"+filename).status_code, 200)
 
     def test_actual_worker_preserves_source_and_returns_real_backends(self):

@@ -330,6 +330,7 @@ class ChamberDesignPanel(QWidget):
         left = QVBoxLayout()
         box = QGroupBox("型面参数（改后重跑设计点生效）")
         form = QFormLayout(box)
+        self._register_edit(form, "expansion_ratio", *CHAMBER_INPUTS['expansion_ratio'])
         self._register_edit(form, "chamber_contraction_ratio", *CHAMBER_INPUTS['chamber_contraction_ratio'])
         self._register_edit(form, "chamber_l_star_m", *CHAMBER_INPUTS['chamber_l_star_m'])
         self._register_edit(form, "chamber_conv_half_angle_deg", *CHAMBER_INPUTS['chamber_conv_half_angle_deg'])
@@ -759,7 +760,7 @@ class ChamberDesignPanel(QWidget):
                     ls="--", label="节距")
             ax.plot(x_mm, [v * 1e3 for v in dist["h_m"]], color="#059669", lw=1.2,
                     ls="-.", label="通道深 h")
-            ax.axhline(cd.RIB_MIN_SOFT_MM, color="#dc2626", ls=":", lw=0.9)
+            ax.axhline(0., color="#dc2626", ls=":", lw=0.9, label="几何重叠边界")
             ax.axvline(x_t * 1e3, color="#7c2d12", ls=":", lw=0.9)
             ax.set_ylabel("[mm]", fontsize=8)
             ax.set_xlabel("x [mm]", fontsize=8)

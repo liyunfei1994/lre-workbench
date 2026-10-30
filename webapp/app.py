@@ -356,6 +356,20 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
             raise HTTPException(404, "任务不存在。")
         for field in ("inputs", "result", "progress"):
             row[field] = json.loads(row[field]) if row[field] else None
+        from webapp.nozzle_geometry import nozzle_geometry_view
+        row["nozzle_geometry"] = nozzle_geometry_view(row["result"], row["id"])
+        from webapp.pump_geometry import pump_geometry_view
+        row["pump_geometry"] = pump_geometry_view(row["result"], row["id"])
+        from webapp.injector_design import injector_design_view
+        row["injector_design"] = injector_design_view(row["result"], row["id"])
+        from webapp.turbine_geometry import turbine_geometry_view
+        row["turbine_geometry"] = turbine_geometry_view(row["result"], row["id"])
+        from webapp.turbine_design import turbine_design_view
+        row["turbine_design"] = turbine_design_view(row["result"], row["id"])
+        from webapp.result_consistency import result_consistency_view
+        row["result_consistency"] = result_consistency_view(row["result"], row["id"])
+        from webapp.steady_design import steady_design_view
+        row["steady_design"] = steady_design_view(row["result"], row["id"], consistency=row["result_consistency"])
         return row
 
     @app.post("/api/jobs/{job_id}/cancel")
@@ -453,6 +467,97 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
     async def cancel_validation(validation_id: str, request: Request):
         validation_record(validation_id, request)
         return await cancel(validation_id, request)
+
+    @app.get("/api/projects/{project_id}/cooling-designs/setup")
+    def cooling_design_setup(project_id: str, source_job_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        source = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' AND status='succeeded'",
+                           (source_job_id, project_id))
+        if not source:
+            raise HTTPException(422, "请选择本项目已完成的设计点")
+        source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+        from webapp.cooling_design import configuration
+        try:
+            return configuration(source)
+        except (ValueError, TypeError, KeyError, StopIteration) as exc:
+            raise HTTPException(422, str(exc) or "来源记录缺少冷却边界") from exc
+
+    @app.get("/api/projects/{project_id}/cooling-designs")
+    def cooling_designs(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        rows = store.all("SELECT id,project_id,revision,submitted_by,status,created,progress,error,inputs,kind "
+                         "FROM jobs WHERE project_id=? AND kind='cooling_design' ORDER BY created DESC LIMIT 100", (project_id,))
+        for row in rows:
+            row["request"] = json.loads(row.pop("inputs"))
+            row["progress"] = json.loads(row["progress"]) if row["progress"] else None
+        return rows
+
+    @app.post("/api/projects/{project_id}/cooling-designs")
+    async def submit_cooling_design(project_id: str, request: Request):
+        user = session_user(request)
+        try:
+            value = await request.json()
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise HTTPException(422, "请求须为有效 JSON") from exc
+        if not isinstance(value, dict) or not isinstance(value.get("source_job_id"), str):
+            raise HTTPException(422, "请选择来源设计记录")
+        from webapp.cooling_design import normalize_request
+        key, now = str(uuid.uuid4()), time.time()
+        with store.connect(immediate=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design' AND status='succeeded'",
+                             (value["source_job_id"], project_id)).fetchone()
+            if not row:
+                raise HTTPException(422, "来源必须为本项目已完成的稳态设计记录")
+            source = dict(row)
+            source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            try:
+                normalized = normalize_request(value, source)
+            except (ValueError, TypeError, KeyError, StopIteration) as exc:
+                raise HTTPException(422, str(exc) or "来源边界不完整") from exc
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            own = db.execute("SELECT COUNT(*) FROM jobs WHERE submitted_by=? AND status IN ('queued','running')", (user["id"],)).fetchone()[0]
+            if count >= 12 or own >= 3:
+                raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务")
+            db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,kind) VALUES(?,?,?,?,?,?,?,'cooling_design')",
+                       (key, project_id, source["revision"], user["id"], "queued", json.dumps(normalized, ensure_ascii=False, allow_nan=False), now))
+        return {"id": key, "status": "queued"}
+
+    @app.get("/api/cooling-designs/{study_id}")
+    def cooling_design_record(study_id: str, request: Request):
+        session_user(request)
+        row = store.one("SELECT * FROM jobs WHERE id=? AND kind='cooling_design'", (study_id,))
+        if not row:
+            raise HTTPException(404, "通道筛选记录不存在")
+        row["request"] = json.loads(row.pop("inputs"))
+        for field in ("result", "progress"):
+            row[field] = json.loads(row[field]) if row[field] else None
+        return row
+
+    @app.post("/api/cooling-designs/{study_id}/cancel")
+    async def cancel_cooling_design(study_id: str, request: Request):
+        cooling_design_record(study_id, request)
+        return await cancel(study_id, request)
+
+    @app.get("/api/cooling-designs/{study_id}/candidates/{candidate_id}/draft")
+    def cooling_candidate_draft(study_id: str, candidate_id: int, request: Request):
+        record = cooling_design_record(study_id, request)
+        rows = (record["result"] or {}).get("candidates", [])
+        row = next((row for row in rows if row["id"] == candidate_id and row["status"] == "computed"), None)
+        if row is None:
+            raise HTTPException(422, "该候选尚无计算结果")
+        g, limits = row["geometry"], record["request"]["constraints"]
+        patch = {"cooling_n_channels": float(g["count"]), "cooling_channel_width_m": g["width_mm"]/1000,
+                 "cooling_channel_height_m": g["height_mm"]/1000, "cooling_wall_thickness_m": g["wall_mm"]/1000,
+                 "cooling_channel_auto_size": 0.0, "cooling_sizing_reference": "coolant_inlet_velocity",
+                 "cooling_wall_temp_limit_status": limits["wall_limit_status"],
+                 "cooling_wall_temp_limit_basis": limits["wall_limit_basis"]}
+        if limits["wall_temp_limit_K"] is not None:
+            patch["cooling_wall_temp_limit_K"] = limits["wall_temp_limit_K"]
+        return {"project_id": record["project_id"], "source_job_id": record["request"]["source_job_id"],
+                "input_patch": patch, "assessment": row["assessment"],
+                "note": "仅采纳几何及本次壁温约束到草稿；先保存新版本，再重新整机闭合，筛选结果不替代设计点结果。"}
 
     @app.get("/api/projects/{project_id}/throttles")
     def throttles(project_id: str, request: Request):
@@ -968,15 +1073,25 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600):
         # registry associations can incorrectly classify JavaScript as text/plain.
         media_types = {"bootstrap.js": "text/javascript", "app.js": "text/javascript", "results.js": "text/javascript",
                        "parameter-editor.js": "text/javascript",
+                       "nozzle-geometry.js": "text/javascript", "nozzle-geometry.css": "text/css",
+                       "pump-geometry.js": "text/javascript", "pump-geometry.css": "text/css",
+                       "injector-design.js": "text/javascript", "injector-design.css": "text/css",
+                       "turbine-geometry.js": "text/javascript", "turbine-geometry.css": "text/css",
+                       "turbine-design.js": "text/javascript", "turbine-design.css": "text/css",
+                       "result-consistency.js": "text/javascript",
                        "thermo-applicability.js": "text/javascript", "thermo-applicability.css": "text/css",
                        "cooling.js": "text/javascript", "cooling.css": "text/css",
+                       "cooling-design.js": "text/javascript", "cooling-design.css": "text/css",
                        "convergence.js": "text/javascript", "convergence.css": "text/css",
                        "steady-closure.js": "text/javascript", "steady-closure.css": "text/css",
                        "steady-workspace.js": "text/javascript", "steady-workspace.css": "text/css",
+                       "steady-design.js": "text/javascript",
                        "component-analysis.js": "text/javascript", "component-analysis.css": "text/css",
                        "cycle-model.js": "text/javascript", "cycle-schematic.js": "text/javascript", "cycle-schematic.css": "text/css",
                        "flow-model.js": "text/javascript", "flow-analysis.js": "text/javascript", "flow-analysis.css": "text/css",
                        "validation.js": "text/javascript", "validation.css": "text/css",
+                       "gas-handoff.js": "text/javascript", "gas-handoff.css": "text/css",
+                       "thermo-stations.js": "text/javascript",
                        "throttle.js": "text/javascript", "throttle.css": "text/css",
                        "transient.js": "text/javascript", "transient.css": "text/css",
                        "feed-network.js": "text/javascript", "feed-network.css": "text/css",

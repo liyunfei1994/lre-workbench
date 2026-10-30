@@ -27,7 +27,7 @@ SCIENCE_PINS = {
 def system_calculation_scope():
     """Version the web execution policy separately from immutable user inputs."""
     return {
-        "id": "engine_system", "version": 3, "label": "系统仿真 · 稳态设计点",
+        "id": "engine_system", "version": 4, "label": "系统仿真 · 稳态设计点",
         "disabled_postprocessing": ["cfd", "fea"],
         "cooling_profile_source": "calculation.components.cooling_channel.profile",
         "independent_cooling_postprocessing": False,
@@ -38,6 +38,7 @@ def system_calculation_scope():
             "沿程图直接读取本次循环保存的 cooling_channel.profile，不运行独立冷却后处理；给定热量/压降的预算模式不生成沿程解。",
             "详细部件估算沿用底层模型并保留在原始结果中，不作为本阶段的部件设计结论；未执行有限元或 CFD 求解。",
             "方案参数完整保留；历史沿程后处理开关不控制循环内统一冷却模型。历史记录不按当前参数补算曲线。",
+            "预燃室温度约束分别记录状态与依据；未设定时尚未评估，暂定限值内仍待核实，已有依据仅代表用户登记的方案条件。",
         ],
     }
 
@@ -52,6 +53,17 @@ def input_values(values, *, saved_snapshot=False):
     if unknown:
         raise ValueError("无法识别的参数：" + ", ".join(sorted(unknown)))
     merged = defaults | values
+    # Omitted fields identify the earlier sizing/constraint contract, not a
+    # request to reinterpret a stored 100 m/s value at a different section.
+    for key, legacy in {"cooling_sizing_reference": "legacy_inlet_density_throat_width",
+                        "cooling_wall_temp_limit_status": "provisional",
+                        "cooling_channel_auto_size": 1.0,
+                        "cooling_channel_height_m": 0.005}.items():
+        if key not in values:
+            merged[key] = legacy
+    if "nozzle_contour_method" not in values:
+        # An older parameter document must not acquire new wall angles on load.
+        merged["nozzle_contour_method"] = "legacy_log_v1"
     if "wall_thermal_dataset_id" not in values:
         # Resolve a historical material explicitly in EngineInputs; do not let
         # the current default silently replace a different saved copper alloy.
@@ -81,6 +93,7 @@ def input_values(values, *, saved_snapshot=False):
 
 def presets():
     return [{"key": key, "label": item["label"], "source": item["source"],
+             "routine_design": bool(preset_input_values(key)["cooling_bartz_mode"]),
              "inputs": input_values(preset_input_values(key))[0]}
             for key, item in ENGINE_PRESETS.items()]
 
@@ -175,6 +188,24 @@ def _calculate(values, progress, input_warnings):
                                       [str(w.message) for w in caught])),
     }, missing)
     output["nonfinite_fields"] = missing
+    from gas_handoff import capture_gas_handoff
+    output["gas_handoff"] = capture_gas_handoff(output)
+    from webapp.nozzle_geometry import nozzle_geometry_view
+    output["nozzle_geometry"] = nozzle_geometry_view(output)
+    from webapp.pump_geometry import pump_geometry_view
+    output["pump_geometry"] = pump_geometry_view(output)
+    from webapp.injector_design import injector_design_view
+    output["injector_design"] = injector_design_view(output)
+    from webapp.turbine_geometry import turbine_geometry_view
+    output["turbine_geometry"] = turbine_geometry_view(output)
+    import thermo
+    from webapp.turbine_design import capture_turbine_gas_properties, turbine_design_view
+    output["turbine_gas_properties"] = capture_turbine_gas_properties(output, thermo)
+    output["turbine_design"] = turbine_design_view(output)
+    from webapp.result_consistency import result_consistency_view
+    output["result_consistency"] = result_consistency_view(output)
+    from webapp.steady_design import steady_design_view
+    output["steady_design"] = steady_design_view(output)
     if missing:
         output["warnings"].append("部分结果不是有限数值，已标为缺失；请检查计算和工程警告。")
     json.dumps(output, allow_nan=False)

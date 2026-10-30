@@ -5,9 +5,23 @@ ui_drawings.nozzle —— 喷管 的二维剖面图 / 3D 模型 / 估算说明�
 from __future__ import annotations
 
 import math
+from html import escape
 from typing import Any, Dict, List, Tuple
 
 from ._common import *  # noqa: F401,F403
+
+
+def _nozzle_method_note(nozzle: Dict[str, Any]) -> str:
+    """Describe saved construction metadata without upgrading historical evidence."""
+    method = str(nozzle.get("nozzle_contour_method") or "")
+    source = str(nozzle.get("angle_source") or "")
+    if not method and not source:
+        return "历史轮廓；角度来源未记录"
+    if "legacy" in method.lower() or "legacy" in source.lower():
+        return "历史经验角度；未验证为优化型面"
+    if "explicit" in method.lower() or "explicit" in source.lower():
+        return "指定起始角与出口角；未进行推力优化"
+    return "已记录构造方法；未进行推力优化"
 
 
 def _build_nozzle_3d(plotter, geom: Dict[str, Any]):
@@ -41,7 +55,8 @@ def _build_nozzle_3d(plotter, geom: Dict[str, Any]):
         plotter.add_mesh(cone, color="#8ea2f5", opacity=0.8)
 
     bf = _num(n.get("bell_fraction"), 0.80)
-    txt = (f"TOP 抛物线钟形喷管 ({int(round(bf*100))}% bell)\n"
+    txt = (f"抛物线钟形喷管 · 系统级工程近似 ({int(round(bf*100))}% bell)\n"
+           f"{_nozzle_method_note(n)}\n"
            f"Dt = {2*rt:.3f} m, De = {2*re:.3f} m\n"
            f"ε = {_num(n.get('expansion_ratio'), 0):.1f}, "
            f"L_nozzle = {_num(n.get('nozzle_length_m'), 0):.3f} m")
@@ -199,9 +214,10 @@ def _fig_nozzle(geom: Dict[str, Any]) -> Figure:
     Ru = _num(n.get("throat_upstream_radius_m"), 0.0)
     Rd = _num(n.get("throat_downstream_radius_m"), 0.0)
     note = (
-        f"TOP 抛物线钟形喷管 / Thrust-Optimized Parabola ({int(round(bf * 100))}% bell)\n"
+        f"抛物线钟形喷管 · 系统级工程近似 ({int(round(bf * 100))}% bell)\n"
+        f"{_nozzle_method_note(n)}\n"
         f"面积膨胀比 ε = {eps:.1f},  面积收缩比 = {cr:.2f}\n"
-        f"喉部上游圆弧 Ru = {Ru:.4f} m,  下游圆弧 Rd = {Rd:.4f} m (=0.382·Rt)"
+        f"喉部上游圆弧 Ru = {Ru:.4f} m,  下游圆弧 Rd = {Rd:.4f} m"
     )
     ax.text(0.99, 0.02, note, transform=ax.transAxes, fontsize=8,
             color="#374151", ha="right", va="bottom",
@@ -218,44 +234,46 @@ def _explain_nozzle(geom: Dict[str, Any]) -> str:
     ru = _num(n.get("throat_upstream_radius_m")); rd = _num(n.get("throat_downstream_radius_m"))
     tn = _num(n.get("initial_expansion_angle_deg")); te = _num(n.get("exit_angle_deg"))
     lnoz = _num(n.get("nozzle_length_m")); bf = _num(n.get("bell_fraction"), 0.8)
+    angle_note = escape(_nozzle_method_note(n))
     rows = "".join([
         _row("喉部直径 Dt", f"{dt:.3f} m", "At = ṁ·c*/pc, Dt=√(4At/π)",
-             "卡住质量流量的咽喉,由喷管热力学反推 —— 最硬核的物理量"),
+             "由设计点质量流量、特征速度与燃烧室压力确定"),
         _row("出口直径 De", f"{de:.3f} m", "Ae = ε·At, De=√(4Ae/π)",
              f"ε={eps:.1f} 是你输入的面积膨胀比,决定膨胀程度/真空比冲"),
-        _row("上游圆弧 Ru", f"{ru:.4f} m", "Ru = 1.5·Rt", "喉部上游过渡圆角(行业惯例)"),
-        _row("下游圆弧 Rd", f"{rd:.4f} m", "Rd = 0.382·Rt", "喉部下游过渡圆角(Rao TOP 标准值)"),
-        _row("初始抛物线角 θn", f"{tn:.1f}°", "24+2.9·lnε (Rao图拟合)", "喉后抛物线起始角(TOP)"),
-        _row("出口角 θe", f"{te:.1f}°", "16.5−2.1·lnε (Rao图拟合)", "出口残余发散角,越小推力损失越小"),
+        _row("上游圆弧 Ru", f"{ru:.4f} m", "读取统一轮廓的实际圆弧半径", "喉部上游过渡；与热侧换热计算使用同一几何"),
+        _row("下游圆弧 Rd", f"{rd:.4f} m", "读取统一轮廓的实际圆弧半径", "喉部至抛物线段的相切过渡"),
+        _row("初始抛物线角 θn", f"{tn:.1f}°", "读取本次轮廓记录", angle_note),
+        _row("出口角 θe", f"{te:.1f}°", "读取本次轮廓记录", "出口壁面切线角；单独减小此角不保证整条型面性能提高"),
         _row("喷管长度 L_nozzle", f"{lnoz:.3f} m", f"{bf:.0%}×(15°锥形长度)",
              f"{int(round(bf*100))}% 钟形喷管的定义长度"),
     ])
-    # ── 无量纲比 + 与论文 VOLVO S1 对照(下方卡片已列全部有量纲值,此处不重复) ──
+    # 只报告保存的实际无量纲几何，不推定与任何实机或论文型面相同。
     rt_v = _num(n.get("throat_radius_m"))
     ru_rt = (ru / rt_v) if rt_v else 0.0
     rd_rt = (rd / rt_v) if rt_v else 0.0
     cfd_note = (
-        f"<p class='src'><b>无量纲比（CFD 复现用，下方卡片只给有量纲值）：</b>"
-        f"ru/Rt = {ru_rt:.3f}（本程序 1.5）、rd/Rt = {rd_rt:.3f}（本程序 0.382）。"
-        "<br>与你论文 <b>VOLVO S1</b>(TOP: ε=20, Ln=350 mm, Dt=67.08 mm, rd/Rt=0.5, "
-        "θn=35.03°, θe=4.0°)对照——论文与本程序<b>同为 TOP 抛物线法</b>(过 θn/θe 切线交点的"
-        "二次抛物线)；差异仅在参数取值：论文按其工况*指定* θn/θe 与 rd/Rt=0.5，本程序按 "
-        "Rao 设计图由 ε 拟合 θn/θe、取 rd/Rt=0.382。右上角「导出坐标 CSV」给完整 (x,r) 供 CFD。</p>"
+        f"<p class='src'><b>实际无量纲比：</b>"
+        f"Ru/Rt = {ru_rt:.3f}，Rd/Rt = {rd_rt:.3f}。"
+        "<br>图示与导出坐标用于系统级尺寸核对及后续流动分析；"
+        "旋转内轮廓得到的是燃气侧曲面，不代表完整壁厚、冷却通道或可制造结构。"
+        "角度和长度的选择尚需部件流场、分离与性能分析支持。</p>"
     )
+    method = escape(str(n.get("nozzle_contour_method") or "历史记录未保存"))
+    source = escape(str(n.get("angle_source") or "历史记录未保存"))
 
     return (_EXPLAIN_CSS +
-            "<body><p><b>喷管几何 —— TOP 推力优化抛物线钟形喷管 (Thrust-Optimized "
-            "Parabola)</b>　轮廓由喉部上/下游圆弧 + <b>二次抛物线</b>(过 θn 切线与 θe 切线"
-            "交点的二次 Bézier，即 Rao 抛物线近似法)生成"
-            "(<code>geometry/nozzle.py: _rao_bell_contour</code>)。"
-            "这正是 Raptor / Merlin / RS-25 等现役发动机采用的喷管型面族。"
-            "本表给 <b>公式与物理意义</b>;有量纲数值见下方「喷管」卡片,不重复。</p>"
+            "<body><p><b>喷管几何 —— 抛物线钟形喷管：系统级工程近似</b>。"
+            "圆弧连接喉部，二次 Bézier 连接抛物线起点与出口；其控制点为两端切线的交点。"
+            "这定义了几何构造，并不自动证明该型面具有最优推力。"
+            f"本次记录：{angle_note}。</p>"
             "<table width='100%'><tr><th>参数</th><th>当前值</th><th>公式</th><th>物理意义</th></tr>"
             + rows + "</table>"
-            "<p class='src'>依据：G.V.R. Rao, \"Exhaust Nozzle Contour for Optimum Thrust\", "
-            "Jet Propulsion, 1958；同作者 \"Approximation of Optimum Thrust Nozzle Contour\", "
-            "ARS Journal, 1960(抛物线近似法)；Huzel &amp; Huang《Modern Engineering for Design "
-            "of Liquid-Propellant Rocket Engines》。</p>"
+            "<p class='src'>方法参考：NASA SP-8120《Liquid Rocket Engine Nozzles》，"
+            "§2.1.2.1.2、图5（正文第15页）与 §3.1.2.1.2（正文第67页）。"
+            "该资料讨论倾斜抛物线近似及入口、出口壁角的选择，并要求通过性能计算比较候选型面；"
+            "本程序未将未经追溯的经验角度表达式认定为该图的拟合结果。"
+            "<a href='https://ntrs.nasa.gov/citations/19770009165'>NASA 原始资料</a>。</p>"
+            f"<p class='src'>保存的构造方法：{method}；角度来源：{source}。</p>"
             + cfd_note + "</body>")
 
 

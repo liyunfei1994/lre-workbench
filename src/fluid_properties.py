@@ -177,3 +177,42 @@ def saturation_pressure(fluid, temperature):
     if not math.isfinite(temperature) or not spec["Tmin_K"] <= temperature < spec["Tcritical_K"]:
         raise ValueError(f"{spec['fluid']} 在 {temperature:g} K 无当前液相模型可用的饱和压；不可代入固定占位值计算 NPSH。")
     return float(PropsSI("P", "T", temperature, "Q", 0, spec["fluid"]))
+
+
+def supply_liquid_screen(fluid, temperature, pressure):
+    """Design-point phase/subcooling evidence, NOT an NPSHr comparison.
+
+    Query only when producing a new calculation record. Missing saturation or
+    melting evidence stays explicit; a supercritical state has no boiling margin.
+    Absolute pressure refers to the saved lumped port, not an ullage model.
+    """
+    checked = state_tp(fluid, temperature, pressure, require_liquid=True)
+    spec = checked["limits"]
+    report = {"status": "evaluated", "model": {"backend": "HEOS", "version": spec["version"],
+              "fluid": spec["fluid"]}, "phase": checked["phase"],
+              "density_kg_m3": checked["rho_kgm3"],
+              "saturation_temperature_K": None, "subcooling_K": None,
+              "vapor_pressure_Pa": None, "static_npsh_component_m": None,
+              "saturation_temperature_status": "not_defined_at_pressure",
+              "vapor_pressure_status": "not_defined_at_temperature",
+              "melting_boundary": checked["melting_boundary"],
+              "cavitation_status": "requires_npshr_and_inlet_definition"}
+    if pressure < spec["pcritical_Pa"]:
+        try:
+            tsat = float(PropsSI("T", "P", pressure, "Q", 0, spec["fluid"]))
+            if not math.isfinite(tsat):
+                raise ValueError("饱和温度不是有限值")
+            report.update(saturation_temperature_K=tsat, subcooling_K=tsat-temperature,
+                          saturation_temperature_status="available")
+        except (ValueError, RuntimeError) as exc:
+            report.update(saturation_temperature_status="unavailable",
+                          saturation_temperature_reason=str(exc), status="partial")
+    if temperature < spec["Tcritical_K"]:
+        try:
+            pv = saturation_pressure(fluid, temperature)
+            report.update(vapor_pressure_Pa=pv,
+                          static_npsh_component_m=(pressure-pv)/(checked["rho_kgm3"]*9.80665),
+                          vapor_pressure_status="available")
+        except (ValueError, RuntimeError) as exc:
+            report.update(vapor_pressure_status="unavailable", vapor_pressure_reason=str(exc), status="partial")
+    return report

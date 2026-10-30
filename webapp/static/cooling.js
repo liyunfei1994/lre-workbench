@@ -22,7 +22,7 @@ export function coolingDisplayState(result={}) {
   const complete=available && list(profile.nodes).every(raw=>["s_m","p_Pa","T_K","h_Jkg"].every(key=>finite(obj(raw)[key])))
     && list(profile.cells).every(raw=>obj(raw).kind!=="channel" || ["s_m","q_W_m2","T_wall_hot_K","T_wall_cold_K"].every(key=>finite(obj(raw)[key])));
   if(available && !complete)warnings.push("部分沿程字段缺失或非有限；对应曲线保留断点，不能把不完整显示解释为完整检查通过。");
-  let kind="unknown", label=hasProfile ? "沿程记录不完整或版本不受支持" : "未记录沿程解";
+  let kind="unknown", label=hasProfile ? "沿程记录不完整或版本不受支持" : outputs.mode===0 ? "历史给定预算记录" : "未记录沿程解";
   if(available){
     kind=validity.status==="pass" && complete && !warnings.length ? "pass" : "review";
     label=kind==="pass" ? "内核检查通过" : "适用性需核查";
@@ -84,6 +84,123 @@ function summaryCards(summary) {
     ["冷却出口压力",scaled(summary.p_out_Pa,1e-6),"MPa"],
   ];
   return `<div class="cool-kpis">${values.map(([label,value,unit])=>`<div><span>${esc(label)}</span><strong>${fmt(value)} <small>${esc(unit)}</small></strong></div>`).join("")}</div>`;
+}
+
+const extent = (points,key,scale=1) => {
+  if(!points.length || !points.every(p=>finite(p[key]) && p[key]>0))return "未完整记录";
+  const values=points.map(p=>p[key]*scale), low=Math.min(...values), high=Math.max(...values);
+  return low===high ? fmt(low) : `${fmt(low)}–${fmt(high)}`;
+};
+
+/** These values are saved solver diagnostics, never inferred from an edited draft. */
+export function coolingChannelDesignState(profile={}) {
+  const sizing=obj(profile.channel_sizing), design=obj(profile.channel_design_summary);
+  const sizingKnown=sizing.version===1, designKnown=design.version===1;
+  const mode=sizingKnown ? sizing.mode : null;
+  const label=({fixed_geometry:"给定通道几何",legacy_reference:"历史组合参考定深",coolant_inlet_velocity:"实际通道入口速度定深"})[mode] || "定深方式未记录";
+  const range=key=>{
+    const pair=designKnown ? obj(design.geometry_ranges)[key] : null;
+    return Array.isArray(pair) && pair.length===2 && pair.every(finite) && pair[0]<=pair[1]
+      ? `${fmt(pair[0]*1e3)}${pair[0]===pair[1] ? "" : `–${fmt(pair[1]*1e3)}`}` : "未记录";
+  };
+  const section=key=>designKnown ? obj(design[key]) : {};
+  return {sizing,design,sizingKnown,designKnown,mode,label,
+    inlet:section("inlet"),throat:section("throat"),maximum:section("maximum_velocity_node"),
+    pitch:range("pitch_m"),rib:range("rib_m")};
+}
+
+export function coolingWallConstraintState(profile={}) {
+  const audit=obj(profile.material_applicability), status=audit.wall_temperature_constraint_status;
+  const comparison=audit.wall_temperature_limit_status, basis=typeof audit.wall_temperature_limit_basis==="string" ? audit.wall_temperature_limit_basis.trim() : "";
+  const limit=finite(audit.wall_temperature_limit_K) && audit.wall_temperature_limit_K>0 ? audit.wall_temperature_limit_K : null;
+  let kind="unknown", label="壁温约束尚未评估", detail="未记录有效的方案壁温约束。";
+  if(status==="unset")detail="未设定方案上限；保留的示例数值不参与判断。";
+  else if(status==="provisional" && limit!==null){
+    kind="review";
+    label=comparison==="exceeded" ? "超过方案壁温限值 · 暂定" : comparison==="provisional_within_limit" ? "暂定限值内 · 依据待核实" : "暂定壁温约束尚未完成评估";
+    detail="仅按暂定数值比较，处于限值内仍不能判为工程验收通过。";
+  }else if(status==="documented" && limit!==null && basis){
+    if(comparison==="exceeded"){kind="review";label="超过方案壁温限值";}
+    else if(comparison==="within_limit"){kind="pass";label="未超过有依据的方案限值";}
+    detail="按本记录登记的来源和适用条件比较，不等于材料使用资格或寿命认证。";
+  }else if(status===undefined && finite(audit.wall_temperature_limit_K)){
+    kind="review";
+    label=comparison==="exceeded" ? "历史记录超过方案壁温限值" : comparison==="within_limit" ? "历史数值未超限 · 限值依据未记录" : "历史壁温约束尚未评估";
+    detail="旧记录未保存约束状态与依据，只展示当时数值比较，不补写新的验证结论。";
+  }else if(status!==undefined && status!=="unset")detail="约束状态、数值或依据不完整，该项尚未评估。";
+  return {audit,status,comparison,basis,kind,label,detail,limit:status==="unset" ? null : limit};
+}
+
+function channelDesignDetails(profile) {
+  const state=coolingChannelDesignState(profile), {sizing,inlet,throat,maximum}=state;
+  const readings=[["实际通道入口",inlet],["实际喉部节点",throat],["沿程最大节点",maximum]];
+  const values=readings.map(([label,section])=>`<div><dt>${esc(label)}速度</dt><dd>${esc(quantity(section.velocity_ms,"m/s"))}</dd></div>`).join("");
+  const meaning=state.mode==="legacy_reference" ? "历史方式混用入口集流腔密度和喉部宽度；参考速度不是入口速度，也不是喉部速度。" : state.mode==="coolant_inlet_velocity" ? "参考截面为入口集流腔之后的首个冷却通道节点；入口加速和局部损失参与求解。" : state.mode==="fixed_geometry" ? "通道尺寸已给定；流速随局部密度和流通面积变化，不使用参考速度重新定深。" : "旧记录未保存定深定义；不按当前设置补算。";
+  const detailRows=readings.map(([label,section])=>`<tr>${cell(label)}${cell(quantity(section.x_m,"m"))}${cell(quantity(section.velocity_ms,"m/s"))}${cell(quantity(section.rho_kgm3,"kg/m³"))}${cell(quantity(scaled(section.A_flow_m2,1e6),"mm²"))}${cell(quantity(scaled(section.width_m,1e3),"mm"))}${cell(quantity(scaled(section.height_m,1e3),"mm"))}${cell(quantity(scaled(section.pitch_m,1e3),"mm"))}${cell(quantity(scaled(section.rib_m,1e3),"mm"))}</tr>`);
+  const target=state.mode==="legacy_reference" ? "历史定深参数" : "入口目标速度";
+  const checked=sizing.status==="converged_and_march_verified" ? "入口定深已收敛，并由完整沿程解复核" : sizing.status==="historical_mixed_reference" ? "历史混合参考，未施加实际截面速度目标" : sizing.status==="prescribed_channel_table" ? "采用保存的沿程尺寸表" : sizing.status==="prescribed_geometry" ? "采用保存的给定尺寸" : "定深校核状态未记录";
+  return `<div class="cool-channel-readings"><dl class="cool-hardware">${values}</dl><p class="cool-note">定深方式：${esc(state.label)}。${esc(meaning)}</p></div><details class="cool-details cool-channel-detail"><summary>通道定深与实际截面读数</summary><p class="cool-note">${esc(checked)}。${state.sizingKnown && state.mode!=="fixed_geometry" ? `${esc(target)}：${esc(quantity(sizing.target_velocity_ms,"m/s"))}；速度残差：${esc(quantity(sizing.velocity_residual_ms,"m/s"))}。` : ""}通道入口与零流速集流腔端口是不同位置；喉部读数来自保存的喉部节点。</p>${state.designKnown ? table(["截面","轴向 x","实际速度","静态密度","总流通面积","单通道宽","通道深","节距","肋宽"],detailRows) : '<p class="cool-note">历史记录未保存通道设计摘要；实际截面读数未记录，不由当前几何重建。</p>'}<p class="cool-note">节距范围 ${esc(state.pitch)} mm；肋宽范围 ${esc(state.rib)} mm。通道数量是本方案的设计变量，未由此次计算证明最优；几何非重叠不等于工艺可制造。</p></details>`;
+}
+
+/** Geometry and methods describe only the persisted profile, not today's draft or solver defaults. */
+export function coolingModelSummaryState(profile={}) {
+  const geometry=obj(profile.geometry), full=list(geometry.full_nodes).map(obj), channel=list(geometry.nodes).map(obj);
+  const fullValid=full.length>=2 && full.every((p,i)=>finite(p.x_m) && finite(p.r_m) && p.r_m>0 && (!i || p.x_m>full[i-1].x_m));
+  const channelValid=channel.length>=2 && channel.every((p,i)=>finite(p.x_m) && finite(p.r_m) && p.r_m>0 && (!i || p.x_m!==channel[i-1].x_m));
+  const direction=profile.flow_direction, sign=direction==="counterflow" ? -1 : direction==="coflow" ? 1 : null;
+  const directionConsistent=channelValid && sign!==null && channel.every((p,i)=>!i || sign*(p.x_m-channel[i-1].x_m)>0);
+  const bounds=fullValid && channelValid && channel.every(p=>full.some(q=>Math.abs(p.x_m-q.x_m)<=1e-9 && Math.abs(p.r_m-q.r_m)<=1e-9));
+  const drawingAvailable=fullValid && bounds && directionConsistent;
+  const audit=obj(profile.material_applicability), assignment=obj(profile.material_assignment), gas=obj(profile.gas_heat_transfer);
+  const datasets=list(audit.datasets).map(obj), defaultId=assignment.default_dataset_id;
+  const labelFor=id=>{const item=datasets.find(row=>row.dataset_id===id);return item?.label || item?.display_name || id || "未记录";};
+  const defaultMaterial=labelFor(defaultId), zones=list(assignment.zones).map(obj);
+  const assumptions=list(profile.assumptions), methods=obj(profile.model_methods), methodsRecorded=methods.version===1;
+  const known=profile.model_id==="regen_quasi1d_ph_v1";
+  const savedMethod=key=>methodsRecorded && typeof obj(methods[key]).label==="string" && obj(methods[key]).label.trim() ? obj(methods[key]).label : null;
+  const hot=savedMethod("hot_side") || (gas.geometry_model_id==="bartz_upstream_contour_curvature_v2" ? "Bartz 型对流关联；取本次上游喉部曲率" : "热侧关联版本未记录");
+  const wall=savedMethod("wall") || (audit.conduction_model==="integral_k_dT=q_wall_times_thickness" ? "变导热率 k(T) 积分导热；肋片采用代表温度" : "壁面导热方法未记录");
+  const cold=savedMethod("cold_side") || (known && assumptions.includes("Bulk-property coolant convection plus fin correction; no near-wall extrapolation.") ? "冷却剂体温物性对流＋肋片修正" : "冷侧换热方法未记录");
+  return {geometry,full,channel,drawingAvailable,directionConsistent,direction,assignment,zones,labelFor,defaultMaterial,
+    inletX:channelValid ? channel[0].x_m : null,outletX:channelValid ? channel.at(-1).x_m : null,
+    methods:{hot,wall,cold},methodsRecorded,hardware:{count:extent(channel,"n_channels"),width:extent(channel,"width_m",1e3),
+      height:extent(channel,"height_m",1e3),wall:extent(channel,"wall_thickness_m",1e3),diameter:extent(channel,"D_h_m",1e3)}};
+}
+
+function coolingGeometryFigure(model) {
+  const caption='<figcaption>型面与冷却范围 <span>本次保存的几何</span></figcaption>';
+  if(!model.drawingAvailable)return `<figure class="cool-scope-figure">${caption}<p class="cool-empty">本记录未保存完整且流向一致的型面与冷却路径，无法绘制范围示意。</p></figure>`;
+  const {full,channel,geometry}=model, xmin=full[0].x_m, xmax=full.at(-1).x_m, rmax=Math.max(...full.map(p=>p.r_m));
+  const scale=Math.min(550/(xmax-xmin),136/(2*rmax)), left=(620-(xmax-xmin)*scale)/2;
+  const X=x=>left+(x-xmin)*scale, Y=r=>130-r*scale;
+  const curve=(points,side)=>points.map(p=>`${X(p.x_m)},${Y(side*p.r_m)}`).join(" ");
+  const arrow=(x1,x2,y,klass,label)=>{const end=X(x2),sgn=Math.sign(x2-x1);return `<g class="${klass}"><line x1="${X(x1)}" x2="${end}" y1="${y}" y2="${y}"/><path d="M ${end-7*sgn} ${y-4} L ${end} ${y} L ${end-7*sgn} ${y+4}"/><text x="${(X(x1)+end)/2}" y="${y-8}" text-anchor="middle">${esc(label)}</text></g>`;};
+  const throat=finite(geometry.x_throat_m) && geometry.x_throat_m>xmin && geometry.x_throat_m<xmax ? `<line class="cool-scope-throat" x1="${X(geometry.x_throat_m)}" x2="${X(geometry.x_throat_m)}" y1="62" y2="209"/><text x="${X(geometry.x_throat_m)}" y="222" text-anchor="middle">喉部 x=${esc(fmt(geometry.x_throat_m))}</text>` : "";
+  const paths=[1,-1].map(side=>`<polyline class="cool-scope-outline" points="${curve(full,side)}"/><polyline class="cool-scope-covered" points="${curve(channel,side)}"/>`).join("");
+  return `<figure class="cool-scope-figure">${caption}<svg viewBox="0 0 620 252" role="img" aria-label="保存的推力室内型面与冷却覆盖；灰色为完整型面，蓝色为冷却范围"><title>保存的内型面与冷却覆盖，同一坐标比例</title><line class="cool-scope-axis" x1="${X(xmin)}" x2="${X(xmax)}" y1="130" y2="130"/>${throat}${paths}${arrow(xmin,xmax,42,"cool-gas-arrow","热气流向")}${arrow(model.inletX,model.outletX,20,"coolant-arrow","冷却剂流向")}<text x="${X(xmin)}" y="240" text-anchor="start">喷注面 x=${esc(fmt(xmin))} m</text><text x="${X(xmax)}" y="240" text-anchor="end">型面出口 x=${esc(fmt(xmax))} m</text></svg><p class="cool-note"><i class="cool-scope-swatch"></i>蓝线为冷却覆盖：冷却剂入口 x=${esc(fmt(model.inletX))} m → 出口 x=${esc(fmt(model.outletX))} m。轴向 x 从喷注面起算；图示为内壁边界。</p></figure>`;
+}
+
+function modelSummary(profile) {
+  const model=coolingModelSummaryState(profile), {hardware,geometry}=model;
+  const channel=coolingChannelDesignState(profile);
+  const distribution=({table:"沿程通道表",width_proportional_to_radius:"通道宽随半径变化，通道高保持给定值"})[geometry.channel_distribution] || "通道分布规则未记录";
+  const material=`${model.defaultMaterial}${model.zones.length ? `；${model.zones.length} 个轴向覆盖分区` : Object.hasOwn(model.assignment,"zones") ? "；未设置分区覆盖" : "；分区未记录"}`;
+  const row=(label,value)=>`<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
+  const dimensions=[row("通道数量",hardware.count),row("宽 × 高 / mm",`${hardware.width} × ${hardware.height}`),row("内衬热壁厚 / mm",hardware.wall),row("水力直径 / mm",hardware.diameter),row("周向节距 / mm",channel.pitch),row("肋宽 / mm",channel.rib)].join("");
+  const recorded=obj(profile.model_methods), methodRows=model.methodsRecorded ? ["hot_side","wall","cold_side","hydraulics"].map(key=>{
+    const entry=obj(recorded[key]);return `<tr>${cell(entry.label || "方法未记录")}${cell(entry.detail || "说明未记录")}</tr>`;
+  }) : [];
+  const methodsDetail=`<details class="cool-details cool-method-detail"><summary>换热与压降方法说明</summary>${methodRows.length ? table(["本次方法","模型定义与适用边界"],methodRows) : '<p class="cool-note">方法明细未随记录保存；上方仅展示本记录已有的关联信息与模型声明。</p>'}${model.methodsRecorded ? `<p class="cool-note">换热：${recorded.heat_transfer_enabled===true ? "启用" : recorded.heat_transfer_enabled===false ? "关闭" : "未记录"}；摩擦：${recorded.friction_enabled===true ? "启用" : recorded.friction_enabled===false ? "关闭" : "未记录"}。</p>` : ""}</details>`;
+  return `<section class="cool-model-summary" aria-label="本次冷却模型与计算范围"><div class="cool-section-title"><h3>本次模型与计算范围</h3><span>统一准一维 · 保存记录</span></div><div class="cool-model-grid">${coolingGeometryFigure(model)}<div class="cool-model-facts"><dl class="cool-hardware">${dimensions}</dl><p class="cool-note">尺寸来自已保存通道节点及设计摘要。${esc(distribution)}。</p><dl class="cool-methods">${row("内衬材料",material)}${row("热侧",model.methods.hot)}${row("壁面",model.methods.wall)}${row("冷侧",model.methods.cold)}</dl>${model.methodsRecorded ? "" : '<p class="cool-note">方法明细未随记录保存。</p>'}</div></div>${channelDesignDetails(profile)}${methodsDetail}</section>`;
+}
+
+function statusSummary(profile) {
+  const balance=obj(profile.balance), coupling=obj(profile.hot_side_coupling), validity=obj(profile.validity), material=coolingMaterialState(profile);
+  const residual=quantity(balance.energy_residual_W,"W"), coupled=({pass:"达到保存的耦合判据",fail:"未达到耦合判据",review:"耦合需核查"})[coupling.status] || "耦合状态未记录";
+  const domain=validity.property_domain==="within_HEOS_declared_single_phase_ranges" ? "在 HEOS 声明单相范围内" : "流体物性适用范围未记录";
+  const audit=material.audit, wall=coolingWallConstraintState(profile);
+  const count=material.complete ? `${audit.out_of_range_cell_count} / ${audit.total_cells} 个热单元越界；${material.match}` : material.match;
+  return `<div class="cool-check-summary" aria-label="本次冷却检查摘要"><div><span>守恒与循环反馈</span><strong>${esc(coupled)}</strong><small>冷却能量残差：${esc(residual)}</small></div><div><span>流体物性</span><strong>${esc(domain)}</strong><small>换热关联的适用性仍需独立验证</small></div><div><span>材料数据</span><strong>${esc(material.label)}</strong><small>${esc(count)}</small></div><div><span>壁温约束</span><strong>${esc(wall.label)}</strong><small>实际峰值：${esc(quantity(obj(profile.summary).T_wall_hot_max_K,"K"))}；${wall.limit!==null ? `本次方案限值：${esc(quantity(wall.limit,"K"))}` : "未启用方案上限"}；不等于材料使用资格</small></div></div>`;
 }
 
 function diagnostics(profile) {
@@ -177,9 +294,12 @@ function materialDetails(profile) {
     return `<tr>${cell(fmt(row.cell_index))}${cell(fmt(row.x_m))}${cell(row.dataset_id || material.dataset_id || "未记录")}${cell(span(range))}${cell(span(row.data_temperature_range_K || row.data_range_K || material.data_range_K))}${cell(action)}</tr>`;
   });
   const counts=complete ? `${audit.out_of_range_cell_count} / ${audit.total_cells} 个热单元越界；实际材料温度 ${fmt(audit.min_temperature_K)}–${fmt(audit.max_temperature_K)} K。` : "本记录缺少完整的温区检查计数或实际温度范围。";
-  const limitState=({exceeded:"超过方案限值",within_limit:"未超过方案限值"})[audit.wall_temperature_limit_status] || "约束状态未记录";
-  const wallLimit=`本次方案热面壁温限值：${quantity(audit.wall_temperature_limit_K,"K")}；${limitState}。`;
-  return `<details class="cool-details cool-materials">${heading}<p class="cool-note">${esc(counts)} ${esc(match)}。温区检查覆盖壁面两侧及肋片参考温度；制造匹配只比较用户声明的类别，未验证批次或制造工艺资格。</p><p class="cool-note">${esc(wallLimit)} 导热率数据温区、方案壁温约束和材料结构使用资格分别判断。温区内不等于寿命或结构强度已验证；本稳态壁面求解使用导热率，登记比热与密度不代表已计算壁体储热瞬态。</p>${datasetRows.length ? table(["材料 / 数据集","数据版本","数据对应制造状态","导热率温区","比热温区（未启用）","参考密度（未启用）","来源"],datasetRows) : `<p class="cool-note">本记录未保存材料数据详情。数据集标识：${esc(list(audit.dataset_ids).join("；") || "未记录")}。</p>`}${details.length ? table(["热单元","轴向 x / m","数据集","实际温度区间","数据温区","越界处理"],details) : ""}</details>`;
+  const constraint=coolingWallConstraintState(profile);
+  const wallLimit=`${constraint.label}。${constraint.limit!==null ? `本次方案热面壁温限值：${quantity(constraint.limit,"K")}。` : "未启用方案热面壁温上限。"}${constraint.detail}`;
+  const wallBasis=`<p class="cool-note">壁温限值依据与适用条件：${esc(constraint.basis || "未记录")}。${constraint.status==="unset" && finite(audit.wall_temperature_limit_declared_K) ? `保留数值 ${esc(quantity(audit.wall_temperature_limit_declared_K,"K"))} 未启用，不参与验收。` : ""}</p>`;
+  const model=coolingModelSummaryState(profile), zoneRows=model.zones.map(zone=>`<tr>${cell(quantity(zone.x_start_m,"m"))}${cell(quantity(zone.x_end_m,"m"))}${cell(model.labelFor(zone.dataset_id))}${cell(zone.manufacturing_state || "未记录")}</tr>`);
+  const zones=`<p class="cool-note">默认内衬数据集：${esc(model.defaultMaterial)}。${Object.hasOwn(model.assignment,"zones") ? "未被分区覆盖的位置采用默认数据集；轴向 x 从喷注面起算。" : "本记录未保存轴向材料分区分配。"}</p>${zoneRows.length ? table(["分区起点 x","分区终点 x","覆盖数据集","方案声明制造状态"],zoneRows) : ""}`;
+  return `<details class="cool-details cool-materials">${heading}<p class="cool-note">${esc(counts)} ${esc(match)}。温区检查覆盖壁面两侧及肋片参考温度；制造匹配只比较用户声明的类别，未验证批次或制造工艺资格。</p><p class="cool-note">${esc(wallLimit)} 导热率数据温区、方案壁温约束和材料结构使用资格分别判断。温区内不等于寿命或结构强度已验证；本稳态壁面求解使用导热率，登记比热与密度不代表已计算壁体储热瞬态。</p>${wallBasis}${zones}${datasetRows.length ? table(["材料 / 数据集","数据版本","数据对应制造状态","导热率温区","比热温区（未启用）","参考密度（未启用）","来源"],datasetRows) : `<p class="cool-note">本记录未保存材料数据详情。数据集标识：${esc(list(audit.dataset_ids).join("；") || "未记录")}。</p>`}${details.length ? table(["热单元","轴向 x / m","数据集","实际温度区间","数据温区","越界处理"],details) : ""}</details>`;
 }
 
 function profileTables(profile) {
@@ -212,5 +332,5 @@ export function renderCooling(result={}) {
     chart("壁面热流密度","MW/m²",channelCells,[["q_W_m2","热流密度",1e-6]]),
   ].join("");
   const warnings=state.warnings.length ? `<ul class="cool-warnings">${state.warnings.map(v=>`<li>${esc(v)}</li>`).join("")}</ul>` : "";
-  return `${start}<p class="cool-direction">${esc(direction)}。横轴统一采用沿冷却剂流向的弧长 s；缺失数据断线，不平滑、不补点。</p><p class="cool-notice">内核检查描述当前模型与离散方程的状态，不能替代换热关联式、通道几何和材料温限的独立验证。</p>${warnings}${materialDetails(profile)}<div class="cool-chart-grid">${curves}</div><div class="cool-outlet-detail"><span>出口静焓 <b>${esc(quantity(scaled(summary.h_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>出口总焓 <b>${esc(quantity(scaled(summary.h0_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>记录最大热面壁温 <b>${esc(quantity(summary.T_wall_hot_max_K,"K"))}</b></span></div>${gasHeatTransferDetails(profile)}${diagnostics(profile)}${profileTables(profile)}</section>`;
+  return `${start}<p class="cool-note cool-feedback-note">吸热量、压降和出口状态为本次循环采用的反馈量；刷新页面只读取该记录。</p>${statusSummary(profile)}${modelSummary(profile)}<p class="cool-direction">${esc(direction)}。横轴统一采用沿冷却剂流向的弧长 s；缺失数据断线，不平滑、不补点。</p><p class="cool-notice">内核检查描述当前模型与离散方程的状态，不能替代换热关联式、通道几何和材料温限的独立验证。</p>${warnings}${materialDetails(profile)}<div class="cool-chart-grid">${curves}</div><div class="cool-outlet-detail"><span>出口静焓 <b>${esc(quantity(scaled(summary.h_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>出口总焓 <b>${esc(quantity(scaled(summary.h0_out_Jkg,1e-3),"kJ/kg"))}</b></span><span>记录最大热面壁温 <b>${esc(quantity(summary.T_wall_hot_max_K,"K"))}</b></span></div>${gasHeatTransferDetails(profile)}${diagnostics(profile)}${profileTables(profile)}</section>`;
 }

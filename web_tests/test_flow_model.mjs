@@ -50,6 +50,22 @@ test("dual-shaft GG exposes the solver aggregate limitation and does not synthes
   assert.match(group(model, "gas").caption, /并非混合温度/);
 });
 
+test("new dual GG branch states remain separate gas routes with their own temperatures and component links",()=>{
+  const states={gg_outlet:sample({temperature:850,mass_flow:8}),gg_turbine_exhaust:sample({temperature:620,mass_flow:8}),gg_turbine_ox_exhaust:sample({temperature:620,mass_flow:5}),gg_turbine_fuel_exhaust:sample({temperature:640,mass_flow:3})};
+  const options={inputs:{cycle_type:"gg",gg_layout:"dual_shaft"},componentIds:["gas_generator","gg_turbine_ox","gg_turbine_fuel","gg_exhaust_nozzle"]};
+  const model=buildFlowModel(states,options);
+  assert.deepEqual(group(model,"gas").segments,[["gg_outlet","gg_turbine_ox_exhaust"],["gg_outlet","gg_turbine_fuel_exhaust"],["gg_turbine_exhaust"]]);
+  assert.equal(node(model,"gg_turbine_ox_exhaust").code,"G07");assert.equal(node(model,"gg_turbine_fuel_exhaust").code,"G08");
+  assert.equal(node(model,"gg_turbine_ox_exhaust").temperature,620);assert.equal(node(model,"gg_turbine_fuel_exhaust").temperature,640);
+  assert.equal(node(model,"gg_turbine_ox_exhaust").massFlow,5);assert.equal(node(model,"gg_turbine_fuel_exhaust").massFlow,3);
+  assert.deepEqual(node(model,"gg_turbine_ox_exhaust").componentIds,["gg_turbine_ox","gg_exhaust_nozzle"]);assert.deepEqual(node(model,"gg_turbine_fuel_exhaust").componentIds,["gg_turbine_fuel","gg_exhaust_nozzle"]);assert.deepEqual(node(model,"gg_turbine_exhaust").componentIds,["gg_exhaust_nozzle"]);
+  assert.equal(group(model,"other"),undefined);assert.match(group(model,"gas").caption,/两条独立出口分别展示/);assert.doesNotMatch(group(model,"gas").caption,/未提供两支路/);
+  delete states.gg_turbine_fuel_exhaust;
+  const partial=buildFlowModel(states,options);assert.equal(node(partial,"gg_turbine_fuel_exhaust"),undefined);assert.deepEqual(group(partial,"gas").segments,[["gg_outlet","gg_turbine_ox_exhaust"],["gg_turbine_exhaust"]]);assert.match(group(partial,"gas").caption,/另一支路出口未记录/);
+  delete states.gg_outlet;
+  assert.deepEqual(group(buildFlowModel(states,options),"gas").segments,[["gg_turbine_ox_exhaust"],["gg_turbine_exhaust"]]);
+});
+
 test("display units change only dimensional scalars, including negative enthalpy", () => {
   const model = buildFlowModel({lox_after_pump: sample({pressure: 69.892e6, enthalpy: -150049.1, density: 1272.97})});
   const actual = node(model, "lox_after_pump");

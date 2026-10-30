@@ -22,7 +22,8 @@ from runtime_environment import environment_fingerprint, environment_report, req
 
 
 def example_result():
-    inputs = EngineInputs()
+    inputs = EngineInputs(cooling_wall_temp_limit_status="documented",
+                          cooling_wall_temp_limit_basis="Synthetic test requirement: 800 K")
     inputs.turb_ox_rotor_material = "inconel718"
     summary = {"solver_residual_norm": 1e-5, "solver_iterations": 8,
                "crossflow_fuel_to_oxpb_margin_MPa": 0.4, "crossflow_lox_to_fuelpb_margin_MPa": 0.3,
@@ -178,7 +179,9 @@ class EngineeringTests(unittest.TestCase):
         self.assertEqual(assessment["status"], "unknown", assessment)
         missing = {row["key"] for row in assessment["checks"] if row["status"] == "unknown"}
         self.assertEqual(missing, {"feed_network_closure", "energy_ledger_closure"})
-        self.assertTrue(all(row["status"] == "pass" for row in assessment["checks"] if row["key"] not in missing))
+        provisional = {"ox_preburner_T_combustion_K", "fuel_preburner_T_combustion_K"}
+        self.assertTrue(all(row["status"] == ("review" if row["key"] in provisional else "pass")
+                            for row in assessment["checks"] if row["key"] not in missing))
         json.dumps(assessment, allow_nan=False)
 
     def test_converged_result_can_fail_pressure_temperature_and_power(self):

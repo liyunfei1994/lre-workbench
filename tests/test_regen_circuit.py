@@ -57,6 +57,16 @@ class RegenConservationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.result = cm.march_regen_circuit(**BASE)
 
+    def test_record_saves_methods_used_by_the_unified_kernel(self):
+        methods = self.result["profile"]["model_methods"]
+        self.assertEqual(methods["version"], 1)
+        self.assertTrue(methods["heat_transfer_enabled"])
+        self.assertTrue(methods["friction_enabled"])
+        self.assertIn("Bartz", methods["hot_side"]["label"])
+        self.assertIn("Dittus", methods["cold_side"]["label"])
+        self.assertIn("4.36", methods["cold_side"]["detail"])
+        self.assertIn("k(T)", methods["wall"]["detail"])
+
     def test_static_port_energy_and_internal_total_energy(self):
         r = self.result
         self.assertEqual(r["nodes"][0]["velocity_ms"], 0.)

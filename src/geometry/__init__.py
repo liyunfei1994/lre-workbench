@@ -8,7 +8,7 @@ geometry —— 发动机结构参数计算包
 
 各部件子模块：
     geometry.types       —— 数据类
-    geometry.nozzle      —— 喷管（TOP 推力优化抛物线钟形轮廓）
+    geometry.nozzle      —— 喷管（抛物线钟形系统级工程近似）
     geometry.chamber     —— 主燃烧室（含分层壁/冷却通道）
     geometry.injector    —— 喷注器
     geometry.pumps       —— 涡轮泵校核
@@ -16,7 +16,7 @@ geometry —— 发动机结构参数计算包
     geometry.preburners  —— 预燃室
 
 理论依据：
-    TOP 抛物线钟形喷管：G.V.R. Rao, Jet Propulsion, 1958 / ARS Journal, 1960.
+    喷管：给定设计角度的圆弧与二次 Bézier 相切构造；未进行推力优化。
     燃烧室 L*：Huzel & Huang；NASA SP-125（LOX/CH₄ 典型 0.8–1.2 m）。
     涡轮泵：NASA SP-8109 / SP-8110。
 """
@@ -77,7 +77,7 @@ def compute_geometry(
     contraction_ratio   : 燃烧室/喉部面积比（缺少 inputs 对应字段时的后备值）
     l_star              : 特征长度 [m]（LOX/CH₄ 典型 0.8–1.2）
     theta_conv_deg      : 收缩段半角 [°]
-    bell_fraction       : 钟形长度比（0.80 = 80% bell，TOP 喷管）
+    bell_fraction       : 钟形长度比（0.80 = 80% bell，工程抛物线钟形喷管）
     wall_thickness_factor : 兼容旧签名（壁厚安全系数实际取自 inputs）
     """
     s = cycle_results.summary
@@ -93,6 +93,9 @@ def compute_geometry(
     bell_fraction = float(getattr(inputs, "nozzle_bell_fraction", bell_fraction))
     contraction_ratio = float(getattr(inputs, "chamber_contraction_ratio", contraction_ratio))
     l_star = float(getattr(inputs, "chamber_l_star_m", l_star))
+    method = getattr(inputs, "nozzle_contour_method", "legacy_log_v1")
+    theta_n = getattr(inputs, "nozzle_initial_angle_deg", 35.)
+    theta_e = getattr(inputs, "nozzle_exit_angle_deg", 10.)
 
     # ── 基本尺寸（从喷管热力学结果）──────────────────
     At = comps["nozzle"].outputs["At_m2"]
@@ -116,6 +119,9 @@ def compute_geometry(
         contraction_ratio = (float(cg["r_c_m"]) / float(cg["r_t_m"])) ** 2
         theta_conv_deg = float(cg.get("conv_half_angle_deg", theta_conv_deg))
         bell_fraction = float(cg.get("bell_fraction", bell_fraction))
+        method = cg.get("nozzle_contour_method", "legacy_log_v1")
+        theta_n = cg.get("initial_expansion_angle_deg", 35.)
+        theta_e = cg.get("exit_angle_deg", 10.)
 
     rt = math.sqrt(At / pi)
     re = math.sqrt(Ae / pi)
@@ -164,7 +170,24 @@ def compute_geometry(
         bell_fraction=bell_fraction,
         theta_conv_deg=theta_conv_deg,
         wall_thickness_mm=chamber.wall_thickness_mm,  # 同 chamber 总壁厚
+        nozzle_contour_method=method, nozzle_initial_angle_deg=theta_n, nozzle_exit_angle_deg=theta_e,
     )
+
+    if cooling_profile is not None and cg.get("full_nodes"):
+        # Display/export the exact saved computational mesh, including uncooled
+        # extension. Never redraw existing fixed hardware from mutable inputs.
+        stations = [row for row in cg["full_nodes"] if row["x_m"] >= cg["L_cyl_m"] - 1e-12]
+        nozzle.contour_x = [row["x_m"] - cg["x_throat_m"] for row in stations]
+        nozzle.contour_r = [row["r_m"] for row in stations]
+        nozzle.num_contour_points = len(stations)
+        nozzle.nozzle_length_m = cg["full_exit_x_m"] - cg["x_throat_m"]
+        nozzle.convergent_length_m = cg["L_conv_m"]
+        nozzle.total_length_m = cg["full_exit_x_m"]
+        nozzle.throat_axial_position_m = cg["x_throat_m"]
+        nozzle.throat_upstream_radius_m = cg["throat_upstream_radius_m"]
+        nozzle.throat_downstream_radius_m = cg["throat_downstream_radius_m"]
+        nozzle.inner_surface_area_m2 = sum(math.pi * (a["r_m"] + b["r_m"]) *
+            math.hypot(b["x_m"]-a["x_m"], b["r_m"]-a["r_m"]) for a,b in zip(stations, stations[1:]))
 
     # ── 喷管过膨胀/分离/侧载校核(p_sep/p_a≈0.4 判据) ──
     _noz_out = comps["nozzle"].outputs
@@ -177,10 +200,14 @@ def compute_geometry(
     nozzle_flow = analyze_nozzle_flow(nozzle, pc, _pe, _p_amb, _gamma)
 
     # ── 喷注器 ────────────────────────────────────────
-    # GG（开式循环）模式下主燃烧室通流 ≠ 总流量（GG 排气不进主室），
-    # 喷注器孔按主室实际通流设计。
+    # 复用本次主喷注器部件结果；桌面几何不再按流量重新估算单元数量。
+    # 历史结果没有保存部件时显示缺失，不根据当前输入补造。
+    injector_component = comps.get("injector")
     injector = compute_injector(
-        rc, s.get("mdot_chamber_kg_s") or s["mdot_total_kg_s"])
+        rc, s.get("mdot_chamber_kg_s") or s["mdot_total_kg_s"],
+        component_outputs=getattr(injector_component, "outputs", None),
+        component_profile=getattr(injector_component, "profile", None),
+    )
 
     # ── 涡轮泵 ────────────────────────────────────────
     ox_pump_data = comps["ox_pump"]
@@ -221,7 +248,7 @@ def compute_geometry(
         ox_pump_data.outputs["power_W"],
         shaft_speed_rpm=n_ox_rpm,
         n_stages=n_ox_stages,
-        psi=inputs.lox_pump_head_coefficient_psi,
+        psi=ox_pump_data.outputs.get("psi_head_coefficient", inputs.lox_pump_head_coefficient_psi),
         tip_speed_limit_ms=inputs.pump_tip_speed_limit_ms,
     )
 
@@ -230,7 +257,7 @@ def compute_geometry(
         fuel_pump_data.outputs["power_W"],
         shaft_speed_rpm=n_fuel_rpm,
         n_stages=n_fuel_stages,
-        psi=inputs.fuel_pump_head_coefficient_psi,
+        psi=fuel_pump_data.outputs.get("psi_head_coefficient", inputs.fuel_pump_head_coefficient_psi),
         tip_speed_limit_ms=inputs.pump_tip_speed_limit_ms,
     )
 

@@ -150,12 +150,14 @@ class Pump:
                  tip_speed_limit_ms: float = 550.0,
                  npsh_available_pa: float | None = None,
                  impeller_material: str | None = None,
-                 side: str | None = None):
+                 side: str | None = None,
+                 head_coefficient_psi: float = 0.50):
         """
         Parameters
         ──────────
         nr_rpm              : 轴转速 [rpm]；None 时走 _DEFAULT_RPM（不推荐，会 warn）
         n_stages            : 级数；None 时走 _DEFAULT_STAGES
+        head_coefficient_psi : 几何初选 ψ = g H级/u2²（CFturbo Ψ 为此值的两倍）
         tip_speed_limit_ms  : 叶尖速度 u_tip 上限 [m/s]，超出仅 warn
         npsh_available_pa   : 可用净正吸入压头 [Pa]（= p_in - p_vapor）；None 时跳过 Nss 校核
         """
@@ -186,7 +188,19 @@ class Pump:
             self.nr_rpm = self._DEFAULT_RPM[fk]
         else:
             self.nr_rpm = float(nr_rpm)
-        self.n_stages = int(n_stages)  if n_stages is not None else self._DEFAULT_STAGES[fk]
+        stage_value = n_stages if n_stages is not None else self._DEFAULT_STAGES[fk]
+        if (isinstance(stage_value, bool) or not isinstance(stage_value, (int, float))
+                or not math.isfinite(stage_value) or stage_value < 1
+                or int(stage_value) != stage_value):
+            raise ValidationError(name + ".n_stages 必须为正整数。")
+        self.n_stages = int(stage_value)
+        if not math.isfinite(self.nr_rpm) or self.nr_rpm <= 0:
+            raise ValidationError(name + ".nr_rpm 必须为有限正数。")
+        if (isinstance(head_coefficient_psi, bool)
+                or not isinstance(head_coefficient_psi, (int, float))
+                or not math.isfinite(head_coefficient_psi) or head_coefficient_psi <= 0):
+            raise ValidationError(name + ".head_coefficient_psi 必须为有限正数。")
+        self.head_coefficient_psi = float(head_coefficient_psi)
         self.tip_speed_limit_ms = float(tip_speed_limit_ms)
         self.npsh_available_pa  = npsh_available_pa
         self.impeller_material  = impeller_material
@@ -219,7 +233,7 @@ class Pump:
         q    = self.mdot / rho
         dp   = self.p_out - self.p_in
         hp   = dp / (rho * _G)
-        hp1  = hp / max(self.n_stages, 1)
+        hp1  = hp / self.n_stages
         # PT-02 统一：对外一律报欧洲比转速 nq = N[rpm]·√Q[m³/s] / H[m]^0.75，
         # 与 CFTurbo 的 nq、geometry/pumps.py 的 Ns_actual、core.py 的 Ns 目标
         # 同一约定（之前 pump 报 rad 制 ~3.15、geometry 报 ~30，两套并存易读错）。
@@ -228,16 +242,16 @@ class Pump:
         # 故内部换算到 rad 制后查表（ns_rad = nq · 2π/60），曲线本身不动。
         ns_rad = nr_rad * math.sqrt(q) / (hp1 ** 0.75)
         eta_ns = _eta_from_ns(ns_rad)
-        # 离心泵最优 nq 区间 ~[28,48]（对应 rad 制 [3,5]）
+        # 仅描述当前经验曲线的参考段，不认证通用最优泵型或效率。
         if 28.0 <= nq <= 48.0:
-            diag = ("nq=%.1f (EU, rpm·√(m³/s)/m^0.75) [28,48] 最优离心区 ✓，"
-                    "曲线估算 eta_Ns=%.3f") % (nq, eta_ns)
+            diag = ("nq=%.1f (EU, rpm·√(m³/s)/m^0.75)，位于当前经验曲线参考段[28,48]；"
+                    "曲线估算 eta_Ns=%.3f，尚未验证实际泵型和效率") % (nq, eta_ns)
         elif nq < 28.0:
-            diag = ("nq=%.1f ⚠ 低于最优区间[28,48]，流道窄摩擦大；"
-                    "曲线估算 eta_Ns=%.3f。提高转速/减少级数可升高 nq") % (nq, eta_ns)
+            diag = ("nq=%.1f，低于当前经验曲线参考段[28,48]；"
+                    "曲线估算 eta_Ns=%.3f。固定总扬程和流量时，提高转速或增加级数会升高 nq；是否适合需另行设计") % (nq, eta_ns)
         else:
-            diag = ("nq=%.1f ⚠ 高于最优区间[28,48]，趋近混流/轴流型；"
-                    "曲线估算 eta_Ns=%.3f。降低转速/增加级数可降低 nq") % (nq, eta_ns)
+            diag = ("nq=%.1f，高于当前经验曲线参考段[28,48]；"
+                    "曲线估算 eta_Ns=%.3f。固定总扬程和流量时，降低转速或减少级数会降低 nq；是否需要混流型需另行设计") % (nq, eta_ns)
         return nq, eta_ns, diag
 
     def evaluate(self):
@@ -300,7 +314,7 @@ class Pump:
 
         q_m3s  = self.mdot / rho_in          # 体积流量基于入口密度
         hp_tot = dp / (rho_in * _G)
-        hp1    = hp_tot / max(self.n_stages, 1)
+        hp1    = hp_tot / self.n_stages
         nr_rad = self.nr_rpm * 2.0 * math.pi / 60.0
         h_in = cp * self.t_in
         h_out = h_in + power / self.mdot
@@ -312,12 +326,11 @@ class Pump:
             h_out = reactant_enthalpy(self.fluid, t_out, self.p_out, mechanism_fuel)
 
         # ── V10 新增：叶尖速度估算 + 校核 ─────────────────
-        # 用压头系数 ψ = g·H_per_stage / u_tip²，取 ψ=0.50 反推 u_tip。
-        # 这是工程一阶估算，CFTurbo 详细设计后可写回。
-        psi_pump = 0.50
-        u_tip_pump = math.sqrt(_G * max(hp1, 1.0) / psi_pump)
+        # 与几何初选共用 ψ = g·H_per_stage / u_tip²；不改变真实流体泵功。
+        psi_pump = self.head_coefficient_psi
+        u_tip_pump = math.sqrt(_G * hp1 / psi_pump)
         # 由 u_tip 和 ω 反推叶轮直径（仅作信息显示）
-        d_impeller_est = 2.0 * u_tip_pump / max(nr_rad, 1.0)
+        d_impeller_est = 2.0 * u_tip_pump / nr_rad
         tip_speed_ok = u_tip_pump <= self.tip_speed_limit_ms
         tip_note = (
             f"  叶尖速度 u_tip≈{u_tip_pump:.0f} m/s（按 ψ={psi_pump} 估算，"

@@ -1,5 +1,28 @@
 /* Steady results: one reading task at a time, with failure evidence on overview. */
 .steady-workspace { min-width:0; }
+.sd-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.sd-heading h2 { margin:4px 0; font-size:16px; }
+.sd-kicker { font-size:10px; letter-spacing:1.4px; color:#6c8298; }
+.sd-summary button,.sd-basis button { border:0; background:transparent; color:#326e98; padding:4px 0; font-size:12px; }
+.sd-conclusion,.sd-basis p { color:#536b7f; font-size:12px; line-height:1.7; }
+.sd-gates { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:10px; }
+.sd-gates article { border:1px solid #dce5ed; background:#fafcfe; padding:12px; }
+.sd-gates article>div { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.sd-gates b { font-size:12px; color:#36546c; }
+.sd-gates p { font-size:11px; color:#6a7c8b; line-height:1.6; margin:8px 0; }
+.sd-state { display:inline-block; font-size:10px; padding:3px 6px; white-space:nowrap; background:#edf2f6; color:#546c80; }
+.sd-state.sd-pass { background:#edf5f3; color:#3e7467; }
+.sd-state.sd-fail { background:#fff0eb; color:#a04f35; }
+.sd-state.sd-review { background:#fbf4e8; color:#89652c; }
+.sd-tasks { border-top:1px solid #dce5ed; margin-top:14px; padding-top:12px; font-size:12px; }
+.sd-tasks li { margin:12px 0; }
+.sd-tasks p { margin:5px 0; }
+.sd-models { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin:15px 0; }
+.sd-models div { border-left:3px solid #b6ccdf; padding:5px 10px; }
+.sd-models dt { font-size:11px; color:#70869a; }
+.sd-models dd { font-size:12px; margin:5px 0 0; color:#385774; }
+.sd-definition { padding:10px 12px; background:#f4f7fa; }
+.sd-basis td { vertical-align:top; line-height:1.6; }
 .steady-tabs { display:flex; gap:4px; position:sticky; top:0; z-index:4; padding:5px 8px 0; margin-bottom:14px; border:1px solid #d7e0e6; border-bottom:2px solid #d7e0e6; background:#fff; overflow-x:auto; }
 .steady-tabs [role=tab] { flex:0 0 auto; margin:0 0 -2px; padding:12px 17px; border:0; border-bottom:3px solid transparent; border-radius:0; background:transparent; color:#617687; font-size:13px; font-weight:500; white-space:nowrap; transition:none; }
 .steady-tabs [role=tab]:hover { background:#f2f6f9; color:#2d526e; }

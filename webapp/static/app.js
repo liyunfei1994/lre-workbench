@@ -1,5 +1,6 @@
 import {renderAnalysis, configureResultSchema} from "./results.js";
 import {mountSteadyWorkspace} from "./steady-workspace.js";
+import {mountCoolingDesign} from "./cooling-design.js";
 import {mountValidation} from "./validation.js";
 import {mountThrottle} from "./throttle.js";
 import {mountTransient} from "./transient.js";
@@ -10,7 +11,13 @@ import {mountShutdown} from "./shutdown.js";
 import {mountComponentWorkspace} from "./component-analysis.js";
 import {mountFlowWorkspace} from "./flow-analysis.js";
 import {mountCycleWorkspace} from "./cycle-schematic.js";
-import {savedInputDocument,mergeInputDefaults,PREBURNER_MODE_KEY,selectPreburnerMode,parameterValue,parameterVisible,parameterGroups,parameterSearchText,parameterLayoutDependency,renderParameterGroups,renderParameterEvidence} from "./parameter-editor.js";
+import {renderNozzleGeometry,mountNozzleGeometry} from "./nozzle-geometry.js";
+import {renderPumpGeometry,mountPumpGeometry} from "./pump-geometry.js";
+import {renderInjectorDesign,mountInjectorDesign} from "./injector-design.js";
+import {renderTurbineGeometry,mountTurbineGeometry} from "./turbine-geometry.js";
+import {renderTurbineDesign,mountTurbineDesign} from "./turbine-design.js";
+import {renderResultConsistency} from "./result-consistency.js";
+import {savedInputDocument,mergeInputDefaults,methaneThermoSummary,upgradeMethaneDatasetDraft,upgradeCoolingModelDraft,PREBURNER_MODE_KEY,selectPreburnerMode,parameterValue,parameterVisible,parameterGroups,parameterSearchText,parameterLayoutDependency,renderParameterGroups,renderParameterEvidence} from "./parameter-editor.js";
 
 const $ = id => document.getElementById(id);
 const escape = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
@@ -35,6 +42,18 @@ let feedView=null;
 let chilldownView=null;
 let ignitionView=null;
 let shutdownView=null;
+let workspaceUserId=null;
+let nozzleGeometryCleanup=null;
+let pumpGeometryCleanup=null;
+let injectorDesignCleanup=null;
+let turbineGeometryCleanup=null;
+let turbineDesignCleanup=null;
+let recordLoadSequence=0;
+let coolingDesignView=null;
+views.geometry=["推力室与喷管几何","系统级内轮廓 · 几何尺寸、二维剖面与三维曲面"];
+views.pump_geometry=["泵初步几何","保存设计点 · 代表级叶轮主尺寸、子午流道与 CAD 参考坐标"];
+views.injector_design=["喷注器初步设计","FFSC 三处喷注接口 · 主喷注单元尺寸与流量一致性"];
+views.turbine_geometry=["涡轮总体设计","CFturbo 设计任务书 · 总体设计点、燃气物性与功率匹配"];
 views.shutdown=["关机与再启动分析","连续状态 · 关阀、残余库存、壁面余热、轴系惰转与再次供给"];
 views.ignition=["点火事件与建压分析","气相反应容腔 · 给定外部点火热脉冲、阀门响应与压力建立"];
 views.chilldown=["预冷与充填分析","壁面热惯性 · 真实流体气液库存、两相充填与初始状态快照"];
@@ -42,6 +61,37 @@ views.feed=["供给网络动态","单相液体供给子系统 · 管路惯性、
 views.validation=["热力学校核","同条件热化学对比、系统守恒、真实流体物性与试验验证"];
 views.transient=["瞬态响应分析","热态工作点附近的局部扰动 · 零维质量、能量与转子惯性积分"];
 views.throttle=["节流稳态性能分析","固定主喷管喉部 · 不同推力指令下的稳态工况扫描"];
+
+// Tab-local navigation only: drafts, credentials and results remain outside storage.
+function navigationKey(){return user?.id==null?null:`lre.workspace.navigation.v1:${user.id}`;}
+function readNavigation(){
+  try{
+    const key=navigationKey(),saved=key?JSON.parse(sessionStorage.getItem(key)):null;
+    if(!saved||saved.version!==1||!["project","projects","jobs","members"].includes(saved.page))return null;
+    return {page:saved.page==="members"&&user.role!=="admin"?"projects":saved.page,
+      projectId:typeof saved.projectId==="string"?saved.projectId:null,
+      view:Object.hasOwn(views,saved.view)?saved.view:"overview",
+      jobId:typeof saved.jobId==="string"?saved.jobId:null};
+  }catch{return null;}
+}
+function rememberNavigation(){
+  try{
+    const key=navigationKey();if(!key)return;
+    sessionStorage.setItem(key,JSON.stringify({version:1,page,projectId:current?.id||null,view:analysisView,jobId:selectedJobId}));
+  }catch{/* Navigation remains usable if browser storage is unavailable. */}
+}
+
+function parameterGroupKey(){return user?.id!=null&&current?.id!=null?`lre.workspace.parameter-group.v1:${user.id}:${current.id}`:null;}
+function readParameterGroup(){
+  try{const key=parameterGroupKey();return key?sessionStorage.getItem(key)||"":"";}
+  catch{return "";}
+}
+function rememberParameterGroup(){
+  try{
+    const key=parameterGroupKey(),selected=$("parameter-group").value;
+    if(key&&draft&&parameterGroups(groups,draft).some(group=>group.id===selected))sessionStorage.setItem(key,selected);
+  }catch{/* Parameter editing also works when browser storage is unavailable. */}
+}
 
 function toast(message) { $("toast").textContent=message; $("toast").hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$("toast").hidden=true,5500); }
 function connection(ok) {
@@ -95,12 +145,14 @@ function setDirty(value=true) {
   if(analysisView==="chilldown") chilldownView?.sync();
   if(analysisView==="ignition") ignitionView?.sync();
   if(analysisView==="shutdown") shutdownView?.sync();
+  coolingDesignView?.sync();
 }
 function mayLeave(){return !dirty || confirm("当前编辑尚未保存。确定放弃这些编辑？");}
 function updateActionState(){
+  document.querySelectorAll("[data-view],[data-nav]").forEach(button=>button.disabled=editorBusy);
   for(const id of ["header-run","submit-job"]) $(id).disabled=!current || editorBusy || connected===false || projectJobs.some(active) || !!propellantIssue();
   for(const id of ["header-save","history-save"])$(id).disabled=!current || editorBusy || connected===false;
-  for(const id of ["choose-import","import-inputs","export-inputs","reload-project"])$(id).disabled=!current || editorBusy;
+  for(const id of ["choose-import","import-inputs","export-inputs","reload-project","upgrade-methane-dataset"])$(id).disabled=!current || editorBusy;
   const cancellable=projectJobs.find(j=>active(j)&&(user?.role==="admin"||user?.id===j.submitted_by));
   $("header-cancel").hidden=page!=="project"||!cancellable;
   $("header-cancel").disabled=editorBusy||connected===false;
@@ -115,6 +167,8 @@ async function withEditorLock(task){
   try{return await task();}finally{controls.forEach((el,i)=>el.disabled=disabled[i]);containers.forEach(el=>el.inert=false);editorBusy=false;updateActionState();}
 }
 function showAuth(){
+  if(pumpGeometryCleanup){pumpGeometryCleanup();pumpGeometryCleanup=null;}
+  if(nozzleGeometryCleanup){nozzleGeometryCleanup();nozzleGeometryCleanup=null;}
   validationView?.onLeave();
   throttleView?.onLeave();
   transientView?.onLeave();
@@ -130,6 +184,8 @@ function showAuth(){
   $("auth-submit").textContent=initialized?"进入工作台 →":"创建管理员并进入 →";
 }
 async function enterWorkspace(){
+  if(workspaceUserId!==null&&workspaceUserId!==user.id){current=null;draft=null;resultRecord=null;selectedJobId=null;projectJobs=[];dirty=false;analysisView="overview";page="projects";}
+  workspaceUserId=user.id;
   info=await api("/info");
   if(!info.ui_schema?.groups) throw new Error("页面已更新，请先停止旧服务，再运行 start_web_windows.bat 载入新版工作台。");
   groups=info.ui_schema.system_groups||info.ui_schema.groups;fields=info.ui_schema.groups.flatMap(g=>g.fields);
@@ -137,15 +193,30 @@ async function enterWorkspace(){
   $("auth").hidden=true;$("workspace").hidden=false;$("auth-password").value="";$("auth-error").textContent="";
   $("user-label").textContent=`${user.display_name} · ${user.role==="admin"?"管理员":"成员"}`;$("members-nav").hidden=user.role!=="admin";
   $("runtime-version").textContent=`Python ${info.python} · Cantera / CoolProp`;
-  const options=info.presets.map(p=>`<option value="${escape(p.key)}">${escape(p.label)}</option>`).join("");
+  const options=info.presets.filter(p=>p.routine_design!==false).map(p=>`<option value="${escape(p.key)}">${escape(p.label)}</option>`).join("");
+  const compatibilityOptions=info.presets.filter(p=>p.routine_design===false).map(p=>`<option value="${escape(p.key)}" disabled>${escape(p.label)} · 历史预算</option>`).join("");
   $("new-preset").innerHTML=options;
   const references=(info.reference_engines||[]).filter(r=>!r.applicable);
-  $("project-preset").innerHTML='<option value="">自定义方案</option><optgroup label="选择即载入工程示例">'+options+'</optgroup>'+(references.length?'<optgroup label="公开机型资料 · 尚不支持计算">'+references.map(r=>`<option value="${escape(r.key)}">${escape(r.name)} · 仅资料</option>`).join("")+'</optgroup>':"");
+  $("project-preset").innerHTML='<option value="">自定义方案</option><optgroup label="选择即载入工程示例">'+options+'</optgroup>'+(compatibilityOptions?'<optgroup label="历史方案标识 · 不作为常规新建入口">'+compatibilityOptions+'</optgroup>':"")+(references.length?'<optgroup label="公开机型资料 · 尚不支持计算">'+references.map(r=>`<option value="${escape(r.key)}">${escape(r.name)} · 仅资料</option>`).join("")+'</optgroup>':"");
   $("reference-engine").innerHTML=(info.reference_engines||[]).map(r=>`<option value="${escape(r.key)}">${escape(r.name)}</option>`).join("");
-  if(current){if(!dirty)renderFields();syncPresetSelection();switchPage("project");await refreshProjectSide();}
-  else {const projects=await api("/projects");if(projects.length) await openProject(projects[0].id);else await navigate("projects");}
+  if(current){
+    if(!dirty)renderFields();syncPresetSelection();
+    if(page==="project"){renderView();switchPage("project");await refreshProjectSide();}
+    else await navigate(page);
+  }else{
+    const projects=await api("/projects"),saved=readNavigation();
+    if(saved){
+      const project=projects.find(p=>p.id===saved.projectId);
+      if(project)await openProject(project.id,saved);
+      if(saved.page!=="project")await navigate(saved.page);
+      else if(!project)await navigate("projects");
+    }else if(projects.length)await openProject(projects[0].id);
+    else await navigate("projects");
+  }
 }
 function switchPage(next){
+  if(next!=="project" && pumpGeometryCleanup){pumpGeometryCleanup();pumpGeometryCleanup=null;}
+  if(next!=="project" && nozzleGeometryCleanup){nozzleGeometryCleanup();nozzleGeometryCleanup=null;}
   if(next!=="project") validationView?.onLeave();
   if(next!=="project") throttleView?.onLeave();
   if(next!=="project") transientView?.onLeave();
@@ -160,6 +231,7 @@ function switchPage(next){
   document.querySelectorAll("[data-view]").forEach(b=>b.classList.toggle("active",next==="project" && b.dataset.view===analysisView));
   if(next!=="project"){$("document-title").textContent="团队工作区";$("document-meta").textContent="共享方案 · 版本与计算记录";}else updateDocument();
   updateActionState();
+  rememberNavigation();
 }
 async function navigate(next){
   if(editorBusy || (page==="project"&&!mayLeave())) return;
@@ -182,18 +254,27 @@ function propellantIssue(){
   const model=currentPropellant();if(!model||!draft)return "";
   if(!model.supported_cycles.includes(draft.cycle_type))return "该推进剂模型当前支持 GG 循环，请选择燃气发生器循环，或加载配套工程示例。";
   if(draft.propellant_pair!=="lox_kerosene")return "";
-  if(draft.cooling_bartz_mode!==0||draft.cooling_dp_auto!==0)return "煤油替代模型需使用指定吸热量、指定系统压降；请在再生冷却分组修改，或加载配套工程示例。";
+  if(draft.cooling_bartz_mode!==0)return "煤油替代工质尚未接入统一准一维冷却；常规新设计请选择液氧/甲烷。已有煤油预算方案可从“方案与计算记录”载入复现。";
   if(!(draft.fuel_inlet_temp>=model.inlet_temperature_min_K&&draft.fuel_inlet_temp<=model.inlet_temperature_max_K))return `煤油替代工质的入口温度需为 ${model.inlet_temperature_min_K}–${model.inlet_temperature_max_K} K；当前值 ${draft.fuel_inlet_temp} K。`;
   return "";
 }
 function updatePropellantContext(){
   const model=currentPropellant(),issue=propellantIssue();
   $("propellant-model-label").textContent=model?.label||"液氧 / 甲烷";
-  $("propellant-model-note").textContent=model?(model.id==="lox_methane"?`气相数据：${draft.methane_thermo_dataset==="gri30_highT"?"gri30_highT.yaml（高温热化学）":"gri30.yaml（历史数据）"}。仍采用理想气体混合物；纯推进剂使用 CoolProp。`:model.limitations.slice(0,2).join(" ")):"旧方案默认采用液氧 / 甲烷。";
-  $("propellant-model-details").hidden=!model||model.limitations.length<=2;
-  $("propellant-model-limits").textContent=model?.limitations.slice(2).join(" ")||"";
+  if((draft?.propellant_pair||"lox_methane")==="lox_methane"){
+    const view=methaneThermoSummary(draft,info?.ui_schema?.methane_thermo_datasets);
+    $("propellant-model-note").innerHTML=view.summary;
+    $("propellant-model-limits").innerHTML=view.details;
+    $("propellant-model-details").hidden=false;
+    $("upgrade-methane-dataset").hidden=!view.historical;
+  }else{
+    $("propellant-model-note").textContent=model?.limitations.slice(0,2).join(" ")||"推进剂模型未识别。";
+    $("propellant-model-details").hidden=!model||model.limitations.length<=2;
+    $("propellant-model-limits").textContent=model?.limitations.slice(2).join(" ")||"";
+    $("upgrade-methane-dataset").hidden=true;
+  }
   $("propellant-model-error").textContent=issue;
-  $("load-propellant-example").hidden=!issue;
+  $("load-propellant-example").hidden=!issue||!info.presets.some(p=>p.routine_design!==false&&p.inputs.propellant_pair===draft.propellant_pair&&p.inputs.cycle_type==="gg");
   updateActionState();
 }
 const sameInputs=(a,b)=>Object.keys({...a,...b}).every(key=>a[key]===b[key]);
@@ -207,6 +288,7 @@ function syncPresetSelection(infer=false){
 }
 function loadPreset(preset){
   if(!preset||editorBusy)return;
+  if(preset.routine_design===false){toast("该示例保留为历史预算兼容，不作为常规新设计入口。已有方案可继续从记录页载入。");return;}
   presetUndo={draft:clone(draft),dirty,referenceKey,
     group:$("parameter-group").value,search:$("parameter-search").value};
   draft={...clone(info.ui_schema.defaults),...clone(preset.inputs)};referenceKey=preset.key;
@@ -224,15 +306,17 @@ function undoPreset(){
 }
 function updatePresetContext(){
   const key=$("project-preset").value, reference=(info.reference_engines||[]).find(r=>r.key===key||r.preset_key===key);
-  const applicable=info.presets.some(p=>p.key===key);
+  const applicable=info.presets.some(p=>p.key===key&&p.routine_design!==false);
   $("apply-preset").disabled=!applicable;
-  $("preset-context").textContent=reference?`${reference.propellants} · ${reference.cycle_label}。${reference.shaft_note||""}${reference.applicable?"":` ${reference.compatibility_reason} 当前计算方案保持不变。`}`:applicable?"已载入参考参数；修改循环、推进剂或轴系后转为自定义方案。":"当前为自定义方案。选择参考机型会立即替换整套参数，并提供一次撤销。";
+  $("preset-context").textContent=info.presets.some(p=>p.key===key&&p.routine_design===false)?"本方案保留历史预算模型，可读取、保存和复现；该示例不作为常规新设计入口。":reference?`${reference.propellants} · ${reference.cycle_label}。${reference.shaft_note||""}${reference.applicable?"":` ${reference.compatibility_reason} 当前计算方案保持不变。`}`:applicable?"已载入参考参数；修改循环、推进剂或轴系后转为自定义方案。":"当前为自定义方案。选择参考机型会立即替换整套参数，并提供一次撤销。";
 }
 function renderReference(){
   const reference=(info.reference_engines||[]).find(r=>r.key===$("reference-engine").value);
   if(!reference){$("reference-content").textContent="暂无参考资料。请重新连接新版服务。";return;}
   const safeLink=(url,title)=>/^https:\/\//i.test(url||"")?`<a href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(title)}</a>`:escape(title);
-  $("reference-content").innerHTML=`<div class="reference-heading"><h3>${escape(reference.name)}</h3><span class="badge">${reference.applicable?"可加载工程示例":"仅公开资料"}</span></div><p class="reference-propellants">${escape(reference.propellants)} · ${escape(reference.cycle_label)}</p><p class="reference-compatibility">${escape(reference.compatibility_reason)}</p>${reference.shaft_note?`<p class="reference-shaft">${escape(reference.shaft_note)}</p>`:""}<div class="table-wrap"><table><thead><tr><th>资料项</th><th>公开信息</th></tr></thead><tbody>${(reference.reference_facts||[]).map(f=>`<tr><td>${escape(f.label)}</td><td>${escape(f.value)}</td></tr>`).join("")}</tbody></table></div><p class="fine">${escape(reference.model_note)}</p><div class="reference-sources"><b>资料来源</b>${(reference.sources||[]).map(s=>safeLink(s.url,s.title)).join("")}</div>`;
+  const historicalBudget=info.presets.some(p=>p.key===reference.preset_key&&p.routine_design===false);
+  const compatibility=historicalBudget?"此工程示例采用历史预算冷却模型，不作为常规新设计入口。已有方案可从“方案与计算记录”载入复现；此处保留公开资料供参考。":reference.compatibility_reason;
+  $("reference-content").innerHTML=`<div class="reference-heading"><h3>${escape(reference.name)}</h3><span class="badge">${reference.applicable&&!historicalBudget?"可加载工程示例":"仅公开资料"}</span></div><p class="reference-propellants">${escape(reference.propellants)} · ${escape(reference.cycle_label)}</p><p class="reference-compatibility">${escape(compatibility)}</p>${reference.shaft_note?`<p class="reference-shaft">${escape(reference.shaft_note)}</p>`:""}<div class="table-wrap"><table><thead><tr><th>资料项</th><th>公开信息</th></tr></thead><tbody>${(reference.reference_facts||[]).map(f=>`<tr><td>${escape(f.label)}</td><td>${escape(f.value)}</td></tr>`).join("")}</tbody></table></div><p class="fine">${escape(reference.model_note)}</p><div class="reference-sources"><b>资料来源</b>${(reference.sources||[]).map(s=>safeLink(s.url,s.title)).join("")}</div>`;
   $("reference-content").innerHTML+=renderParameterEvidence(reference.parameter_evidence,fields);
 }
 function showReferences(){
@@ -242,13 +326,15 @@ function showReferences(){
 }
 const displayValue=f=>parameterValue(f,draft);
 const editorField=key=>groups.flatMap(g=>g.fields).find(f=>f.key===key)||fields.find(f=>f.key===key);
-function renderFields(){
-  const selected=$("parameter-group").value,available=parameterGroups(groups,draft);
+function renderFields(selected=$("parameter-group").value){
+  const available=parameterGroups(groups,draft);
+  // The old standalone thermal group now lives under numerical settings.
+  if(selected==="thermo" && !available.some(g=>g.id==="thermo"))selected="solver";
   const expanded=new Set([...$("parameter-fields").querySelectorAll("[data-initials]")].filter(node=>node.open&&!node.dataset.searchOpened).map(node=>node.dataset.initials));
   $("parameter-group").innerHTML=available.map(g=>`<option value="${escape(g.id)}">${escape(g.title)}</option>`).join("");
-  if(available.some(g=>g.id===selected)) $("parameter-group").value=selected;
+  $("parameter-group").value=available.some(g=>g.id===selected)?selected:available[0]?.id||"";
   $("parameter-fields").innerHTML=renderParameterGroups(available,draft,expanded);
-  filterParameters();updatePropellantContext();
+  filterParameters();updatePropellantContext();rememberParameterGroup();
 }
 function filterParameters(){
   const query=$("parameter-search").value.trim().toLocaleLowerCase(),selected=$("parameter-group").value;let count=0;$("parameter-group").disabled=!!query;
@@ -265,9 +351,13 @@ function fillProject(project,keepReference=false){
   $("project-name").value=project.name;$("project-description").value=project.description;setEditorError("");
   if(changed)$("project-more-actions").open=false;
   clearPresetUndo();syncPresetSelection(changed||!keepReference);
-  renderFields();updatePresetContext();setDirty(false);updateDocument();renderView();updateActionState();
+  renderFields(changed?readParameterGroup():$("parameter-group").value);updatePresetContext();setDirty(false);updateDocument();renderView();updateActionState();
 }
-async function openProject(id){if(editorBusy||(page==="project"&&!mayLeave()))return;await withEditorLock(async()=>{fillProject(await api("/projects/"+id));switchPage("project");await refreshProjectSide();});}
+async function openProject(id,savedNavigation=null){if(editorBusy||(page==="project"&&!mayLeave()))return;await withEditorLock(async()=>{
+  fillProject(await api("/projects/"+id));
+  if(savedNavigation){analysisView=savedNavigation.view;selectedJobId=savedNavigation.jobId;renderView();}
+  switchPage("project");await refreshProjectSide();
+});}
 async function chooseView(view){
   if(editorBusy)return;
   if(page!=="project"){
@@ -277,6 +367,12 @@ async function chooseView(view){
   analysisView=view;renderView();switchPage("project");
 }
 function renderView(){
+  if(turbineDesignCleanup){turbineDesignCleanup();turbineDesignCleanup=null;}
+  if(injectorDesignCleanup){injectorDesignCleanup();injectorDesignCleanup=null;}
+  if(turbineGeometryCleanup){turbineGeometryCleanup();turbineGeometryCleanup=null;}
+  if(pumpGeometryCleanup){pumpGeometryCleanup();pumpGeometryCleanup=null;}
+  if(nozzleGeometryCleanup){nozzleGeometryCleanup();nozzleGeometryCleanup=null;}
+  coolingDesignView?.dispose();coolingDesignView=null;
   $("analysis-title").textContent=views[analysisView][0];$("analysis-subtitle").textContent=views[analysisView][1];
   const history=analysisView==="history";
   document.querySelector(".workbench-layout").classList.toggle("history-view",history);
@@ -296,7 +392,34 @@ function renderView(){
   if(analysisView!=="chilldown") chilldownView?.onLeave();
   if(analysisView!=="ignition") ignitionView?.onLeave();
   if(analysisView!=="shutdown") shutdownView?.onLeave();
-  if(analysisView==="validation") {
+  if(analysisView==="geometry") {
+    const geometry=resultRecord?.nozzle_geometry || resultRecord?.result?.nozzle_geometry;
+    $("analysis-content").innerHTML=renderNozzleGeometry(geometry);
+    nozzleGeometryCleanup=mountNozzleGeometry($("analysis-content"),geometry);
+  } else if(analysisView==="pump_geometry") {
+    const geometry=resultRecord?.pump_geometry || resultRecord?.result?.pump_geometry;
+    $("analysis-content").innerHTML=renderPumpGeometry(geometry);
+    pumpGeometryCleanup=mountPumpGeometry($("analysis-content"),geometry);
+  } else if(analysisView==="injector_design") {
+    const design=resultRecord?.injector_design || resultRecord?.result?.injector_design;
+    $("analysis-content").innerHTML=renderInjectorDesign(design);
+    injectorDesignCleanup=mountInjectorDesign($("analysis-content"),design,{initialStation:$("analysis-content").dataset.injectorStation,onInspectComponent:id=>{
+      const host=$("analysis-content");host.dataset.caRecordId=String(resultRecord?.id || "");
+      host.dataset.caCategory="combustion";host.dataset.caSelected=id;chooseView("components");
+    }});
+    delete $("analysis-content").dataset.injectorStation;
+  } else if(analysisView==="turbine_geometry") {
+    const geometry=resultRecord?.turbine_geometry || resultRecord?.result?.turbine_geometry;
+    const design=resultRecord?.turbine_design || resultRecord?.result?.turbine_design;
+    const hasGeometry=Object.values(geometry?.turbines || {}).some(t=>t.available);
+    $("analysis-content").innerHTML=renderTurbineDesign(design)+(hasGeometry?`<details class="turbine-concept-reference"><summary>概念流道参考 · 不作为 CFturbo 设计约束</summary><p>以下仅为保存假设下的环形流道和叶排包络。具体子午面和叶型由 CFturbo 设计。</p>${renderTurbineGeometry(geometry)}</details>`:"");
+    turbineDesignCleanup=mountTurbineDesign($("analysis-content"),design,{initialComponent:$("analysis-content").dataset.turbineDesignComponent,onInspectComponent:id=>{
+      const host=$("analysis-content");host.dataset.caRecordId=String(resultRecord?.id || "");
+      host.dataset.caCategory="shaft";host.dataset.caSelected=id;chooseView("components");
+    }});
+    delete $("analysis-content").dataset.turbineDesignComponent;
+    if(hasGeometry)turbineGeometryCleanup=mountTurbineGeometry($("analysis-content"),geometry);
+  } else if(analysisView==="validation") {
     validationView ||= mountValidation($("validation-content"),{api,getContext:()=>({project:current,draft,dirty,record:resultRecord}),notify:toast});
     Promise.resolve(validationView.refresh()).catch(error=>toast(error.message));
   } else if(analysisView==="shutdown") {
@@ -320,8 +443,20 @@ function renderView(){
   } else {
     if(analysisView!=="history") {
       $("analysis-content").innerHTML=renderAnalysis(analysisView,resultRecord);
-      if(analysisView==="overview") mountSteadyWorkspace($("analysis-content"),resultRecord?.id || "");
-      if(analysisView==="components") mountComponentWorkspace($("analysis-content"),resultRecord?.id || "");
+      if(analysisView==="overview") {
+        mountSteadyWorkspace($("analysis-content"),resultRecord?.id || "");
+        const coolingPanel=$("analysis-content").querySelector('[data-steady-panel="cooling"]');
+        if(coolingPanel && resultRecord?.status==="succeeded") {
+          const host=document.createElement("section");
+          host.dataset.coolingDesignHost="";coolingPanel.prepend(host);
+          coolingDesignView=mountCoolingDesign(host,{api,getContext:()=>({project:current,draft,dirty,record:resultRecord}),notify:toast,onAdopt:adoptCoolingCandidate});
+          Promise.resolve(coolingDesignView.refresh()).catch(error=>toast(error.message));
+        }
+      }
+      if(analysisView==="components") mountComponentWorkspace($("analysis-content"),resultRecord?.id || "",{
+        onTurbineDesign:id=>{ $("analysis-content").dataset.turbineDesignComponent=id;chooseView("turbine_geometry"); },
+        onInjectorDesign:id=>{ $("analysis-content").dataset.injectorStation=({injector:"main",main_chamber:"main",ox_preburner:"ox",fuel_preburner:"fuel"})[id];chooseView("injector_design"); },
+      });
       if(analysisView==="states") mountFlowWorkspace($("analysis-content"),resultRecord?.id || "",{
         onComponent:id=>{
           const host=$("analysis-content");
@@ -344,6 +479,21 @@ function renderView(){
     }
   }
   updateResultContext();
+  $("result-consistency").hidden=history || !resultRecord?.result;
+  $("result-consistency").innerHTML=renderResultConsistency(resultRecord?.result_consistency || resultRecord?.result?.result_consistency);
+}
+
+async function adoptCoolingCandidate({studyId,candidateId}) {
+  if(editorBusy || !current)throw new Error("请等待当前编辑操作完成。");
+  const projectId=current.id;
+  const candidate=await api(`/cooling-designs/${studyId}/candidates/${candidateId}/draft`);
+  if(current?.id!==projectId || candidate.project_id!==projectId)throw new Error("当前方案已改变，请重新选择候选。");
+  if(editorBusy)throw new Error("方案正在保存，请稍后采纳。");
+  if(draft.propellant_pair!=="lox_methane" || Number(draft.cooling_bartz_mode)<=0 || String(draft.cooling_channel_table_json||"").trim())
+    throw new Error("当前草稿需采用甲烷准一维模型且没有沿程通道表；候选几何不能覆盖不同的通道定义。");
+  draft={...draft,...candidate.input_patch};
+  clearPresetUndo();setEditorError("");syncPresetSelection();renderFields();setDirty();
+  toast("已将候选几何写入草稿，其他参数保留。请运行设计点重新闭合整机，并使用新记录复核筛选约束。");
 }
 function updateResultContext(){
   if(!current)return;const old=resultRecord&&(dirty||resultRecord.revision!==current.revision);
@@ -363,8 +513,19 @@ async function refreshProjectSide(){
   if(current?.id!==id||sequence!==refreshSequence)return;
   const running=jobs.find(active);$("run-progress").textContent=running?`${statusNames[running.status]} · 方案 v${running.revision}${running.progress?` · 迭代 ${running.progress.iteration}/${running.progress.maximum} · 残差 ${number(running.progress.residual)}`:""}`:"就绪 · 可运行当前设计点";
   updateActionState();
+  rememberNavigation();
 }
-async function loadRecord(id){const projectId=current?.id;selectedJobId=id;const record=await api("/jobs/"+id);if(current?.id!==projectId||selectedJobId!==id)return;resultRecord=record;renderView();}
+async function loadRecord(id){
+  const projectId=current?.id,sequence=++recordLoadSequence;selectedJobId=id;
+  if(resultRecord?.id!==id){resultRecord=null;renderView();$("result-context").textContent="正在读取所选计算记录，各页面将在读取完成后统一更新。";}
+  let record;
+  try{record=await api("/jobs/"+id);}catch(error){
+    if(current?.id===projectId&&selectedJobId===id&&sequence===recordLoadSequence)$("result-context").textContent="所选计算记录读取失败，请重新选择记录或重试。";
+    throw error;
+  }
+  if(current?.id!==projectId||selectedJobId!==id||sequence!==recordLoadSequence)return;
+  resultRecord=record;renderView();rememberNavigation();
+}
 function renderJobs(container,jobs){container.innerHTML=jobs.length?jobs.map(j=>`<div class="job-row"><div class="job-main"><b>${escape(j.project_name)} · v${j.revision}</b><p>${escape(j.author)} · ${date(j.created)}</p>${active(j)&&j.progress?`<p>迭代 ${j.progress.iteration}/${j.progress.maximum} · 残差 ${number(j.progress.residual)}</p>`:""}</div><div class="job-actions">${badge(j.status)}<button data-job="${j.id}">查看</button>${active(j)&&(user.role==="admin"||user.id===j.submitted_by)?`<button data-cancel="${j.id}">取消</button>`:""}</div></div>`).join(""):'<div class="small-empty">暂无计算记录。点击“运行设计点”开始计算。</div>';}
 function validateChoices(params){
   for(const f of fields)if(f.choices && f.key in params && !f.choices.some(c=>String(c.value)===String(params[f.key])))throw new Error(`${f.label}选项无效：${params[f.key]}`);
@@ -434,7 +595,8 @@ document.querySelectorAll("[data-close]").forEach(b=>b.onclick=()=>$(b.dataset.c
 $("new-project").onclick=newProject;
 $("new-form").onsubmit=event=>{event.preventDefault();action(event.submitter,"new-error",async()=>{const data=Object.fromEntries(new FormData(event.target));const preset=info.presets.find(p=>p.key===data.preset);const out=await api("/projects","POST",{name:data.name,description:data.description,inputs:preset.inputs});$("new-dialog").close();event.target.reset();fillProject(out.project);switchPage("project");await refreshProjectSide();});};
 $("project-name").oninput=$("project-description").oninput=()=>{if(editorBusy)return;clearPresetUndo();setEditorError("");setDirty();};
-$("parameter-search").oninput=$("parameter-group").onchange=filterParameters;
+$("parameter-search").oninput=filterParameters;
+$("parameter-group").onchange=()=>{filterParameters();rememberParameterGroup();};
 $("parameter-fields").oninput=event=>{
   const f=editorField(event.target.dataset.input);if(!f||editorBusy)return;
   const value=event.target.value;
@@ -469,6 +631,18 @@ $("open-references").onclick=showReferences;
 $("reference-engine").onchange=renderReference;
 $("apply-preset").onclick=()=>{const preset=info.presets.find(p=>p.key===$("project-preset").value);if(!preset){toast("该机型仅供资料查阅，当前模型尚不支持此推进剂组合。");return;}loadPreset(preset);};
 $("load-propellant-example").onclick=()=>loadPreset(info.presets.find(p=>p.inputs.propellant_pair===draft.propellant_pair&&p.inputs.cycle_type==="gg"));
+$("upgrade-methane-dataset").onclick=()=>{
+  if(editorBusy||!current||!draft)return;
+  const updated=upgradeMethaneDatasetDraft(draft);if(updated===draft)return;
+  draft=updated;clearPresetUndo();setEditorError("");syncPresetSelection();renderFields();setDirty();
+  toast("已将当前草稿改为 GRI30 high-T。点击“保存方案”生成新版本；旧版本与已有结果保留，其他模型设置不变。");
+};
+$("parameter-fields").addEventListener("click",event=>{
+  if(!event.target.closest("[data-upgrade-cooling]")||editorBusy||!current||!draft)return;
+  const updated=upgradeCoolingModelDraft(draft);if(updated===draft)return;
+  draft=updated;clearPresetUndo();setEditorError("");syncPresetSelection();renderFields();setDirty();
+  toast("已建立准一维冷却草稿。请核对型面、通道及材料；保存后生成新版本，旧记录保持不变。");
+});
 $("project-form").onsubmit=event=>{event.preventDefault();action(event.submitter,"editor-error",()=>withEditorLock(async()=>{await saveProject();await refreshProjectSide();toast("方案新版本已保存。");}));};
 $("reload-project").onclick=()=>action(null,"editor-error",async()=>{if(editorBusy||!mayLeave())return;await withEditorLock(async()=>{fillProject(await api("/projects/"+current.id));await refreshProjectSide();});});
 $("export-inputs").onclick=()=>action(null,"editor-error",async()=>{if(editorBusy)return;validateDraft();download(buildInputBackup(),"lre-inputs.json");});

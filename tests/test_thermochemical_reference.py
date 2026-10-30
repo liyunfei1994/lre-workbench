@@ -12,6 +12,25 @@ import thermo
 
 
 class ReferenceRequestTests(unittest.TestCase):
+    def test_named_element_balance_rejects_unit_sum_but_wrong_species(self):
+        atoms = comparison.CEA_ATOMIC_WEIGHTS
+        metadata = {
+            "CH4": {"elements": {"C": 1, "H": 4}, "molecular_weight_kg_kmol": atoms["C"]+4*atoms["H"]},
+            "O2": {"elements": {"O": 2}, "molecular_weight_kg_kmol": 2*atoms["O"]},
+            "HCO": {"elements": {"C": 1, "H": 1, "O": 1}, "molecular_weight_kg_kmol": sum(atoms.values())},
+        }
+        reactants = {"fuel_species": "CH4", "fuel_molecular_weight_kg_kmol": metadata["CH4"]["molecular_weight_kg_kmol"]}
+        valid = {"chamber": {"mass_fractions": {"CH4": 1/4.6, "O2": 3.6/4.6}}}
+        self.assertTrue(comparison._cea_element_conservation(valid, metadata, reactants, 3.6)["verified"])
+        # A name/array permutation can preserve sum(Y)=1 and still violate the
+        # feed's elemental inventory. It must not acquire a verified marker.
+        with self.assertRaisesRegex(ValueError, "元素质量守恒"):
+            comparison._cea_element_conservation({"chamber": {"mass_fractions": {"HCO": 1.0}}}, metadata, reactants, 3.6)
+        missing = comparison._cea_element_conservation({"chamber": {"mass_fractions": {"unavailable": 1.0}}}, metadata, reactants, 3.6)
+        self.assertFalse(missing["verified"])
+        self.assertIsNone(missing["max_residual"])
+        self.assertEqual(missing["residuals"], {})
+
     def test_candidates_require_explicit_common_methane_benchmark(self):
         for request in ({"product_policy": "arbitrary"}, {"cantera_dataset": "arbitrary"},
                         {"cantera_dataset": "nasa_gas_candidate"},
@@ -30,6 +49,7 @@ class ReferenceRequestTests(unittest.TestCase):
         gas = comparison._comparison_gas(request, "CH4")
         self.assertEqual(tuple(gas.species_names), comparison.COMMON_CHO_SPECIES)
         self.assertEqual(gas.thermo_model, "ideal-gas")
+        self.assertEqual(comparison._provenance(comparison.get_propellant("lox_methane"), request)["phase"], gas.name)
         for species in gas.species():
             self.assertEqual((species.thermo.min_temp, species.thermo.max_temp), (200.0, 6000.0))
         for element, weight in comparison.CEA_ATOMIC_WEIGHTS.items():
@@ -73,6 +93,12 @@ print("REFERENCE_JSON="+json.dumps(reports))
                 restricted = request["product_policy"] == "matched_cho_gas"
                 self.assertEqual(point["comparable"]["products_aligned"], restricted)
                 self.assertEqual(point["cea"]["diagnostics"]["only_card_verified"], restricted)
+                verification = point["cea"]["diagnostics"]["composition_verification"]
+                self.assertEqual(verification["status"], "verified")
+                self.assertEqual(verification["reader_version"], 2)
+                self.assertTrue(verification["name_value_readback_verified"])
+                self.assertTrue(verification["element_conservation_verified"])
+                self.assertLess(verification["max_element_mass_fraction_residual"], 1e-7)
                 for backend in ("cantera", "cea"):
                     result = point[backend]
                     self.assertLess(abs(result["diagnostics"]["chamber_enthalpy_residual_Jkg"]), 1.0)
@@ -87,6 +113,62 @@ print("REFERENCE_JSON="+json.dumps(reports))
                     composition = {name.lstrip("*"): value for name, value in
                                    point["cea"]["stations"]["chamber"]["mass_fractions"].items()}
                     self.assertGreater(composition["O2"], 0.01)
+                    self.assertGreater(composition["H2O"], 0.35)
+                    self.assertLess(composition["HCO"], 0.001)
+
+    def test_same_only_object_repeated_conditions_modes_and_name_mw_guard(self):
+        script = '''
+import json
+from unittest.mock import patch
+from webapp import thermo_compare as c
+request = c.normalize_request({"pc_pa": 33e6, "T_fuel_K": 100, "T_ox_K": 70,
+    "of_values": [3.6], "eps_values": [34.34], "product_policy": "matched_cho_gas",
+    "methane_thermo_dataset": "gri30_highT"})
+reactants = c._comparison_reactants(request, c.get_propellant(request["propellant_pair"]))
+c._prepare_cea_scratch()
+ox, fuel = c.thermo._ensure_cea_custom_reactants(70, 100, 33e6, "CH4", reactants)
+cea = c._cea_object(request, ox, fuel)
+reports = []
+with c._LOCK, patch.object(c, "_cea_object", return_value=cea):
+    for repeat in range(2):
+        for mode in c.MODES:
+            for of in (3.2, 3.6):
+                args = {"Pc": 33e6/101325*c.CEA_PSIA_PER_ATM, "MR": of, "eps": 34.34}
+                flags = {"frozen": int(mode != "equilibrium"), "frozenAtThroat": int(mode == "frozen_throat")}
+                # The public macro getters are independent of our composition
+                # reader. Repeated readback must not change their numerical result.
+                isp, cstar, tc = cea.get_IvacCstrTc(**args, **flags)
+                result = c._cea_point(dict(request, mode=mode), of, 34.34, reactants)
+                reports.append({"repeat": repeat, "mode": mode, "of": of,
+                    "macro_before": [isp, cstar*.3048, tc/1.8], "result": result})
+    metadata = {name: dict(value) for name, value in c._cea_species_metadata().items()}
+    metadata["H2O"]["molecular_weight_kg_kmol"] = 29.01804
+    try:
+        c._cea_mass_fractions(cea, args, flags, metadata)
+    except ValueError as error:
+        identity_error = str(error)
+    else:
+        identity_error = None
+print("READBACK_JSON="+json.dumps({"reports": reports, "identity_error": identity_error}))
+'''
+        run = subprocess.run([sys.executable, "-X", "utf8", "-c", script], cwd=ROOT,
+                             capture_output=True, text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        result = json.loads(next(line.split("=", 1)[1] for line in run.stdout.splitlines() if line.startswith("READBACK_JSON=")))
+        self.assertIn("名称与分子量错位", result["identity_error"])
+        first = {}
+        for report in result["reports"]:
+            key = (report["mode"], report["of"])
+            data = report["result"]
+            with self.subTest(repeat=report["repeat"], mode=key[0], of=key[1]):
+                self.assertEqual(data["diagnostics"]["composition_verification"]["status"], "verified")
+                for metric, before in zip(("Isp_vac_s", "Cstar_m_s", "Tc_K"), report["macro_before"]):
+                    self.assertAlmostEqual(data["metrics"][metric], before, places=9)
+                if report["repeat"]:
+                    self.assertEqual(data["stations"], first[key]["stations"])
+                    self.assertEqual(data["metrics"], first[key]["metrics"])
+                else:
+                    first[key] = data
 
     def test_high_temperature_is_exposed_and_candidate_stays_in_its_range(self):
         for report in self.reports:

@@ -1,24 +1,13 @@
-"""
-geometry/nozzle.py
+"""Canonical axisymmetric gas-wall geometry for system-level calculations.
 
-喷管几何：TOP（Thrust-Optimized Parabola，推力优化抛物线）钟形喷管轮廓
-+ 喉部/出口尺寸。
+The divergent contour joins a circular throat blend to a quadratic Bezier
+parabola using the intersection of specified endpoint tangents. This is an
+engineering construction, not a verified thrust-optimized (TOP/TOC) design.
+The optional historical logarithmic angle rule has no traced fit dataset and
+is retained solely to reproduce older parameter sets.
 
-TOP 是现役大多数液体火箭发动机（SpaceX Raptor、Merlin，SSME/RS-25，
-Vulcain，RD-180 …）采用的标准喷管型面：它用一条**二次抛物线**逼近 Rao 用
-特征线法（MOC）求得的最优推力型面（TOC），精度接近 TOC 而构造简单。
-
-构造（Sutton《Rocket Propulsion Elements》Fig.3-14；Huzel & Huang SP-125）：
-  · 喉部上游圆弧 Ru = 1.5·Rt，下游圆弧 Rd = 0.382·Rt；
-  · 下游圆弧从喉部转到初始抛物线角 θn 的切点 N；
-  · 从 N 到出口 E 用一条**抛物线**（二次 Bézier）连接，控制点 Q = 过 N 的
-    θn 切线与过 E 的 θe 切线之交点；
-  · 长度 = 钟形长度比 Lf ×（15° 锥形喷管等效长度），Lf=0.80 即 80% bell；
-  · θn、θe 由膨胀比 ε 与 Lf 按 Rao 设计图拟合。
-
-理论依据：G.V.R. Rao, "Exhaust Nozzle Contour for Optimum Thrust",
-Jet Propulsion, 1958；Rao, "Approximation of Optimum Thrust Nozzle Contour",
-ARS Journal, 1960（抛物线近似法本体）。
+Nozzle coordinates put the throat at x=0. Full geometry coordinates put the
+injector face at x=0; the cylinder, convergent and divergent are one contour.
 """
 
 from __future__ import annotations
@@ -29,20 +18,55 @@ from typing import List, Tuple
 from .types import NozzleGeometry
 
 
-def top_bell_angles(expansion_ratio: float, bell_fraction: float = 0.80) -> Tuple[float, float]:
-    """TOP 抛物线钟形喷管的喉后初始角 θn 与出口角 θe [deg]。
+CONTOUR_METHODS = ("parabolic_bell_explicit_v1", "legacy_log_v1")
 
-    拟合 Rao 设计图 θn/θe = f(ε, 长度比 Lf)（Sutton RPE Fig.3-12、Huzel&Huang）。
-    基准为 80% bell；更短的钟形（Lf↓）起始更陡（θn↑）、出口残余发散更大（θe↑）。
-    典型量级：ε=20 → θn≈33°/θe≈10°；ε=35 → θn≈34°/θe≈9°；ε=80 → θn≈37°/θe≈7°。
-    """
+
+def top_bell_angles(expansion_ratio: float, bell_fraction: float = 0.80) -> Tuple[float, float]:
+    """Historical API name: unvalidated logarithmic angles [deg], not a Rao fit."""
     ln_eps = math.log(max(expansion_ratio, 1.0001))
-    d_bell = 0.80 - bell_fraction            # 相对 80% 基准的长度差
-    theta_n = 24.0 + 2.9 * ln_eps + 25.0 * d_bell
-    theta_e = 16.5 - 2.1 * ln_eps + 15.0 * d_bell
-    theta_n = max(20.0, min(42.0, theta_n))
-    theta_e = max(5.0, min(15.0, theta_e))
-    return theta_n, theta_e
+    d_bell = 0.80 - bell_fraction
+    return (max(20.0, min(42.0, 24.0 + 2.9 * ln_eps + 25.0 * d_bell)),
+            max(5.0, min(15.0, 16.5 - 2.1 * ln_eps + 15.0 * d_bell)))
+
+
+def contour_definition(expansion_ratio, bell_fraction=0.80, *,
+                       nozzle_contour_method="legacy_log_v1",
+                       nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0):
+    """Resolve actual angles and their provenance without substituting defaults."""
+    if nozzle_contour_method not in CONTOUR_METHODS:
+        raise ValueError("Unknown nozzle contour method")
+    if nozzle_contour_method == "legacy_log_v1":
+        tn, te = top_bell_angles(expansion_ratio, bell_fraction)
+        source = "historical_log_rule_unvalidated"
+        note = "历史对数角度规则；无可追溯拟合数据，仅用于旧方案复现。"
+    else:
+        tn, te = float(nozzle_initial_angle_deg), float(nozzle_exit_angle_deg)
+        source = "specified_design_angles"
+        note = "显式给定设计角度；圆弧与二次 Bézier 相切构造，未进行推力优化。"
+    if not all(math.isfinite(v) for v in (tn, te)) or not (0 <= te < tn < 90):
+        raise ValueError("喷管角度必须满足 0 ≤ 出口角 < 起始角 < 90°。")
+    return dict(nozzle_contour_method=nozzle_contour_method,
+                initial_expansion_angle_deg=tn, exit_angle_deg=te,
+                angle_source=source, method_note=note,
+                nozzle_type="parabolic_bell_engineering")
+
+
+def _bezier_definition(rt, re, expansion_ratio, bell_fraction, **definition):
+    """Validate tangent intersection before sampling; no midpoint fallback."""
+    meta = contour_definition(expansion_ratio, bell_fraction, **definition)
+    tn, te = map(math.radians, (meta["initial_expansion_angle_deg"], meta["exit_angle_deg"]))
+    rd = .382 * rt  # Declared construction assumption, not measured hardware.
+    length = bell_fraction * (re - rt) / math.tan(math.radians(15))
+    xn, rn = rd * math.sin(tn), rt + rd * (1 - math.cos(tn))
+    dx, dr = length - xn, re - rn
+    sn, se = math.tan(tn), math.tan(te)
+    if dx <= 0 or dr <= 0 or not se < dr / dx < sn:
+        raise ValueError("喷管长度、面积比与角度不相容：出口弦斜率必须位于两端切线斜率之间；请调整长度比或角度。")
+    qx = (re - rn + sn * xn - se * length) / (sn - se)
+    qr = rn + sn * (qx - xn)
+    if not xn < qx < length or not rn < qr <= re:
+        raise ValueError("喷管切线交点导致型面反折，不能生成有效钟形轮廓。")
+    return meta, (xn, rn), (qx, qr), (length, re), rd
 
 
 def _rao_bell_contour(
@@ -53,9 +77,11 @@ def _rao_bell_contour(
     n_points: int = 200,
     bell_fraction: float = 0.80,
     theta_conv_deg: float = 30.0,
+    *, nozzle_contour_method="legacy_log_v1",
+    nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0,
 ) -> Tuple[List[float], List[float], float, float, float, float, float, float]:
     """
-    计算 TOP 抛物线钟形喷管完整轮廓（含收缩段）。
+    兼容函数名：计算工程抛物线钟形轮廓（含收缩段），不声明 TOP 优化。
 
     参数
     ────
@@ -75,22 +101,24 @@ def _rao_bell_contour(
         raise ValueError("nozzle dimensions must be finite and positive")
     if rc <= rt or expansion_ratio <= 1 or not math.isclose((re/rt)**2, expansion_ratio, rel_tol=1e-10):
         raise ValueError("nozzle radii and area ratios are inconsistent")
+    if isinstance(n_points, bool) or int(n_points) != n_points or n_points < 24:
+        raise ValueError("nozzle n_points must be an integer >= 24")
     # 喉部上游半径必须读取规范轮廓的实际值；低收缩比时会按几何容许量缩小。
     from chamber_contour import convergent_contour, convergent_geometry
-    Ru = convergent_geometry(rc, rt, theta_conv_deg)["Ru_m"]
-    Rd = 0.382 * rt     # 下游（膨胀侧，Rao TOP 标准值）
-
-    # 15° 锥形喷管长度（参考基准）
-    L_conical = (re - rt) / math.tan(math.radians(15.0))
-    L_nozzle = bell_fraction * L_conical
-
-    # 初始抛物线角 θn、出口角 θe —— TOP 按 Rao 设计图拟合（见 top_bell_angles）
-    theta_n_deg, theta_e_deg = top_bell_angles(expansion_ratio, bell_fraction)
+    convergent = convergent_geometry(rc, rt, theta_conv_deg)
+    Ru = convergent["Ru_m"]
+    if nozzle_contour_method == "parabolic_bell_explicit_v1" and convergent["R1_m"] <= 1e-12:
+        raise ValueError("所选收缩比与收缩角使圆筒入口过渡圆角退化为尖角；请增大收缩比或减小收缩角。")
+    meta, P0, Q, P2, Rd = _bezier_definition(rt, re, expansion_ratio, bell_fraction,
+        nozzle_contour_method=nozzle_contour_method,
+        nozzle_initial_angle_deg=nozzle_initial_angle_deg,
+        nozzle_exit_angle_deg=nozzle_exit_angle_deg)
+    L_nozzle = P2[0]
+    theta_n_deg, theta_e_deg = meta["initial_expansion_angle_deg"], meta["exit_angle_deg"]
     theta_n = math.radians(theta_n_deg)
-    theta_e = math.radians(theta_e_deg)
 
     # ── 收缩段：取自唯一规范轮廓 chamber_contour ────────────────────
-    # 含「圆筒→收缩段入口倒角 R1」+「喉部上游圆弧 Ru」，两端相切、C¹ 连续无尖角，
+    # 含「圆筒→收缩段入口倒角 R1」+「喉部上游圆弧 Ru」；新方法拒绝退化圆角。
     # 与主燃烧室页 / 2D/3D 图 / 热结构云图完全同构（不再本地重复实现一套"直锥尖角"
     # 收缩段——那是 V16 以前两套定义并存、且圆筒接口处有 C¹ 折点的根源）。
     # 坐标系：本模块喉部在 x=0、收缩段位于负 x；chamber_contour 给出 x∈[0,L_conv]
@@ -117,30 +145,8 @@ def _rao_bell_contour(
         xs.append(x)
         rs.append(r)
 
-    # 下游圆弧终点
-    x_n = Rd * math.sin(theta_n)
-    r_n = rt + Rd * (1.0 - math.cos(theta_n))
-
-    # ── 钟形段：TOP 抛物线（二次 Bézier，从 N=(x_n,r_n) 到 E=(L_nozzle,re)）──
-    # 控制点 Q = 过 N 的 θn 切线 与 过 E 的 θe 切线 之交点（这正是 Rao 抛物线
-    # 近似法的定义；二次 Bézier 的轨迹恰为抛物线段，区别于旧版三次 Bézier）。
-    n_bell = n_points - len(xs)
-    if n_bell < 10:
-        n_bell = 10
-
-    P0 = (x_n, r_n)
-    P2 = (L_nozzle, re)
-    tan_n = math.tan(theta_n)
-    tan_e = math.tan(theta_e)
-    denom = tan_n - tan_e
-    if abs(denom) < 1e-9:
-        Qx = 0.5 * (P0[0] + P2[0])
-        Qr = 0.5 * (P0[1] + P2[1])
-    else:
-        # 解 r0 + tan_n·(x−x0) = re + tan_e·(x−xe)
-        Qx = (P2[1] - P0[1] + tan_n * P0[0] - tan_e * P2[0]) / denom
-        Qr = P0[1] + tan_n * (Qx - P0[0])
-    Q = (Qx, Qr)
+    # Quadratic Bezier: endpoints N/E and their validated tangent intersection Q.
+    n_bell = max(n_points - len(xs), 10)
 
     for i in range(1, n_bell + 1):
         t = i / n_bell
@@ -164,15 +170,17 @@ def full_hot_gas_geometry(
     theta_conv_deg: float = 30.0,
     n_points: int = 300,
     n_cyl: int = 14,
+    nozzle_contour_method="legacy_log_v1",
+    nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0,
 ):
     """全发动机燃气侧内壁轮廓（喷注面 → 喷管出口）——**唯一规范来源**（V19）。
 
     圆筒段（直线）+ 收缩段（chamber_contour 规范轮廓：入口倒角 R1 + 直锥 β +
-    喉部上游弧 Ru=1.5Rt）+ 喉部下游弧 Rd=0.382Rt + TOP 抛物线钟形段，
+    喉部上游弧 Ru（实际构造值））+ 喉部下游弧 Rd=0.382Rt + 工程抛物线钟形段，
     与 compute_nozzle 的轮廓完全同构（同一 _rao_bell_contour）。
 
     cooling_marching / 推力室设计工作区 / CSV 导出都应取此轮廓，消除历史上
-    "marching 自建轮廓（无 Rd 弧）vs 几何模块 Rao 轮廓"两套并存的口径分裂。
+    "marching 自建轮廓（无 Rd 弧）vs 几何模块规范轮廓"两套并存的口径分裂。
 
     坐标系：x=0 在喷注面，x 单调增至喷管出口。
     返回轮廓及其实际几何元数据；上游喉部曲率从构造圆弧读取，不从网格差分估计。
@@ -182,32 +190,47 @@ def full_hot_gas_geometry(
         n_points=max(n_points - n_cyl, 60),
         bell_fraction=bell_fraction,
         theta_conv_deg=theta_conv_deg,
+        nozzle_contour_method=nozzle_contour_method,
+        nozzle_initial_angle_deg=nozzle_initial_angle_deg, nozzle_exit_angle_deg=nozzle_exit_angle_deg,
     )
+    if not math.isfinite(L_cyl) or L_cyl <= 0:
+        raise ValueError("L_cyl must be finite and positive")
     xs: List[float] = []
     rs: List[float] = []
     # 圆筒段（不含末点——收缩段首点即圆筒末端 (x=L_cyl, rc)）
     for i in range(max(n_cyl, 1)):
         xs.append(L_cyl * i / max(n_cyl, 1))
         rs.append(rc)
-    # Rao 轮廓：喉部在 x=0、收缩段在负 x → 平移到喷注面坐标系
+    # 喷管轮廓：喉部在 x=0、收缩段在负 x → 平移到喷注面坐标系
     shift = L_cyl + L_conv
     for xr, rr in zip(xs_r, rs_r):
         xs.append(xr + shift)
         rs.append(rr)
+    from chamber_contour import convergent_geometry
+    cg = convergent_geometry(rc, rt, theta_conv_deg)
     return dict(contour_x=xs, contour_r=rs, x_throat_m=L_cyl + L_conv,
+                chamber_blend_radius_m=cg["R1_m"],
+                convergent_tangent_continuity="C1" if cg["R1_m"] > 1e-12 else "legacy_cylinder_corner",
                 L_conv_m=L_conv, L_nozzle_m=_L_noz,
                 throat_upstream_radius_m=_Ru, throat_downstream_radius_m=_Rd,
                 conv_half_angle_deg=theta_conv_deg, bell_fraction=bell_fraction,
-                source="geometry.nozzle.full_hot_gas_geometry")
+                source="geometry.nozzle.full_hot_gas_geometry",
+                coordinate_origin="injector_face",
+                **contour_definition(expansion_ratio, bell_fraction,
+                    nozzle_contour_method=nozzle_contour_method,
+                    nozzle_initial_angle_deg=nozzle_initial_angle_deg, nozzle_exit_angle_deg=nozzle_exit_angle_deg))
 
 
 def full_hot_gas_contour(rt, re, rc, expansion_ratio, L_cyl, *,
                          bell_fraction=0.80, theta_conv_deg=30.0,
-                         n_points=300, n_cyl=14):
+                         n_points=300, n_cyl=14,
+                         nozzle_contour_method="legacy_log_v1",
+                         nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0):
     """Compatibility tuple view of the canonical geometry, without recomputing a contour."""
     geom = full_hot_gas_geometry(rt, re, rc, expansion_ratio, L_cyl,
         bell_fraction=bell_fraction, theta_conv_deg=theta_conv_deg,
-        n_points=n_points, n_cyl=n_cyl)
+        n_points=n_points, n_cyl=n_cyl, nozzle_contour_method=nozzle_contour_method,
+        nozzle_initial_angle_deg=nozzle_initial_angle_deg, nozzle_exit_angle_deg=nozzle_exit_angle_deg)
     return geom["contour_x"], geom["contour_r"], geom["x_throat_m"]
 
 
@@ -221,14 +244,22 @@ def compute_nozzle(
     bell_fraction: float = 0.80,
     theta_conv_deg: float = 30.0,
     wall_thickness_mm: float = 0.0,
+    *, nozzle_contour_method="legacy_log_v1",
+    nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0,
 ) -> NozzleGeometry:
     """由喉部/出口/室半径推导完整喷管几何（含轮廓与内表面积）。"""
+    if not math.isfinite(chamber_length_m) or chamber_length_m <= 0:
+        raise ValueError("chamber length must be finite and positive")
+    if not math.isfinite(contraction_ratio) or not math.isclose((rc / rt)**2, contraction_ratio, rel_tol=1e-10):
+        raise ValueError("nozzle contraction ratio conflicts with radii")
     pi = math.pi
     xs, rs, L_noz, L_conv, theta_n, theta_e, Ru, Rd = _rao_bell_contour(
         rt, re, rc, expansion_ratio,
         n_points=300,
         bell_fraction=bell_fraction,
         theta_conv_deg=theta_conv_deg,
+        nozzle_contour_method=nozzle_contour_method,
+        nozzle_initial_angle_deg=nozzle_initial_angle_deg, nozzle_exit_angle_deg=nozzle_exit_angle_deg,
     )
 
     # 喷管内表面积 (用轮廓离散积分)：A = ∫ 2π r · √(dr² + dx²)
@@ -259,7 +290,11 @@ def compute_nozzle(
         contour_x=xs,
         contour_r=rs,
         bell_fraction=bell_fraction,
-        nozzle_type="TOP",                                    # 推力优化抛物线
+        nozzle_type="parabolic_bell_engineering",
+        nozzle_contour_method=nozzle_contour_method,
+        angle_source=contour_definition(expansion_ratio, bell_fraction,
+            nozzle_contour_method=nozzle_contour_method, nozzle_initial_angle_deg=nozzle_initial_angle_deg,
+            nozzle_exit_angle_deg=nozzle_exit_angle_deg)["angle_source"],
         wall_thickness_mm=wall_thickness_mm,                  # 同 chamber 总壁厚
         inner_surface_area_m2=A_inner_noz,
         throat_axial_position_m=chamber_length_m + L_conv,    # 从喷注面算起

@@ -11,6 +11,7 @@ EngineInputs 的默认值构成工程设计示例，不是一套经过验证的 
 
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
@@ -34,6 +35,37 @@ R_UNIVERSAL = 8314.462618
 class ValidationError(Exception):
     """参数校验失败时抛出的异常。"""
     pass
+
+
+PREBURNER_LIMIT_STATUSES = ("unset", "provisional", "documented")
+
+
+def preburner_temperature_constraint(inputs, side: str) -> dict:
+    """Resolve an optional gas-temperature constraint without inventing evidence.
+
+    Missing status is the historical, provisional numeric constraint. Saved
+    snapshots are not rewritten. An unset value remains stored but is inactive.
+    """
+    if side not in ("ox", "fuel"):
+        raise ValueError("preburner side must be ox or fuel")
+    prefix = f"{side}_preburner_temp_limit"
+    read = inputs.get if isinstance(inputs, dict) else lambda key, default=None: getattr(inputs, key, default)
+    status = read(f"{prefix}_status", "provisional")
+    basis = read(f"{prefix}_basis", "")
+    basis = basis.strip() if isinstance(basis, str) else ""
+    active = status in ("provisional", "documented")
+    return {"status": status, "basis": basis,
+            "limit_K": read(prefix) if active else None}
+
+
+def wall_temperature_constraint(inputs) -> dict:
+    """Resolve the optional project wall limit, independently of material data."""
+    read = inputs.get if isinstance(inputs, dict) else lambda key, default=None: getattr(inputs, key, default)
+    status = read("cooling_wall_temp_limit_status", "provisional")
+    basis = read("cooling_wall_temp_limit_basis", "")
+    basis = basis.strip() if isinstance(basis, str) else ""
+    return {"status": status, "basis": basis,
+            "limit_K": read("cooling_wall_temp_limit_K") if status in ("provisional", "documented") else None}
 
 
 def _check_range(
@@ -151,15 +183,16 @@ class EngineInputs:
     # ---------- 再生冷却通道几何（V14：正式纳入，之前用 getattr 读但未定义 → 锁死）----------
     # 几何、换热系数和材料常数均为设计假设。自动定尺寸与水力估算是低阶模型，
     # 启用后也不代表通道几何、热量积分范围与压降模型已获得试验验证。
-    cooling_n_channels: float = 300.0        # 冷却通道数（周向，受室周长约束；典型 150–400）
+    cooling_n_channels: float = 300.0        # 可编辑的示例初选数量；非推荐值或优化结果
     cooling_channel_width_m: float = 1.5e-3  # 通道周向宽 [m]
-    cooling_channel_height_m: float = 5.0e-3 # 通道径向深 [m]（auto_size=1 时被反算覆盖）
+    cooling_channel_height_m: float = 8.0e-3 # 示例起始通道径向深 [m]，非推荐值
     cooling_wall_thickness_m: float = 0.5e-3 # 内衬热壁厚 [m]（GRCop ~0.5–1 mm）
     cooling_wall_conductivity: float = 320.0 # 内衬导热 [W/(m·K)]（GRCop-84 @600K）
     cooling_htc_enhancement: float = 1.0     # 喉部弯曲/入口段换热强化因子（1.0–1.5）
     # 固定通道数与宽度，用目标流速作概念尺寸约束，反算通道深度。
-    cooling_channel_auto_size: float = 1.0   # 1=按目标流速反算通道深度（默认），0=用上面固定几何
-    cooling_target_velocity_ms: float = 100.0  # 目标冷却剂流速 [m/s]（再生通道典型 40–150）
+    cooling_channel_auto_size: float = 0.0   # 1=指定截面速度定深，0=给定几何；不是整体方案优化
+    cooling_sizing_reference: str = "coolant_inlet_velocity"
+    cooling_target_velocity_ms: float = 100.0  # 指定参考截面速度 [m/s]；只在定深模式参与
     # 旧方案兼容字段，不再控制物理模型。准一维模式同时求解热量与压降。
     cooling_dp_auto: float = 0.0
     cooling_channel_rel_roughness: float = 0.003  # 通道相对粗糙度 ε/D_h（AM 打印态 ~3e-3）
@@ -169,7 +202,9 @@ class EngineInputs:
     cooling_marching_enable: float = 1.0     # 旧方案兼容字段；统一内核始终返回沿程结果
     cooling_grid_points: float = 120.0      # 唯一准一维网格分辨率；不改变冷却物理模式
     cooling_cover_eps: float = 0.0           # 再生冷却覆盖到的面积比（0=全喷管 ε；如填 8 表示只冷到 ε=8）
-    cooling_wall_temp_limit_K: float = 800.0 # 用户给定热面壁温限值 [K]；不替代材料寿命校核
+    cooling_wall_temp_limit_K: float = 800.0 # 保留的示例存值；仅启用约束时参与验收
+    cooling_wall_temp_limit_status: str = "unset"
+    cooling_wall_temp_limit_basis: str = ""
     # 燃气辐射发射率 ε_g（灰气体一阶代理，marching 辐射热流用；V19 起为正式输入字段，
     # 之前 marching 用 getattr 读取但字段不存在 → 永远只能用 0.20 默认值）
     cooling_gas_emissivity: float = 0.20
@@ -185,8 +220,9 @@ class EngineInputs:
     film_effectiveness_initial: float = 0.9  # 兼容值，当前不生效
     film_decay_length_m: float = 0.0         # 兼容值，当前不生效
 
-    # ---------- 主室热反馈初值（不是焓参考态，也不是实机测量值）----------
-    # 启用热反馈时由求解结果更新；关闭该反馈时成为固定的性能近似输入。
+    # ---------- 燃气状态启动估计（数值初始化，不是设计约束）----------
+    # 无热侧解时初始化准一维冷却/喉部；当前 Cantera 主室不使用它们指定最终状态。
+    # 预算冷却不使用这三个初值。旧经验部件接口仍保留字段，不能与生产热化学路径混同。
     chamber_temp_guess: float = 3550.0  # 主室温度初值 [K]
     chamber_gamma: float = 1.18         # 比热比初值 [-]
     molar_mass: float = 21.0            # 平均摩尔质量初值 [kg/kmol]
@@ -209,6 +245,12 @@ class EngineInputs:
     # 实际允许值还需材料、环境、冷却和寿命证据，不能称为通用材料耐温极限。
     ox_preburner_temp_limit: float = 800.0    # [K] 富氧侧运行限值假设
     fuel_preburner_temp_limit: float = 900.0  # [K] 富燃侧运行限值假设
+    # 缺少状态的历史方案仍按暂定数值检查；不据此宣称材料/寿命已验证。
+    # unset 不使用保存的数值；documented 仅表示用户已填写该方案的依据。
+    ox_preburner_temp_limit_status: str = "provisional"
+    fuel_preburner_temp_limit_status: str = "provisional"
+    ox_preburner_temp_limit_basis: str = ""
+    fuel_preburner_temp_limit_basis: str = ""
 
     # ---------- 压力网络（V7 新增，FFSC 必需）----------
     # ⚠ FFSC 模式已废弃（V13）：主燃烧室喷注器压降统一由 ox/fuel_turbine_exhaust_dp_ratio
@@ -235,9 +277,12 @@ class EngineInputs:
     chamber_contraction_ratio: float = 2.5
     chamber_l_star_m: float = 1.0
     chamber_conv_half_angle_deg: float = 30.0   # 收缩段半锥角 β [°]（典型 25–45°）
-    # 钟形喷管长度比（0.80 = 80% bell，TOP 的核心定义参数；V19 起为正式输入，
+    # 钟形喷管长度比（相对同喉部/出口 15° 锥形喷管长度；
     # 全链同口径：geometry 轮廓 / cooling_marching / 2D图 / CSV 导出）
     nozzle_bell_fraction: float = 0.80
+    nozzle_contour_method: str = "parabolic_bell_explicit_v1"
+    nozzle_initial_angle_deg: float = 35.0  # 设计角度示例，非优化/实机数据
+    nozzle_exit_angle_deg: float = 10.0
     # 具体材料选择与温度依赖物性由下面的材料字段管理。
 
     # ---------- 预燃室混合比模式与历史序列化开关 ----------
@@ -251,7 +296,7 @@ class EngineInputs:
     # ---------- 预燃室温度目标模式（V11 新增）──────────────────
     # 温度模式适用于给定预燃室出口温度的概念设计；外环在当前入口焓与压力下
     # 反求 MR，并重新检查耦合后的目标误差。它不是比固定 MR 更真实的物理模型。
-    # 目标必须不超过用户给定上限；默认目标与上限均为假设，不声称材料裕度已验证。
+    # 启用上限时目标必须不超过上限；默认目标与上限均为假设，不声称材料裕度已验证。
     use_target_preburner_temp: float = 1.0
     ox_preburner_temp_target: float = 750.0    # [K] 富氧预燃室出口设计目标
     fuel_preburner_temp_target: float = 850.0  # [K] 富燃预燃室出口设计目标
@@ -275,19 +320,27 @@ class EngineInputs:
     #   Ns = N·sqrt(Q)/H_per_stage^0.75，依赖单位约定，不是无量纲比转速。
     #
     # 压头系数 ψ = g·H / u_tip²：
-    #   高压离心泵典型 0.45–0.55，更小越接近轴流
+    #   示例值用于几何初选，不能单独确定泵型或最优效率；CFturbo Ψ = 2ψ。
     #
     # LOX 泵示例设计设定，未以实机转速、叶轮或特性图验证。
     lox_pump_speed_rpm_override: float = 26500.0   # [rpm] 锁定；置 0 改回按 nq 反推
     lox_pump_specific_speed_target: float = 30.0   # nq(EU)=N·√Q/H^0.75（与 CFTurbo nq(EU) 同口径）
     lox_pump_n_stages: int = 1                  # 用户指定级数假设
     lox_pump_head_coefficient_psi: float = 0.50
+    lox_pump_inlet_flow_coefficient: float = 0.10  # cm1/u2；示例假设
+    lox_pump_outlet_flow_coefficient: float = 0.08  # cm2/u2；无叶片堵塞修正
+    lox_pump_eye_hub_ratio: float = 0.35           # D1h/D1s
+    lox_pump_axial_length_ratio: float = 0.30      # 代表级子午流道 Lz/D2
 
     # 燃料泵示例设计设定；不据此声称机械裕度或效率随转速变化已验证。
     fuel_pump_speed_rpm_override: float = 38000.0
     fuel_pump_specific_speed_target: float = 30.0
     fuel_pump_n_stages: int = 2                 # 用户指定级数假设
     fuel_pump_head_coefficient_psi: float = 0.50
+    fuel_pump_inlet_flow_coefficient: float = 0.10
+    fuel_pump_outlet_flow_coefficient: float = 0.08
+    fuel_pump_eye_hub_ratio: float = 0.35
+    fuel_pump_axial_length_ratio: float = 0.30
 
     # ---------- 涡轮气动设计目标（V10 新增）──────────────
     # U/C0 = 节圆速度 / 等熵喷出速度，反动度涡轮最优 0.45–0.60
@@ -300,6 +353,29 @@ class EngineInputs:
     # 用户指定级数（0 = 自动按 U/C0 选）
     turb_ox_n_stages_user:   int = 0
     turb_fuel_n_stages_user: int = 0
+
+    # Explicit interface convention; historical node states are never relabelled.
+    turbine_boundary_basis: str = "unspecified"
+    turbine_meanline_mode: str = "disabled"
+    turb_ox_meanline_flow_coefficient: float = 0.60
+    turb_fuel_meanline_flow_coefficient: float = 0.60
+    turb_ox_stage_work_fractions: str = "[]"
+    turb_fuel_stage_work_fractions: str = "[]"
+
+    # 轴流涡轮概念流道；只影响几何快照，不改变循环焓降或功率。
+    # 系统节点 P/T 在本几何中按静态参考量使用，并非已确认的 CFD 边界。
+    ox_turbine_inlet_flow_coefficient: float = 0.60   # cm_in / U_mean
+    ox_turbine_outlet_flow_coefficient: float = 0.70  # cm_out / U_mean
+    ox_turbine_stator_axial_chord_ratio: float = 0.12 # L_stator / D_mean
+    ox_turbine_rotor_axial_chord_ratio: float = 0.15  # L_rotor / D_mean
+    ox_turbine_row_gap_ratio: float = 0.04           # gap / D_mean
+    ox_turbine_geometry_state_basis: str = "system_pt_as_static"
+    fuel_turbine_inlet_flow_coefficient: float = 0.60
+    fuel_turbine_outlet_flow_coefficient: float = 0.70
+    fuel_turbine_stator_axial_chord_ratio: float = 0.12
+    fuel_turbine_rotor_axial_chord_ratio: float = 0.15
+    fuel_turbine_row_gap_ratio: float = 0.04
+    fuel_turbine_geometry_state_basis: str = "system_pt_as_static"
 
     # ---------- 涡轮叶尖速度上限（材料强度约束）──────────
     # 用户给定的速度筛查限值；不由材料名自动得到，也不等于转子强度验证。
@@ -388,6 +464,17 @@ class EngineInputs:
     wall_thermal_dataset_id: str = ""
     wall_manufacturing_state: str = "unspecified"
     wall_material_zones_json: str = ""
+
+    @classmethod
+    def from_dict(cls, values):
+        """Load old input documents without silently changing their geometry or limits."""
+        copied = dict(values)
+        copied.setdefault("nozzle_contour_method", "legacy_log_v1")
+        copied.setdefault("cooling_channel_auto_size", 1.0)
+        copied.setdefault("cooling_channel_height_m", 5.0e-3)
+        copied.setdefault("cooling_sizing_reference", "legacy_inlet_density_throat_width")
+        copied.setdefault("cooling_wall_temp_limit_status", "provisional")
+        return cls(**copied)
 
     def __post_init__(self):
         """输入参数物理范围校验。"""
@@ -488,12 +575,28 @@ class EngineInputs:
         _check_range("cooling_htc_enhancement（换热强化因子）", self.cooling_htc_enhancement, lo=0.5, hi=2.0)
         _check_range("cooling_channel_auto_size（自动定尺寸开关）", self.cooling_channel_auto_size, lo=0.0, hi=1.0)
         _check_range("cooling_target_velocity_ms（目标冷却剂流速）", self.cooling_target_velocity_ms, lo=10.0, hi=300.0)
-        _warn_range("cooling_target_velocity_ms（目标冷却剂流速）", self.cooling_target_velocity_ms, 40.0, 150.0)
         _check_range("cooling_dp_auto（水力压降耦合开关）", self.cooling_dp_auto, lo=0.0, hi=1.0)
         _check_range("cooling_channel_rel_roughness（通道相对粗糙度）", self.cooling_channel_rel_roughness, lo=0.0, hi=0.05)
         _check_range("cooling_channel_k_minor（局部损失动压头数）", self.cooling_channel_k_minor, lo=0.0, hi=20.0)
         _check_range("chamber_conv_half_angle_deg（收缩段半锥角）", self.chamber_conv_half_angle_deg, lo=10.0, hi=60.0)
         _check_range("nozzle_bell_fraction（钟形长度比）", self.nozzle_bell_fraction, lo=0.60, hi=1.00)
+        from geometry.nozzle import CONTOUR_METHODS, _bezier_definition
+        if self.nozzle_contour_method not in CONTOUR_METHODS:
+            raise ValidationError("未知的喷管型面方法。")
+        # Geometry compatibility is dimensionless and independent of throat sizing.
+        try:
+            _bezier_definition(1., math.sqrt(self.expansion_ratio), self.expansion_ratio,
+                self.nozzle_bell_fraction, nozzle_contour_method=self.nozzle_contour_method,
+                nozzle_initial_angle_deg=self.nozzle_initial_angle_deg,
+                nozzle_exit_angle_deg=self.nozzle_exit_angle_deg)
+            if self.nozzle_contour_method == "parabolic_bell_explicit_v1":
+                from chamber_contour import convergent_geometry
+                cg = convergent_geometry(math.sqrt(self.chamber_contraction_ratio), 1.,
+                                         self.chamber_conv_half_angle_deg)
+                if cg["R1_m"] <= 1e-12:
+                    raise ValueError("圆筒入口过渡圆角退化为尖角；请增大收缩比或减小收缩角。")
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValidationError(str(exc)) from exc
         _check_range("cooling_gas_emissivity（燃气辐射发射率）", self.cooling_gas_emissivity, lo=0.0, hi=0.60)
         # 通道分布表：仅做 JSON 可解析性校验（结构校验在 chamber_design.parse_channel_table）
         if isinstance(self.cooling_channel_table_json, str) and self.cooling_channel_table_json.strip():
@@ -508,7 +611,17 @@ class EngineInputs:
             raise ValidationError("cooling_grid_points 必须为整数。")
         if self.cooling_cover_eps != 0.0:
             _check_range("cooling_cover_eps（再生冷却覆盖面积比）", self.cooling_cover_eps, lo=1.5, hi=400.0)
-        _check_range("cooling_wall_temp_limit_K（热面壁温限值）", self.cooling_wall_temp_limit_K, lo=400.0, hi=1500.0)
+        if self.cooling_sizing_reference not in ("coolant_inlet_velocity", "legacy_inlet_density_throat_width"):
+            raise ValidationError("cooling_sizing_reference 必须为 coolant_inlet_velocity 或 legacy_inlet_density_throat_width。")
+        wall_constraint = wall_temperature_constraint(self)
+        if wall_constraint["status"] not in PREBURNER_LIMIT_STATUSES:
+            raise ValidationError("cooling_wall_temp_limit_status 必须是 unset、provisional 或 documented。")
+        if wall_constraint["status"] == "documented" and not wall_constraint["basis"]:
+            raise ValidationError("cooling_wall_temp_limit_basis：已有依据状态必须填写该限值的适用条件和来源。")
+        if wall_constraint["status"] != "unset":
+            limit = wall_constraint["limit_K"]
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
+                raise ValidationError("cooling_wall_temp_limit_K 必须是大于 0 K 的有限数值；数值有效不代表材料许可。")
         _check_range("film_cooling_fraction（膜冷却流量比例）", self.film_cooling_fraction, lo=0.0, hi=0.15)
         _check_range("film_effectiveness_initial（膜初始效能）", self.film_effectiveness_initial, lo=0.1, hi=1.0)
         _check_range("film_decay_length_m（膜效能衰减长）", self.film_decay_length_m, lo=0.0, hi=3.0)
@@ -532,11 +645,20 @@ class EngineInputs:
         _check_range("fuel_turbine_exhaust_dp_ratio（富燃涡轮出口至主燃烧室压降比）",
                      self.fuel_turbine_exhaust_dp_ratio, lo=0.0, hi=0.8)
 
-        # ── 预燃室温度上限（V6 新增）───────────────────
-        _check_range("ox_preburner_temp_limit（富氧预燃室温度上限）",
-                     self.ox_preburner_temp_limit, lo=400, hi=1200)
-        _check_range("fuel_preburner_temp_limit（富燃预燃室温度上限）",
-                     self.fuel_preburner_temp_limit, lo=600, hi=1500)
+        # ── 可选的 FFSC 预燃室气体温度约束 ──────────────
+        # 数值范围不代表材料许可范围；GG 不使用这两侧隐藏约束。
+        if self.cycle_type == "ffsc":
+            for side in ("ox", "fuel"):
+                constraint = preburner_temperature_constraint(self, side)
+                key = f"{side}_preburner_temp_limit"
+                if constraint["status"] not in PREBURNER_LIMIT_STATUSES:
+                    raise ValidationError(f"{key}_status 必须是 unset、provisional 或 documented。")
+                if constraint["status"] == "documented" and not constraint["basis"]:
+                    raise ValidationError(f"{key}_basis：已有依据状态必须填写该限值的适用条件和来源。")
+                if constraint["status"] != "unset":
+                    limit = constraint["limit_K"]
+                    if not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
+                        raise ValidationError(f"{key} 必须是大于 0 K 的有限数值。")
 
         # ── 压力网络参数（V7 新增）──────────────────────
         _check_range("injector_dp_ratio_ox（氧喷注器压降比）",
@@ -567,36 +689,34 @@ class EngineInputs:
         # ── 预燃室目标混合比（V3 新增）──────────────────
         _check_range("use_target_preburner_mr（是否采用目标预燃室混合比模式）",
                      self.use_target_preburner_mr, lo=0.0, hi=1.0)
-        _check_range("ox_preburner_mr_target（富氧预燃室目标 O/F）",
-                     self.ox_preburner_mr_target, lo=5.0, hi=200.0)
-        _check_range("fuel_preburner_mr_target（富燃预燃室目标 O/F）",
-                     self.fuel_preburner_mr_target, lo=0.01, hi=2.0)
-        _warn_range("ox_preburner_mr_target（富氧预燃室目标 O/F）",
-                    self.ox_preburner_mr_target, 40.0, 80.0)
-        _warn_range("fuel_preburner_mr_target（富燃预燃室目标 O/F）",
-                    self.fuel_preburner_mr_target, 0.05, 0.30)
+        # 下列宽范围是当前求解器支持域，不是工程推荐值或材料温度依据。
+        # 温度模式实际使用 MR 初始化循环；GG 与历史自由分流不使用这两项。
+        if self.cycle_type == "ffsc" and (
+                self.use_target_preburner_temp >= 0.5 or self.use_target_preburner_mr >= 0.5):
+            role = "O/F 初值" if self.use_target_preburner_temp >= 0.5 else "指定 O/F"
+            for side, label, lower, upper in (("ox", "富氧", 5.0, 200.0),
+                                               ("fuel", "富燃", 0.01, 2.0)):
+                value = getattr(self, f"{side}_preburner_mr_target")
+                name = f"{side}_preburner_mr_target（{label}预燃室{role}；当前求解器支持范围）"
+                if not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValidationError(f"{name} 必须是有限数值。")
+                _check_range(name, value, lo=lower, hi=upper)
 
         # ── 预燃室温度目标模式（V11 新增）──────────────────
         _check_range("use_target_preburner_temp（温度目标模式开关）",
                      self.use_target_preburner_temp, lo=0.0, hi=1.0)
-        _check_range("ox_preburner_temp_target（富氧预燃室目标温度）",
-                     self.ox_preburner_temp_target, lo=400.0, hi=1200.0)
-        _check_range("fuel_preburner_temp_target（富燃预燃室目标温度）",
-                     self.fuel_preburner_temp_target, lo=600.0, hi=1500.0)
-        if self.use_target_preburner_temp >= 0.5:
-            # 目标温度不得超过用户指定运行限值；不代表已完成材料验证。
-            if self.ox_preburner_temp_target > self.ox_preburner_temp_limit:
-                raise ValidationError(
-                    f"ox_preburner_temp_target = {self.ox_preburner_temp_target} K "
-                    f"> ox_preburner_temp_limit = {self.ox_preburner_temp_limit} K，"
-                    f"目标温度不能超过富氧侧指定温度上限"
-                )
-            if self.fuel_preburner_temp_target > self.fuel_preburner_temp_limit:
-                raise ValidationError(
-                    f"fuel_preburner_temp_target = {self.fuel_preburner_temp_target} K "
-                    f"> fuel_preburner_temp_limit = {self.fuel_preburner_temp_limit} K，"
-                    f"目标温度不能超过富燃侧指定温度上限"
-                )
+        if self.cycle_type == "ffsc" and self.use_target_preburner_temp >= 0.5:
+            for side, label in (("ox", "富氧"), ("fuel", "富燃")):
+                target = getattr(self, f"{side}_preburner_temp_target")
+                if not isinstance(target, (int, float)) or not math.isfinite(target) or target <= 0:
+                    raise ValidationError(f"{side}_preburner_temp_target 必须是大于 0 K 的有限数值。")
+                limit = preburner_temperature_constraint(self, side)["limit_K"]
+                if limit is not None and target > limit:
+                    raise ValidationError(
+                        f"{side}_preburner_temp_target = {target} K "
+                        f"> {side}_preburner_temp_limit = {limit} K，"
+                        f"目标温度不能超过{label}侧已启用的温度上限。"
+                    )
 
         # ── 自由分流模式初始猜测 ─────────────────────────
         _check_range("fuel_split_to_ox_preburner（燃料→富氧预燃室比例）",
@@ -634,10 +754,24 @@ class EngineInputs:
                     self.lox_pump_specific_speed_target, 15.0, 80.0)
         _warn_range("fuel_pump_specific_speed_target（燃料 Ns 目标）",
                     self.fuel_pump_specific_speed_target, 15.0, 80.0)
-        if not isinstance(self.lox_pump_n_stages, int) or self.lox_pump_n_stages < 1:
-            self.lox_pump_n_stages = max(1, int(self.lox_pump_n_stages))
-        if not isinstance(self.fuel_pump_n_stages, int) or self.fuel_pump_n_stages < 1:
-            self.fuel_pump_n_stages = max(1, int(self.fuel_pump_n_stages))
+        for side in ("lox", "fuel"):
+            stage_key = f"{side}_pump_n_stages"
+            stage_value = getattr(self, stage_key)
+            if (isinstance(stage_value, bool) or not isinstance(stage_value, (int, float))
+                    or not math.isfinite(stage_value) or int(stage_value) != stage_value):
+                raise ValidationError(f"{stage_key} 必须为整数，不能自动取整。")
+            setattr(self, stage_key, int(stage_value))
+            # 构造域校验，不表示这些范围已经过效率、汽蚀或制造验证。
+            for suffix in ("head_coefficient_psi", "inlet_flow_coefficient", "outlet_flow_coefficient",
+                           "eye_hub_ratio", "axial_length_ratio"):
+                key = f"{side}_pump_{suffix}"
+                value = getattr(self, key)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value)):
+                    raise ValidationError(f"{key} 必须为有限数值。")
+                _check_range(key, value, lo=0, lo_inclusive=False)
+                if suffix == "eye_hub_ratio":
+                    _check_range(key, value, hi=1, hi_inclusive=False)
         _check_range("lox_pump_n_stages（LOX 泵级数）",
                      float(self.lox_pump_n_stages), lo=1, hi=6)
         _check_range("fuel_pump_n_stages（燃料泵级数）",
@@ -664,10 +798,45 @@ class EngineInputs:
             ("turb_fuel_u_max_ms（富燃涡轮 U_max）", self.turb_fuel_u_max_ms),
         ]:
             _check_range(nm, val, lo=100.0, hi=700.0)
-        if not isinstance(self.turb_ox_n_stages_user, int):
-            self.turb_ox_n_stages_user = int(self.turb_ox_n_stages_user)
-        if not isinstance(self.turb_fuel_n_stages_user, int):
-            self.turb_fuel_n_stages_user = int(self.turb_fuel_n_stages_user)
+        if self.turbine_boundary_basis not in ("unspecified", "total_to_total"):
+            raise ValidationError("涡轮接口状态约定仅支持 unspecified 或 total_to_total。")
+        if self.turbine_meanline_mode not in ("disabled", "equal_work", "custom_work"):
+            raise ValidationError("涡轮均径初选模式无效。")
+        for side in ("ox", "fuel"):
+            coefficient = getattr(self, f"turb_{side}_meanline_flow_coefficient")
+            if isinstance(coefficient, bool) or not isinstance(coefficient, (int, float)) or not math.isfinite(coefficient):
+                raise ValidationError(f"turb_{side}_meanline_flow_coefficient 须为有限数值。")
+            _check_range(f"turb_{side}_meanline_flow_coefficient",
+                         coefficient, lo=0.01, hi=5.0)
+            # Validate the distribution even while disabled, so invalid drafts
+            # cannot silently acquire a different interpretation when enabled.
+            import json
+            try:
+                fractions = json.loads(getattr(self, f"turb_{side}_stage_work_fractions"))
+                if not isinstance(fractions, list) or len(fractions) > 6:
+                    raise ValueError
+                if any(isinstance(x, bool) or not isinstance(x, (float, int))
+                       or not 0 < x <= 1 for x in fractions):
+                    raise ValueError
+                if fractions and abs(sum(fractions) - 1.0) > 1e-8:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise ValidationError(f"turb_{side}_stage_work_fractions 须为正数 JSON 数组，比例之和为 1，最多 6 级；未指定时填 []。") from None
+            key = f"turb_{side}_n_stages_user"
+            value = getattr(self, key)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not 0 <= value <= 6 or int(value) != value):
+                raise ValidationError(f"{key} 必须是 0–6 的整数，0 表示采用系统推荐级数。")
+            setattr(self, key, int(value))
+            for suffix in ("inlet_flow_coefficient", "outlet_flow_coefficient",
+                           "stator_axial_chord_ratio", "rotor_axial_chord_ratio", "row_gap_ratio"):
+                key = f"{side}_turbine_{suffix}"
+                value = getattr(self, key)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not 0 < value < float("inf")):
+                    raise ValidationError(f"{key} 必须为有限正数。")
+            if getattr(self, f"{side}_turbine_geometry_state_basis") != "system_pt_as_static":
+                raise ValidationError(f"{side}_turbine_geometry_state_basis 仅支持 system_pt_as_static。")
         _check_range("turb_ox_n_stages_user（富氧级数，0=自动）",
                      float(self.turb_ox_n_stages_user), lo=0, hi=6)
         _check_range("turb_fuel_n_stages_user（富燃级数，0=自动）",

@@ -24,6 +24,10 @@ from tests.cooling_profile_fixture import cooling_profile
 
 def converged_but_infeasible_result():
     inputs = EngineInputs()
+    # This fixture explicitly tests exceeding an enabled scenario limit.
+    # The production default leaves the wall-temperature constraint unset.
+    inputs.cooling_wall_temp_limit_status = "provisional"
+    inputs.cooling_wall_temp_limit_K = 800.0
     inputs.turb_ox_rotor_material = "sx500"
     inputs.turb_ox_stator_material = "sx300"
     summary = {
@@ -128,6 +132,33 @@ class AssessmentUiTests(unittest.TestCase):
             self.assertFalse(any("LOX/GOX 兼容 ✓" in label.text() for label in labels))
         self.assertEqual(asdict(self.result.inputs), before)
         self.assertEqual(window._signature(), signature)
+
+    def test_preburner_provisional_limits_are_not_green_acceptance(self):
+        row = self.window._make_kpi_row(self.result)
+        for title in ("富氧预燃室温度", "富燃预燃室温度"):
+            label = next(label for label in row.findChildren(QLabel) if label.text() == title)
+            card = label.parentWidget()
+            self.assertNotEqual(card.objectName(), "KpiCard_ok")
+            self.assertTrue(any("暂定上限" in hint.text() for hint in card.findChildren(QLabel)))
+        self.window._populate_overview(self.result)
+        table = self.window.findChild(QTableWidget, "EngineeringChecks")
+        for index in range(table.rowCount()):
+            if table.item(index, 0).text() in ("富氧预燃室出口温度", "富燃预燃室出口温度"):
+                self.assertEqual(table.item(index, 3).text(), "依据待核实")
+                self.assertNotEqual(table.item(index, 3).foreground().color().name(), "#15803d")
+        row.deleteLater()
+
+    def test_preburner_unset_limit_ignores_retained_numeric_for_badges(self):
+        self.result.inputs.ox_preburner_temp_limit_status = "unset"
+        self.result.inputs.ox_preburner_temp_limit = 1
+        component = ComponentResult("ox_preburner", {"T_combustion_K": 750})
+        badges = self.window._component_status_badges("ox_preburner", component, self.result.inputs)
+        self.assertIn(("温度上限未设定 · 尚未评估", "neutral"), badges)
+        self.assertFalse(any(state in ("ok", "error") for _, state in badges))
+        row = self.window._make_kpi_row(self.result)
+        title = next(label for label in row.findChildren(QLabel) if label.text() == "富氧预燃室温度")
+        self.assertEqual(title.parentWidget().objectName(), "KpiCard_neutral")
+        row.deleteLater()
 
     def test_actual_result_export_keeps_source_inputs_environment_and_constraints(self):
         window = self.window

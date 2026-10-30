@@ -30,7 +30,7 @@ import math
 from typing import Literal
 
 from core import ComponentResult, FlowState, ValidationError, _check_range
-from thermo import GasState, turbine_expansion
+from thermo import GasState, turbine_expansion, gas_flow_metadata
 
 
 class Turbine:
@@ -84,7 +84,11 @@ class Turbine:
         side: Literal["ox", "fuel"] | None = None,
         t_in_limit_K: float | None = None,
         u_max_ms: float = 450.0,
+        state_basis: str = "unspecified",
     ):
+        if state_basis not in ("unspecified", "total_to_total"):
+            raise ValidationError("涡轮状态接口约定无效。")
+        self.state_basis = state_basis
         _check_range(f"{name}.eta_turbine（涡轮等熵效率）",
                      eta_turbine, lo=0, hi=1.0, lo_inclusive=False)
         _check_range(f"{name}.exhaust_pressure（涡轮排气压力）",
@@ -244,14 +248,28 @@ class Turbine:
                 geom_outputs["t_in_over_limit"] = T_in - self.t_in_limit_K
 
         # 涡轮排气流动状态（供主燃烧室混合用）
+        basis = {"kind": "total" if self.state_basis == "total_to_total" else "unspecified",
+                 "pressure": "total" if self.state_basis == "total_to_total" else "unspecified",
+                 "temperature": "total" if self.state_basis == "total_to_total" else "unspecified",
+                 "enthalpy": "total" if self.state_basis == "total_to_total" else "unspecified",
+                 "velocity_m_s": None,
+                 "reason": ("显式总—总储腔接口近似；未解析速度，未进行总静转换。"
+                            if self.state_basis == "total_to_total" else "系统节点未指定总态或静态。")}
+        exhaust_gas = turb.get("gas_state")
+        handoff_metadata = gas_flow_metadata(exhaust_gas, basis=basis,
+            source_ports=[self.name.replace("_turbine", "_outlet")]) if exhaust_gas else {
+                "state_basis": basis, "composition_complete": False,
+                "source_ports": [self.name.replace("_turbine", "_outlet")]}
         state = FlowState(
             name=f"{self.name}_exhaust",
             pressure=self.exhaust_pressure,
             temperature=t_exhaust,
             mass_flow=self.mass_flow,
             enthalpy=h_exhaust,
+            density=exhaust_gas.density if exhaust_gas else None,
             composition=composition,
             metadata={
+                **handoff_metadata,
                 "t_inlet_K": T_in,
                 "pi_t":      pi_t,
                 "thermo_source": 1.0 if self.inlet_state.source == "cantera" else 0.0,
@@ -259,6 +277,9 @@ class Turbine:
         )
 
         outputs = {
+            "state_basis": self.state_basis,
+            "state_assumption": ("显式总态储腔接口近似；两端热力学节点作为总态，未解析端口速度或进行总静转换。"
+                                 if self.state_basis == "total_to_total" else "系统热力学节点；未指定总态或静态。"),
             "p_in_Pa": p_in,
             "p_out_Pa": self.exhaust_pressure,
             "turbine_pressure_ratio":  pi_t,

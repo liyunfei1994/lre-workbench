@@ -134,7 +134,11 @@ class CfdExchangeTests(unittest.TestCase):
         self.assertTrue(full["includes_cylindrical_chamber"])
         self.assertEqual(full["x_m"][0], 0)
         self.assertGreater(full["throat_x_m"], .5)
-        self.assertGreater(len(full["x_m"]), 100)
+        # Preserve supplied coordinates, adding only the cylindrical inlet.
+        self.assertEqual(len(full["x_m"]), 4)
+        for actual, expected in zip(full["x_m"], [0., .5, .7, 1.3]):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(full["radius_m"], [.25, .25, .1, .3])
         with (full_job / "geometry_contour.csv").open(encoding="utf-8-sig", newline="") as stream:
             rows = list(csv.DictReader(stream))
         self.assertEqual(float(rows[0]["x_m"]), 0)

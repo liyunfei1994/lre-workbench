@@ -217,7 +217,19 @@ function coupledHistory(trace) {
 function initializationDifference(layer) {
   const difference=layer?.initialization_difference;
   if (!coupled(layer) || !difference || typeof difference !== "object") return "";
-  return `<details class="cv-values cv-initialization"><summary>初值与当前解的差异（不参与收敛验收）</summary><p class="cv-description">这里只记录热反馈初值与已计算状态的差异；不作为额外物理方程，也不表示物性变化残差。</p>${valueTable(["初值差异","记录值","单位"],[["主室温度差",fmt(difference.temperature_K),"K"],["比热比相对差",fmt(difference.gamma_relative),"1"],["摩尔质量相对差",fmt(difference.molar_mass_relative),"1"]])}</details>`;
+  return `<details class="cv-values cv-initialization"><summary>末次求解起点与结果差异（不参与收敛验收）</summary><p class="cv-description">起点可能来自前一工况的热启动，不等同于方案中的启动估计。这些差值不是物理收敛残差。</p>${valueTable(["起点差异","记录值","单位"],[["主室温度差",fmt(difference.temperature_K),"K"],["比热比相对差",fmt(difference.gamma_relative),"1"],["摩尔质量相对差",fmt(difference.molar_mass_relative),"1"]])}</details>`;
+}
+
+export function renderGasInitialization(result = {}) {
+  const calculation=result.calculation || {}, inputs=result.submitted_inputs || calculation.inputs || {};
+  const chamber=calculation.states?.main_chamber || {}, properties=chamber.metadata || {};
+  const state=numericalDisplayState(result);
+  const heading=state.status==="pass" ? "收敛计算状态" : state.status==="fail" ? "当前迭代状态（未验收）" : "记录状态（收敛待核）";
+  const rows=[["主室温度","chamber_temp_guess",chamber.temperature,"K"],
+    ["比热比 γ","chamber_gamma",properties.gamma,"—"],
+    ["平均摩尔质量","molar_mass",properties.molar_mass,"kg/kmol"]];
+  const budget=inputs.cooling_bartz_mode===0;
+  return `<section class="cv-gas-initialization" aria-label="启动估计与主室计算状态"><h3>启动估计与主室计算状态</h3><p class="cv-description">启动估计与计算状态可以不同，验收看物理残差。下表来自所选计算记录，不随左侧草稿变化。</p>${budget ? '<p class="cv-description">本记录采用给定冷却预算，未使用这三个冷却启动估计。</p>' : ""}${valueTable(["物理量","方案启动估计",heading,"单位"],rows.map(([label,key,value,unit])=>[label,fmt(inputs[key]),fmt(value),unit]))}</section>`;
 }
 
 function outerHistory(trace) {
@@ -234,10 +246,10 @@ export function renderConvergence(result = {}) {
   const header=`<div class="cv-heading"><div><span class="cv-kicker">SOLVER CONVERGENCE</span><h2>完整收敛与迭代历程</h2><p>计算结束后展示记录中的真实迭代轨迹；数值收敛与系统约束分别判定。</p></div>${badge(state.status,state.label)}</div>`;
   if (trace?.schema_version !== 1) {
     const summary=result.calculation?.summary || {};
-    return `<section class="panel convergence-workspace" aria-label="完整收敛与迭代历程">${header}<p class="cv-notice">历史记录未保存完整收敛轨迹，无法还原残差曲线。以下为当前只读复核；原计算记录与原校核状态保持不变。重新运行设计点后可查看完整曲线和分层判据。</p>${valueTable(["已有证据","记录值","复核说明"],[["内层残差范数",fmt(summary.solver_residual_norm ?? state.residual),"仅内层残差小，不能证明整个循环收敛"],["主室温度外环残差",`${fmt(summary.tc_outer_residual_K)} K`,"现行容差 5 K；仍缺少完整反馈与延续证据"],["原记录数值状态",result.assessment?.numerical?.label || result.assessment?.numerical?.status || "未记录","保留历史信息，不作为完整收敛结论"]])}</section>`;
+    return `<section class="panel convergence-workspace" aria-label="完整收敛与迭代历程">${header}<p class="cv-notice">历史记录未保存完整收敛轨迹，无法还原残差曲线。以下为当前只读复核；原计算记录与原校核状态保持不变。重新运行设计点后可查看完整曲线和分层判据。</p>${renderGasInitialization(result)}${valueTable(["已有证据","记录值","复核说明"],[["内层残差范数",fmt(summary.solver_residual_norm ?? state.residual),"仅内层残差小，不能证明整个循环收敛"],["主室温度外环残差",`${fmt(summary.tc_outer_residual_K)} K`,"旧热反馈容差 5 K；仍缺少完整反馈与延续证据"],["原记录数值状态",result.assessment?.numerical?.label || result.assessment?.numerical?.status || "未记录","保留历史信息，不作为完整收敛结论"]])}</section>`;
   }
   const feedbackDescription=coupled(state.layers?.thermal)
     ? "冷热侧与供给耦合检查压力、热气温差、共同几何、总吸热量、热气状态向量和逐单元热量六项残差；初值差独立展示，不作为收敛判据。"
     : "热力反馈同时检查温度、比热比和摩尔质量；未接受的热反馈试探保留在数值表中，曲线在该处断开。";
-  return `<section class="panel convergence-workspace" aria-label="完整收敛与迭代历程">${header}${layerCards(state.layers)}<p class="cv-description">完整收敛要求所有启用层满足各自判据，并到达目标工况。${feedbackDescription}</p>${methodAudit(trace)}${outerHistory(trace)}${innerHistory(trace.inner_runs,trace.layers?.thermal)}</section>`;
+  return `<section class="panel convergence-workspace" aria-label="完整收敛与迭代历程">${header}${layerCards(state.layers)}<p class="cv-description">完整收敛要求所有启用层满足各自判据，并到达目标工况。${feedbackDescription}</p>${renderGasInitialization(result)}${methodAudit(trace)}${outerHistory(trace)}${innerHistory(trace.inner_runs,trace.layers?.thermal)}</section>`;
 }

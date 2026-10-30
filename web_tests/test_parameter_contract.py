@@ -72,8 +72,51 @@ class ParameterContractTests(unittest.TestCase):
         self.assertIn("贮箱出口", fields["fuel_inlet_temp"]["label"])
         self.assertIn("温升折减", fields["combustion_efficiency"]["label"])
         self.assertNotEqual(fields["lox_pump_specific_speed_target"]["unit"], "—")
-        thermo = next(g for g in schema["system_groups"] if g["id"] == "thermo")
-        self.assertIn("初值", thermo["title"])
+        solver = next(g for g in schema["system_groups"] if g["id"] == "solver")
+        self.assertIn("启动估计", solver["initials_title"])
+
+    def test_design_targets_conditions_and_seeds_keep_distinct_roles(self):
+        schema = design_ui_schema()
+        fields = {f["key"]: f for g in schema["groups"] for f in g["fields"]}
+        for key in ("thrust", "pc", "of_ratio"):
+            self.assertEqual(fields[key]["role"], "design_input")
+        self.assertIn("环境压力", fields["thrust"]["label"])
+        self.assertIn("指定", fields["pc"]["label"])
+        self.assertIn("指定总氧燃比", fields["of_ratio"]["label"])
+        self.assertEqual(fields["ambient_pressure"]["role"], "boundary")
+        self.assertEqual(fields["target_isp"]["role"], "initial_guess")
+        self.assertIn("初值", fields["target_isp"]["label"])
+
+    def test_geometry_ratios_keep_independent_meanings_and_saved_values(self):
+        schema = design_ui_schema()
+        fields = {f["key"]: f for g in schema["groups"] for f in g["fields"]}
+        self.assertIn("主喷管", fields["expansion_ratio"]["label"])
+        self.assertIn("Ae/At", fields["expansion_ratio"]["label"])
+        self.assertIn("GG 排气喷管", fields["gg_exhaust_expansion_ratio"]["label"])
+        self.assertEqual(fields["gg_exhaust_expansion_ratio"]["cycles"], ["gg"])
+        self.assertIn("Acc/At", fields["chamber_contraction_ratio"]["label"])
+        self.assertIn("冷却终点", fields["cooling_cover_eps"]["label"])
+        self.assertIn("长度比", fields["nozzle_bell_fraction"]["label"])
+        for key in ("expansion_ratio", "gg_exhaust_expansion_ratio",
+                    "chamber_contraction_ratio", "cooling_cover_eps", "nozzle_bell_fraction"):
+            self.assertEqual(fields[key]["role"], "design_input")
+        # Moving controls must preserve the old SI keys/defaults and distinct
+        # saved geometries, including partial coverage of the main nozzle.
+        defaults = schema["defaults"]
+        self.assertEqual({key: defaults[key] for key in (
+            "expansion_ratio", "gg_exhaust_expansion_ratio", "cooling_cover_eps")},
+            {"expansion_ratio": 34.34, "gg_exhaust_expansion_ratio": 4.0, "cooling_cover_eps": 0.0})
+        values = asdict(EngineInputs()) | {
+            "expansion_ratio": 42.0, "gg_exhaust_expansion_ratio": 5.0,
+            "chamber_contraction_ratio": 3.0, "cooling_cover_eps": 12.0,
+            "nozzle_bell_fraction": 0.7,
+        }
+        before = deepcopy(values)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            normalized, _ = input_values(values)
+        self.assertEqual(normalized, before)
+        self.assertEqual(values, before)
 
     def test_combustion_loss_selector_is_explicit_and_hides_inactive_legacy_factor(self):
         schema = design_ui_schema()

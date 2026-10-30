@@ -252,8 +252,16 @@ def conservation_checks(source_result):
         component_power = _finite(outputs.get("power_W")) if isinstance(outputs, dict) else None
         checks.append(_closure(f"{key}_reported_power", f"{label}部件功率与汇总一致性",
                                component_power, val(f"{key}_power_MW", 1e6), "W", atol=1, rtol=1e-6))
-    checks.append({"id": "element_balance", "label": "完整元素守恒", "status": "unavailable",
-                   "reason": "当前序列化记录没有完整的全部入口/出口物种质量分数、组成基准及凝聚相流量，不能独立复算元素收支。"})
+    from gas_handoff import capture_gas_handoff
+    # Recompute from immutable flow states and the verified saved mechanism,
+    # rather than trusting a cached pass flag in the source result.
+    handoff = capture_gas_handoff(source_result)
+    element_rows = handoff.get("element_checks", [])
+    element_status = _status(element_rows) if element_rows else "unavailable"
+    checks.append({"id": "element_balance", "label": "已建模燃烧器与涡轮的气相元素守恒",
+                   "status": element_status,
+                   "reason": "按保存的完整组成和机制身份重算；不代表凝聚相、沉积量或未建模支路已验证。"})
+    checks.extend(element_rows)
     energy_balance = None
     if cycle == "ffsc":
         from steady_closure import audit_energy

@@ -60,8 +60,10 @@ def main():
         store.execute("UPDATE jobs SET progress=? WHERE id=? AND status='running'",
                       (payload, args.job))
     try:
-        if job.get("kind") in ("throttle", "transient", "feed_network", "chilldown", "ignition", "shutdown"):
-            if job["kind"] == "shutdown":
+        if job.get("kind") in ("throttle", "transient", "feed_network", "chilldown", "ignition", "shutdown", "cooling_design"):
+            if job["kind"] == "cooling_design":
+                from webapp.cooling_design import calculate_cooling_design as calculate_study
+            elif job["kind"] == "shutdown":
                 from webapp.shutdown import calculate_shutdown as calculate_study
             elif job["kind"] == "ignition":
                 from webapp.ignition import calculate_ignition as calculate_study

@@ -1,0 +1,25 @@
+/* Gas-handoff report is reusable inside the existing validation workspace. */
+.gas-handoff { display:flex; flex-direction:column; gap:12px; min-width:0; color:#314858; }
+.gas-handoff .gh-heading { display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.gas-handoff h3 { font-size:13px; margin:0; }
+.gas-handoff .gh-section { display:flex; flex-direction:column; gap:10px; padding:12px; border:1px solid #d4dfe7; background:#fff; min-width:0; }
+.gas-handoff .gh-message { margin:0; padding:9px 11px; border-left:3px solid #7e9bac; background:#f1f6f8; font-size:11px; line-height:1.8; overflow-wrap:anywhere; }
+.gas-handoff .gh-message.gh-warning { border-left-color:#b88843; background:#fbf6ed; color:#795f37; }
+.gas-handoff .gh-badge { display:inline-block; border:1px solid #c6d5df; background:#f0f5f8; color:#4b6577; padding:2px 7px; font-size:10px; font-weight:400; white-space:nowrap; }
+.gas-handoff .gh-badge.gh-warning { border-color:#dfcdab; background:#fbf6ed; color:#795f37; }
+.gas-handoff .gh-badge.gh-error { border-color:#e0bab1; background:#fff1ed; color:#9d4a3d; }
+.gas-handoff .gh-station,.gas-handoff .gh-details { margin:0!important; padding:10px!important; border:1px solid #d6e0e7!important; border-radius:0!important; background:#fff!important; min-width:0; }
+.gas-handoff summary { font-size:11px!important; color:#3b596e!important; overflow-wrap:anywhere; }
+.gas-handoff .gh-station>summary { display:list-item; line-height:1.9; }
+.gas-handoff .gh-station>summary>span { margin-left:12px; font-size:10px; font-weight:400; color:#72828e; }
+.gas-handoff .gh-station-body,.gas-handoff .gh-carbon { display:flex; flex-direction:column; gap:9px; min-width:0; }
+.gas-handoff .gh-station-body { padding-top:12px; }
+.gas-handoff .gh-details[open]>summary { margin-bottom:10px; }
+.gas-handoff .gh-table-wrap { overflow:auto; min-width:0; border:1px solid #dae3e9; }
+.gas-handoff table { width:100%; border-collapse:collapse; font-size:11px; }
+.gas-handoff th { text-align:left; background:#edf3f6; font-weight:600; white-space:nowrap; }
+.gas-handoff td,.gas-handoff th { padding:7px 9px; border-bottom:1px solid #e2e9ee; vertical-align:top; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.gas-handoff tr:last-child td { border-bottom:0; }
+.gas-handoff pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:300px; overflow:auto; font:10px/1.7 Consolas,"Microsoft YaHei",monospace; margin:0; }
+.gas-handoff .gh-notes { font-size:11px; line-height:1.8; padding-left:18px; margin:0; color:#6e7680; }
+@media(max-width:650px) { .gas-handoff .gh-section { padding:9px; } .gas-handoff .gh-station>summary>span { display:block; margin-left:0; } }

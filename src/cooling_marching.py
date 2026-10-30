@@ -169,10 +169,13 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         channel_table=None, bell_fraction=0.8, film_fraction=0.0, film_T_K=850.0,
         film_eta0=0.9, film_decay_length_m=0.0, gas_emissivity=0.20,
         conv_half_angle_deg=30.0, wall_temp_limit_K=800.0, n_points=120,
+        wall_temp_limit_status="provisional", wall_temp_limit_basis="",
         hot_side_profile=None, inlet_enthalpy_Jkg=None, k_minor_inlet=None,
         k_minor_outlet=None, heat_transfer_enabled=True, friction_enabled=True,
         strict=True, wall_thermal_dataset_id=None, wall_manufacturing_state="unspecified",
-        wall_material_zones=None, remap_hot_side_trial=False):
+        wall_material_zones=None, remap_hot_side_trial=False,
+        nozzle_contour_method="legacy_log_v1",
+        nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0):
     """One conserved profile including both zero-speed cycle ports.
 
     hot_side_profile aligns with build_regen_geometry().cells in coolant order.
@@ -218,7 +221,8 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         n_points=n_points,counterflow=counterflow,n_channels=n_channels,
         channel_width_m=channel_width_m,channel_height_m=channel_height_m,
         wall_thickness_m=wall_thickness_m,channel_table=channel_table,
-        material_boundaries_m=boundaries)
+        material_boundaries_m=boundaries, nozzle_contour_method=nozzle_contour_method,
+        nozzle_initial_angle_deg=nozzle_initial_angle_deg, nozzle_exit_angle_deg=nozzle_exit_angle_deg)
     # Legacy callers may supply a length, but cannot define a second contour.
     if L_conv is not None and (not math.isfinite(L_conv) or
             not math.isclose(L_conv, geom["L_conv_m"], rel_tol=1e-8, abs_tol=1e-10)):
@@ -350,9 +354,9 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         raise ValueError("coolant overall energy ledger did not close")
     imax = max(channels,key=lambda c:c["T_wall_hot_K"])
     qmax = max(channels,key=lambda c:c["q_W_m2"])
-    over = sum(c["T_wall_hot_K"] > wall_temp_limit_K for c in channels)
     warnings = []
-    materials = material_summary(channels, wall_temp_limit_K)
+    materials = material_summary(channels, wall_temp_limit_K, wall_temp_limit_status, wall_temp_limit_basis)
+    over = materials["wall_over_limit_cell_count"]
     if materials["status"] == "out_of_range":
         warnings.append(f"壁面导热率数据越界：{materials['out_of_range_cell_count']}/{len(channels)} 个单元；端点常值延用仅保留诊断解，适用性未通过。")
     elif materials["status"] == "missing_evidence":
@@ -361,6 +365,10 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         warnings.append("壁面制造状态未声明或与所用热物性试样状态不匹配；不能据此验证硬件性能。")
     if over:
         warnings.append("部分热面壁温高于用户限值；热量闭合不代表壁温约束通过。")
+    elif materials["wall_temperature_limit_status"] == "provisional_within_limit":
+        warnings.append("热面壁温处于方案暂定限值内；限值依据待核实，不能据此判为工程验收通过。")
+    elif materials["wall_temperature_limit_status"] in ("not_evaluated", "invalid_constraint"):
+        warnings.append("热面壁温约束尚未评估：未启用有效且有明确状态的方案限值。")
     if any(2300 < c["Re"] < 3000 for c in channels):
         warnings.append("存在过渡雷诺数，换热采用连续插值，需独立验证。")
     throat = min(geom["nodes"], key=lambda n: abs(n["x_m"]-geom["x_throat_m"]))
@@ -372,7 +380,11 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         dp_minor_Pa=sum(c["dp_local_Pa"] for c in cells),
         T_wall_hot_max_K=imax["T_wall_hot_K"],T_wall_cold_max_K=max(c["T_wall_cold_K"] for c in channels),
         x_T_wall_max_m=imax["x_m"],x_q_max_m=qmax["x_m"],q_max_MW_m2=qmax["q_W_m2"]/1e6,
-        wall_over_limit_fraction=over/len(channels),wall_temp_limit_K=wall_temp_limit_K,
+        wall_over_limit_fraction=materials["wall_over_limit_fraction"],
+        wall_temp_limit_K=materials["wall_temperature_limit_K"],
+        wall_temp_limit_declared_K=wall_temp_limit_K,
+        wall_temp_limit_status=wall_temp_limit_status,wall_temp_limit_basis=materials["wall_temperature_limit_basis"],
+        wall_temperature_limit_status=materials["wall_temperature_limit_status"],
         cover_eps=geom["cover_eps"],n_stations=len(channels),x_throat_m=geom["x_throat_m"],
         V_coolant_max_ms=max(n["velocity_ms"] for n in nodes),hydraulic_infeasible=False,
         pressure_floor_hit=False,film_on=False,film_mdot_kgs=0.,
@@ -383,6 +395,16 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
     summary["Q_rad_fraction"] = summary["Q_rad_W"]/qtotal if qtotal else 0.
     profile = dict(version=1,model_id=MODEL_ID,flow_direction=geom["flow_direction"],
         nodes=nodes,cells=cells,geometry=geom,summary=summary,balance=balance,
+        model_methods=dict(version=1,heat_transfer_enabled=bool(heat_transfer_enabled),
+            friction_enabled=bool(friction_enabled),
+            hot_side=dict(id="bartz_local_transport_sigma_v1",label="Bartz 型对流与灰体辐射近似",
+                detail="曲率取同一轮廓的上游喉部圆弧；采用所供热侧状态物性、面积幂与温度修正。物性参考态及修正组合尚待独立验证。"),
+            wall=dict(id="integral_k_slab_representative_fin_v1",label="温变导热率积分与肋片修正",
+                detail="热壁两侧之间积分 k(T)；肋片效率使用冷却剂主体与热面壁温均值处的导热率。冷侧换热按热面面积折算。"),
+            cold_side=dict(id="bulk_db_transition_436_v1",label="主体物性 Dittus–Boelter 关联",
+                detail="Re≤2300 使用 Nu=4.36，2300–3000 线性过渡，Re≥3000 使用 0.023 Re^0.8 Pr^0.4；叠加肋片效率及给定喉部冷侧修正。未建模局部换热恶化或结焦。"),
+            hydraulics=dict(id="momentum_darcy_manifold_v1",label="一维动量、Darcy 摩擦与局部损失",
+                detail="按沿程密度和流通面积计算速度与压力变化，计入摩擦及集流腔局部损失；入口、出口端口采用零速度集流腔。")),
         material_applicability=materials,
         material_assignment=dict(default_dataset_id=wall_thermal_dataset_id,
             default_manufacturing_state=wall_manufacturing_state,zones=zones,

@@ -37,7 +37,13 @@ function element() {
     setAttribute() {}, showModal() {}, close() {}, reset() {}, append() {}, click() {}, remove() {}, focus() {}};
 }
 
-function harness(fetcher) {
+function memoryStorage() {
+  const items=new Map();
+  return {getItem:key=>items.get(key)??null,setItem:(key,value)=>items.set(key,String(value)),
+    removeItem:key=>items.delete(key)};
+}
+
+function harness(fetcher,{storage=memoryStorage()}={}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], element()]));
   const body = element();
   let confirmations = 0;
@@ -47,30 +53,263 @@ function harness(fetcher) {
     document: {hidden: false, getElementById: id => {
       assert.ok(nodes.has(id), `Unexpected DOM id ${id}`);return nodes.get(id);
     }, querySelectorAll: () => [], querySelector: () => element(), body, createElement: () => element()},
-    window: {addEventListener() {}},
+    window: {addEventListener() {}}, sessionStorage:storage,
     renderAnalysis: () => "analysis", configureResultSchema() {}, fetch: fetcher, AbortController, Blob, URL,
-    mountIgnition:()=>({refresh(){},sync(){},onLeave(){}}),mountChilldown:()=>({refresh(){},sync(){},onLeave(){}}),mountFeedNetwork:()=>({refresh(){},sync(){},onLeave(){}}),mountTransient: () => ({refresh(){},onLeave(){},sync(){}}),
+    mountShutdown:()=>({refresh(){},sync(){},onLeave(){}}),mountIgnition:()=>({refresh(){},sync(){},onLeave(){}}),mountChilldown:()=>({refresh(){},sync(){},onLeave(){}}),mountFeedNetwork:()=>({refresh(){},sync(){},onLeave(){}}),mountTransient: () => ({refresh(){},onLeave(){},sync(){}}),
     mountValidation: () => ({refresh(){},onLeave(){},sync(){}}),
     mountThrottle: () => {throttleLifecycle.mounts++;return {refresh(){throttleLifecycle.refreshes++;},onLeave(){throttleLifecycle.leaves++;},sync(){}};},
     mountComponentWorkspace() {},
     mountFlowWorkspace() {},
     mountCycleWorkspace() {},
+    renderNozzleGeometry:()=>"geometry",mountNozzleGeometry:()=>()=>{},
+    renderPumpGeometry:()=>"pump_geometry",mountPumpGeometry:()=>()=>{},
+    renderInjectorDesign:()=>"injector_design",mountInjectorDesign:()=>()=>{},
+    renderTurbineGeometry:()=>"turbine_geometry",mountTurbineGeometry:()=>()=>{},
+    renderTurbineDesign:()=>"turbine_design",mountTurbineDesign:()=>()=>{},
+    renderResultConsistency:()=>"consistency",
     mountSteadyWorkspace,
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, confirm: () => {confirmations++;return true;},
     FormData: class {}, console,
   });
-  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyInputDocument,buildInputBackup,validateDraft,loadRecord,chooseView,
+  vm.runInContext(source + `\n;globalThis.app={api,runDesign,saveProject,initialize,poll,refreshProjectSide,withEditorLock,fillProject,applyInputDocument,buildInputBackup,validateDraft,loadRecord,chooseView,navigate,openProject,adoptCoolingCandidate,
+    reset(){user=null;initialized=false;info=null;page="projects";analysisView="overview";current=null;draft=null;dirty=false;resultRecord=null;selectedJobId=null;projectJobs=[];workspaceUserId=null;},
     seed(value){({current,draft,dirty,user,info,groups,fields,page,projectJobs,connected}=value);referenceKey=value.referenceKey||"";presetUndo=value.presetUndo||null;},
-    state(){return JSON.parse(JSON.stringify({current,draft,dirty,user,page,projectJobs,connected,editorBusy,resultRecord,selectedJobId,referenceKey,presetUndo}));}};`, context,
+    state(){return JSON.parse(JSON.stringify({current,draft,dirty,user,page,analysisView,projectJobs,connected,editorBusy,resultRecord,selectedJobId,referenceKey,presetUndo}));}};`, context,
     {filename: fileURLToPath(new URL("webapp/static/app.js", root))});
   nodes.get("project-name").value = project.name;
   nodes.get("project-description").value = "";
   context.app.seed(copy({current: project, draft: defaults, dirty: false, user, info,
     groups: schema.groups, fields, page: "project", projectJobs: [], connected: true}));
-  return {app: context.app, nodes, body, throttleLifecycle, confirmations:()=>confirmations};
+  return {app: context.app, nodes, body, storage, throttleLifecycle, confirmations:()=>confirmations};
 }
 
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => copy(data)});
+
+test("switching records clears previous quantities and a late response cannot overwrite the selected record",async()=>{
+  const pending=new Map();
+  const h=harness(url=>new Promise(resolve=>pending.set(url,resolve)));
+  const old=h.app.loadRecord("old");
+  pending.get("/api/jobs/old")(response({id:"old",project_id:"p1",result:{calculation:{summary:{temperature:500}}}}));await old;
+  const slow=h.app.loadRecord("slow");
+  assert.equal(h.app.state().resultRecord,null);
+  assert.match(h.nodes.get("result-context").textContent,/正在读取/);
+  const selected=h.app.loadRecord("selected");
+  pending.get("/api/jobs/selected")(response({id:"selected",project_id:"p1",result:{calculation:{summary:{temperature:800}}}}));await selected;
+  pending.get("/api/jobs/slow")(response({id:"slow",project_id:"p1",result:{calculation:{summary:{temperature:600}}}}));await slow;
+  assert.equal(h.app.state().resultRecord.id,"selected");
+  assert.equal(h.app.state().resultRecord.result.calculation.summary.temperature,800);
+});
+
+test("failed record selection leaves previous values cleared and explains the failed load",async()=>{
+  let fail=false;
+  const h=harness(async()=>{if(fail)throw new Error("offline");return response({id:"old",project_id:"p1",result:{calculation:{}}});});
+  await h.app.loadRecord("old");fail=true;
+  await assert.rejects(h.app.loadRecord("new"),/offline|服务/);
+  assert.equal(h.app.state().resultRecord,null);
+  assert.match(h.nodes.get("result-context").textContent,/读取失败/);
+});
+
+function navigationServer({account=user,projects=[project],records=[],uiInfo=info}={}) {
+  const calls=[];
+  const fetcher=async(url,options)=>{
+    calls.push(url);assert.equal(options.method,"GET","Navigation must never save or run a calculation");
+    if(url==="/api/auth/status")return response({initialized:true,user:account});
+    if(url==="/api/info")return response(uiInfo);
+    if(url==="/api/projects")return response(projects);
+    if(url==="/api/members")return response([]);
+    if(url==="/api/jobs")return response(records);
+    const projectDetail=projects.find(p=>url===`/api/projects/${p.id}`);
+    if(projectDetail)return response(projectDetail);
+    if(projects.some(p=>url===`/api/projects/${p.id}/revisions`))return response([]);
+    const projectJobs=projects.find(p=>url===`/api/jobs?project_id=${p.id}`);
+    if(projectJobs)return response(records.filter(r=>r.project_id===projectJobs.id));
+    const record=records.find(r=>url===`/api/jobs/${r.id}`);
+    if(record)return response(record);
+    throw new Error(`Unexpected navigation request ${url}`);
+  };
+  return {fetcher,calls};
+}
+
+const navigationViews=["overview","topology","states","components","geometry","pump_geometry","injector_design","turbine_geometry","log","history","shutdown","ignition","chilldown","feed","validation","transient","throttle"];
+const parameterNavigationInfo={...info,ui_schema:{...schema,groups:[
+  {id:"cycle",title:"循环方式",fields:[fields[0]]},
+  {id:"design",title:"设计目标与工况",fields:fields.slice(1)},
+  {id:"ffsc-only",title:"预燃室",cycles:["ffsc"],fields:[fields[1]]},
+]}};
+
+test("saved thermal group navigates to numerical settings after relocation without changing the case",async()=>{
+  const newInfo=copy(parameterNavigationInfo);
+  newInfo.ui_schema.groups.push({id:"solver",title:"数值求解",fields:[fields[3]]});
+  const storage=memoryStorage();
+  storage.setItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`,"thermo");
+  const server=navigationServer({uiInfo:newInfo}),h=harness(server.fetcher,{storage});
+  h.app.reset();await h.app.initialize();
+  assert.equal(h.nodes.get("parameter-group").value,"solver");
+  assert.equal(storage.getItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`),"solver");
+  assert.deepEqual(copy(h.app.state().draft),defaults);
+  assert.equal(h.app.state().dirty,false);
+});
+
+test("reload restores the selected parameter group without changing inputs or the analysis view",async()=>{
+  const server=navigationServer({uiInfo:parameterNavigationInfo}),first=harness(server.fetcher);
+  first.app.reset();await first.app.initialize();
+  assert.equal(first.nodes.get("parameter-group").value,"cycle");
+  first.nodes.get("parameter-group").value="design";first.nodes.get("parameter-group").onchange();
+  await first.app.chooseView("topology");
+  const reloaded=harness(server.fetcher,{storage:first.storage});reloaded.app.reset();await reloaded.app.initialize();
+  assert.equal(reloaded.nodes.get("parameter-group").value,"design");
+  assert.equal(reloaded.app.state().analysisView,"topology");
+  assert.deepEqual(copy(reloaded.app.state().draft),defaults);
+  assert.equal(reloaded.app.state().dirty,false);
+});
+
+test("parameter group memory is isolated by project and account",async()=>{
+  const other={...project,id:"p2"};
+  const server=navigationServer({uiInfo:parameterNavigationInfo,projects:[project,other]}),h=harness(server.fetcher);
+  h.app.reset();await h.app.initialize();
+  h.nodes.get("parameter-group").value="design";h.nodes.get("parameter-group").onchange();
+  await h.app.openProject(other.id);assert.equal(h.nodes.get("parameter-group").value,"cycle");
+  await h.app.openProject(project.id);assert.equal(h.nodes.get("parameter-group").value,"design");
+  const memberServer=navigationServer({uiInfo:parameterNavigationInfo,account:{...user,id:"u2"}});
+  const member=harness(memberServer.fetcher,{storage:h.storage});member.app.reset();await member.app.initialize();
+  assert.equal(member.nodes.get("parameter-group").value,"cycle");
+  assert.equal(h.storage.getItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`),"design");
+});
+
+test("removed or cycle-incompatible parameter groups fall back to an available group",async()=>{
+  for(const saved of ["removed","ffsc-only","{broken"]){
+    const storage=memoryStorage(),server=navigationServer({uiInfo:parameterNavigationInfo});
+    storage.setItem(`lre.workspace.parameter-group.v1:${user.id}:${project.id}`,saved);
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.nodes.get("parameter-group").value,"cycle");
+    assert.equal(h.app.state().dirty,false);
+  }
+});
+
+for(const view of navigationViews)test(`reload restores ${view} with the selected project and historical design record`,async()=>{
+  const other={...project,id:"p2",name:"另一个方案"};
+  const records=[
+    {id:"latest",project_id:other.id,project_name:other.name,revision:2,status:"succeeded",created:2},
+    {id:"historical",project_id:other.id,project_name:other.name,revision:1,status:"succeeded",created:1},
+  ];
+  const server=navigationServer({projects:[project,other],records});
+  const first=harness(server.fetcher);
+  await first.app.openProject(other.id);
+  await first.app.loadRecord("historical");
+  await first.app.chooseView(view);
+  const saved=JSON.parse(first.storage.getItem(`lre.workspace.navigation.v1:${user.id}`));
+  assert.deepEqual(Object.keys(saved).sort(),["jobId","page","projectId","version","view"]);
+  assert.equal(saved.projectId,other.id);assert.equal(saved.jobId,"historical");
+  const reloaded=harness(server.fetcher,{storage:first.storage});reloaded.app.reset();
+  await reloaded.app.initialize();
+  const state=reloaded.app.state();
+  assert.equal(state.page,"project");assert.equal(state.analysisView,view);
+  assert.equal(state.current.id,other.id);assert.equal(state.selectedJobId,"historical");
+  assert.equal(state.resultRecord.id,"historical");assert.equal(state.dirty,false);
+  assert.equal(reloaded.nodes.get("page-name").textContent,reloaded.nodes.get("analysis-title").textContent);
+});
+
+for(const page of ["projects","jobs","members"])test(`reload keeps the ${page} workspace page`,async()=>{
+  const server=navigationServer(),first=harness(server.fetcher);
+  await first.app.chooseView("validation");await first.app.navigate(page);
+  const reloaded=harness(server.fetcher,{storage:first.storage});reloaded.app.reset();
+  await reloaded.app.initialize();
+  assert.equal(reloaded.app.state().page,page);
+  assert.equal(reloaded.nodes.get(`${page}-page`).hidden,false);
+  assert.equal(reloaded.nodes.get("project-page").hidden,true);
+});
+
+test("missing or inaccessible saved project falls back to the accessible project list",async()=>{
+  const server=navigationServer(),storage=memoryStorage();
+  storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:"private-or-deleted",view:"validation",jobId:"private-job"}));
+  const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+  assert.equal(h.app.state().page,"projects");assert.equal(h.app.state().current,null);
+  assert.ok(!server.calls.some(url=>url.includes("private")));
+});
+
+test("missing or cross-project record is never fetched and falls back within the restored project",async()=>{
+  for(const records of [[],[{id:"available",project_id:project.id,project_name:project.name,revision:1,status:"succeeded",created:1}]]){
+    const storage=memoryStorage(),server=navigationServer({records});
+    storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:project.id,view:"validation",jobId:"foreign-job"}));
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.app.state().analysisView,"validation");
+    assert.equal(h.app.state().selectedJobId,records[0]?.id??null);
+    assert.equal(h.app.state().resultRecord?.id??null,records[0]?.id??null);
+    assert.ok(!server.calls.includes("/api/jobs/foreign-job"));
+  }
+});
+
+test("corrupt and unsupported stored navigation safely use the default workspace",async()=>{
+  for(const value of ["{broken", "null", "[]", JSON.stringify({version:2,page:"project"}),JSON.stringify({version:1,page:"unknown"})]){
+    const storage=memoryStorage(),server=navigationServer();
+    storage.setItem(`lre.workspace.navigation.v1:${user.id}`,value);
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.app.state().page,"project");assert.equal(h.app.state().analysisView,"overview");
+    assert.equal(h.app.state().current.id,project.id);
+  }
+});
+
+test("invalid saved analysis names cannot address inherited object properties",async()=>{
+  for(const view of ["unknown","constructor","__proto__",null,{}]){
+    const storage=memoryStorage(),server=navigationServer();
+    storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:project.id,view}));
+    const h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+    assert.equal(h.app.state().analysisView,"overview");assert.equal(h.app.state().current.id,project.id);
+  }
+});
+
+test("blocked browser storage does not prevent navigation or initialization",async()=>{
+  const storage={getItem(){throw new Error("SecurityError");},setItem(){throw new Error("QuotaExceededError");}};
+  const server=navigationServer(),h=harness(server.fetcher,{storage});h.app.reset();
+  await h.app.initialize();await h.app.chooseView("validation");await h.app.navigate("jobs");
+  assert.equal(h.app.state().page,"jobs");
+});
+
+test("saved navigation is account scoped and a non-admin cannot restore the members page",async()=>{
+  const storage=memoryStorage(),member={id:"u2",display_name:"成员",role:"member"};
+  storage.setItem(`lre.workspace.navigation.v1:${user.id}`,JSON.stringify({version:1,page:"project",projectId:project.id,view:"validation"}));
+  let server=navigationServer({account:member}),h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+  assert.equal(h.app.state().analysisView,"overview");
+  assert.equal(JSON.parse(storage.getItem(`lre.workspace.navigation.v1:${user.id}`)).view,"validation");
+  storage.setItem(`lre.workspace.navigation.v1:${member.id}`,JSON.stringify({version:1,page:"members",projectId:project.id,view:"history"}));
+  server=navigationServer({account:member});h=harness(server.fetcher,{storage});h.app.reset();await h.app.initialize();
+  assert.equal(h.app.state().page,"projects");assert.equal(h.nodes.get("members-nav").hidden,true);
+  assert.ok(!server.calls.includes("/api/members"));
+});
+
+test("switching authenticated accounts clears the previous workspace and restores only the new account",async()=>{
+  let account=user;
+  const member={id:"u2",display_name:"成员",role:"member"},other={...project,id:"p2",name:"成员方案"};
+  const storage=memoryStorage(),calls=[];
+  const h=harness(async(url,options)=>{
+    calls.push(url);
+    return navigationServer({account,projects:account===user?[project]:[other]}).fetcher(url,options);
+  },{storage});
+  h.app.reset();await h.app.initialize();await h.app.chooseView("validation");
+  account=member;calls.length=0;await h.app.initialize();
+  assert.equal(h.app.state().current.id,other.id);assert.equal(h.app.state().analysisView,"overview");
+  assert.equal(h.app.state().resultRecord,null);assert.equal(h.app.state().selectedJobId,null);
+  assert.ok(!calls.includes("/api/projects/p1"));
+  assert.equal(JSON.parse(storage.getItem(`lre.workspace.navigation.v1:${user.id}`)).view,"validation");
+});
+
+test("explicitly opening a different project starts its overview without reusing the saved record",async()=>{
+  const other={...project,id:"p2",name:"新打开方案"},server=navigationServer({projects:[project,other]});
+  const h=harness(server.fetcher);await h.app.chooseView("validation");await h.app.openProject(other.id);
+  assert.equal(h.app.state().analysisView,"overview");assert.equal(h.app.state().current.id,other.id);
+  assert.equal(h.app.state().selectedJobId,null);assert.equal(h.app.state().resultRecord,null);
+  assert.equal(JSON.parse(h.storage.getItem(`lre.workspace.navigation.v1:${user.id}`)).view,"overview");
+});
+
+test("reconnection keeps the current analysis view and unsaved draft in memory",async()=>{
+  const server=navigationServer(),h=harness(server.fetcher);
+  await h.app.chooseView("validation");
+  h.nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"12.5"}});
+  await h.app.initialize();
+  assert.equal(h.app.state().analysisView,"validation");assert.equal(h.app.state().draft.pc,12.5e6);
+  assert.equal(h.app.state().dirty,true);
+  assert.ok(!server.calls.includes("/api/projects/p1"));
+});
 
 test("throttle navigation keeps the selected design and stops its polling when leaving", async () => {
   const record={id:"steady-source",project_id:project.id,revision:1,status:"succeeded",created:1,result:{calculation:{inputs:defaults}}};
@@ -352,8 +591,29 @@ test("unsupported reference stays read-only, preserves the active case and escap
   assert.match(nodes.get("reference-content").innerHTML,/href="https:\/\/www.spacex.com/);
 });
 
+test("budget reference explains historical compatibility without offering a routine load",()=>{
+  const reference={key:"merlin1d_reference",name:"Merlin 1D",propellants:"LOX / RP-1",
+    cycle_label:"GG",applicable:true,preset_key:"merlin1d_gg",
+    compatibility_reason:"可加载液氧/煤油 GG 工程示例；冷却采用指定吸热量。"};
+  const catalog={...info,presets:[...info.presets,{key:"merlin1d_gg",routine_design:false,
+    inputs:{...defaults,propellant_pair:"lox_kerosene",cooling_bartz_mode:0}}],reference_engines:[reference]};
+  const {app,nodes}=harness(async()=>{throw Error("Reading a reference must not save or load a design");});
+  app.seed(copy({current:project,draft:defaults,dirty:false,user,info:catalog,
+    groups:schema.groups,fields,page:"project",projectJobs:[],connected:true}));
+  nodes.get("project-preset").value="merlin1d_gg";
+  nodes.get("open-references").onclick();
+  const content=nodes.get("reference-content").innerHTML;
+  assert.match(content,/仅公开资料/);
+  assert.match(content,/历史预算冷却模型，不作为常规新设计入口/);
+  assert.match(content,/已有方案可从“方案与计算记录”载入复现/);
+  assert.doesNotMatch(content,/可加载/);
+  assert.deepEqual(copy(app.state().draft),defaults);
+  assert.equal(app.state().dirty,false);
+  assert.match(reference.compatibility_reason,/可加载/);
+});
 
-test("switching propellants preserves numbers, blocks incompatible runs, and loads an explicit matching example", async () => {
+
+test("switching propellants never creates a budget design but saved kerosene inputs remain usable", async () => {
   const base={...defaults,propellant_pair:"lox_methane",fuel_inlet_temp:100,cooling_bartz_mode:1,cooling_dp_auto:0};
   const fluidFields=[...fields,{key:"propellant_pair",default:"lox_methane",label:"推进剂组合"},
     {key:"fuel_inlet_temp",default:100,label:"燃料入口温度",type:"number"},
@@ -364,7 +624,7 @@ test("switching propellants preserves numbers, blocks incompatible runs, and loa
       {id:"lox_kerosene",label:"液氧/煤油（正十二烷替代模型）",supported_cycles:["gg"],
         inlet_temperature_min_K:263.6,inlet_temperature_max_K:700,limitations:["未标定真实 RP-1"]}]};
   const kerosene={...base,propellant_pair:"lox_kerosene",fuel_inlet_temp:290,cooling_bartz_mode:0};
-  const localInfo={...info,ui_schema:fluidSchema,presets:[{key:"kerosene",inputs:kerosene}]};
+  const localInfo={...info,ui_schema:fluidSchema,presets:[{key:"kerosene",inputs:kerosene,routine_design:false}]};
   const {app,nodes}=harness(async()=>{throw Error("Selection must not submit or save");});
   app.seed(copy({current:project,draft:base,dirty:false,user,info:localInfo,
     groups:fluidSchema.groups,fields:fluidFields,page:"project",projectJobs:[],connected:true}));
@@ -372,13 +632,23 @@ test("switching propellants preserves numbers, blocks incompatible runs, and loa
   assert.equal(app.state().draft.fuel_inlet_temp,100);
   assert.equal(app.state().draft.cooling_bartz_mode,1);
   assert.equal(nodes.get("header-run").disabled,true);
-  assert.match(nodes.get("propellant-model-error").textContent,/指定吸热量/);
-  await assert.rejects(app.runDesign(),/指定吸热量/);
+  assert.match(nodes.get("propellant-model-error").textContent,/尚未接入统一准一维/);
+  await assert.rejects(app.runDesign(),/尚未接入统一准一维/);
+  assert.equal(nodes.get("load-propellant-example").hidden,true);
   nodes.get("load-propellant-example").onclick();
+  assert.equal(app.state().draft.cooling_bartz_mode,1);
+  app.applyInputDocument({inputs:kerosene});
   assert.deepEqual(copy(app.state().draft),kerosene);
   assert.equal(app.state().dirty,true);
   assert.equal(nodes.get("header-run").disabled,false);
   assert.match(nodes.get("propellant-model-label").textContent,/正十二烷/);
+  // The hidden legacy hydraulic flag cannot select another model or block a
+  // saved budget that the backend still accepts. Loading must retain its value.
+  const oldHydraulicFlag={...kerosene,cooling_dp_auto:1};
+  app.applyInputDocument({inputs:oldHydraulicFlag});
+  assert.deepEqual(copy(app.state().draft),oldHydraulicFlag);
+  assert.equal(nodes.get("header-run").disabled,false);
+  assert.equal(nodes.get("propellant-model-error").textContent,"");
   nodes.get("parameter-fields").oninput({target:{dataset:{input:"cycle_type"},value:"ffsc"}});
   assert.equal(nodes.get("header-run").disabled,true);
   assert.match(nodes.get("propellant-model-error").textContent,/支持 GG/);
@@ -473,6 +743,21 @@ test("legacy preburner drafts survive load, import, preset undo and save without
   assert.deepEqual(saved.inputs,copy(before));
   assert.ok(!("preburner_design_mode" in saved.inputs));
   assert.equal(saved.inputs.hidden_fixed_q,91e6);
+});
+
+test("routine new and load lists exclude budget presets while the API catalog remains intact",async()=>{
+  const old={key:"budget",label:"旧预算示例",routine_design:false,inputs:{...defaults,cooling_bartz_mode:0}};
+  const catalog={...info,presets:[...info.presets,old]};
+  const {app,nodes}=harness(async url=>{
+    if(url==="/api/auth/status")return response({initialized:true,user});
+    if(url==="/api/info")return response(catalog);
+    if(url==="/api/projects"||url.startsWith("/api/jobs"))return response([]);
+    throw Error(url);
+  });
+  app.reset();await app.initialize();
+  assert.doesNotMatch(nodes.get("new-preset").innerHTML,/旧预算/);
+  assert.match(nodes.get("project-preset").innerHTML,/<option value="budget" disabled>/);
+  assert.equal(catalog.presets[1].inputs.cooling_bartz_mode,0);
 });
 
 test("explicit preburner mode edits persist both flags and keep inactive values intact",async()=>{
@@ -917,6 +1202,48 @@ test("saved legacy imports preserve thermochemistry and material identity while 
   assert.deepEqual(copy(h.app.state().draft),explicit);
 });
 
+test("explicit high-T upgrade saves a new revision while retaining the old result and other draft edits",async()=>{
+  const oldInputs={...defaults,propellant_pair:"lox_methane",methane_thermo_dataset:"gri30",
+    combustion_loss_model:"legacy_temperature_rise",cooling_bartz_mode:0};
+  const oldProject={...project,inputs:oldInputs};
+  const currentDefaults={...oldInputs,methane_thermo_dataset:"gri30_highT"};
+  const allFields=[...fields,...Object.keys(currentDefaults).filter(key=>!(key in defaults))
+    .map(key=>({key,label:key,default:currentDefaults[key]}))];
+  const visibleFields=allFields.filter(f=>f.key!=="methane_thermo_dataset");
+  const currentInfo={...info,ui_schema:{defaults:currentDefaults,
+    groups:[{id:"design",fields:allFields}],system_groups:[{id:"design",fields:visibleFields}]}};
+  const record={id:"old-thermo",project_id:project.id,revision:1,status:"succeeded",created:1,
+    result:{calculation:{inputs:oldInputs}}};
+  const saved=[];
+  const h=harness(async(url,options)=>{
+    if(url==="/api/jobs/old-thermo")return response(record);
+    if(url==="/api/projects/p1"&&options.method==="PUT"){
+      const body=JSON.parse(options.body);saved.push(body);
+      return response({project:{...oldProject,...body,revision:2},warnings:[]});
+    }
+    throw new Error(`Unexpected request ${options.method} ${url}`);
+  });
+  h.app.seed(copy({current:oldProject,draft:oldInputs,dirty:false,user,info:currentInfo,
+    groups:currentInfo.ui_schema.system_groups,fields:allFields,page:"project",projectJobs:[],connected:true}));
+  h.app.fillProject(oldProject);await h.app.loadRecord(record.id);
+  assert.equal(h.nodes.get("upgrade-methane-dataset").hidden,false);
+  assert.doesNotMatch(h.nodes.get("parameter-fields").innerHTML,/data-input="methane_thermo_dataset"/);
+  h.nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"22"}});
+  h.nodes.get("upgrade-methane-dataset").onclick();
+  let state=h.app.state();
+  assert.equal(saved.length,0);assert.equal(state.current.inputs.methane_thermo_dataset,"gri30");
+  assert.equal(state.draft.methane_thermo_dataset,"gri30_highT");assert.equal(state.draft.pc,22e6);
+  assert.equal(state.draft.combustion_loss_model,"legacy_temperature_rise");
+  assert.equal(state.draft.cooling_bartz_mode,0);assert.equal(state.dirty,true);
+  assert.deepEqual(copy(state.resultRecord),record);assert.equal(h.nodes.get("upgrade-methane-dataset").hidden,true);
+  await h.app.saveProject();state=h.app.state();
+  assert.equal(saved.length,1);assert.equal(saved[0].revision,1);
+  assert.equal(saved[0].inputs.methane_thermo_dataset,"gri30_highT");
+  assert.equal(state.current.revision,2);assert.equal(state.dirty,false);
+  assert.deepEqual(copy(state.resultRecord),record);
+  assert.equal(oldProject.inputs.methane_thermo_dataset,"gri30");
+});
+
 test("a missing scenario name opens its editable history field before save or run",async()=>{
   const h=harness(async()=>{throw Error("A missing name must not send a request");});
   h.nodes.get("project-name").value="   ";
@@ -925,4 +1252,59 @@ test("a missing scenario name opens its editable history field before save or ru
   assert.equal(h.nodes.get("project-history").hidden,false);
   assert.equal(h.nodes.get("analysis-content").hidden,true);
   assert.equal(h.app.state().dirty,true);
+});
+
+test("cooling upgrade creates a draft and revision without changing the selected budget record",async()=>{
+  const oldInputs={...defaults,propellant_pair:"lox_methane",cooling_bartz_mode:0,cooling_heat_load:17e6,cooling_dp_pa:2e6};
+  const oldProject={...project,inputs:oldInputs};
+  const allFields=[...fields,...Object.keys(oldInputs).filter(key=>!(key in defaults)).map(key=>({key,label:key,default:oldInputs[key]}))];
+  const currentInfo={...info,ui_schema:{defaults:{...oldInputs,cooling_bartz_mode:1},groups:[{id:"cooling",fields:allFields}],
+    system_groups:[{id:"cooling",fields:allFields.map(f=>f.key==="cooling_bartz_mode"?{...f,read_only:true}:f)}]}};
+  const record={id:"old-budget",project_id:project.id,revision:1,status:"succeeded",created:1,result:{calculation:{inputs:oldInputs}}};
+  const saved=[];
+  const h=harness(async(url,options)=>{
+    if(url==="/api/jobs/old-budget")return response(record);
+    if(url==="/api/projects/p1"&&options.method==="PUT"){
+      const body=JSON.parse(options.body);saved.push(body);
+      return response({project:{...oldProject,...body,revision:2},warnings:[]});
+    }
+    throw Error(url);
+  });
+  h.app.seed(copy({current:oldProject,draft:oldInputs,dirty:false,user,info:currentInfo,
+    groups:currentInfo.ui_schema.system_groups,fields:allFields,page:"project",projectJobs:[],connected:true}));
+  h.app.fillProject(oldProject);await h.app.loadRecord(record.id);
+  assert.doesNotMatch(h.nodes.get("parameter-fields").innerHTML,/data-input="cooling_bartz_mode"/);
+  h.nodes.get("parameter-fields").oninput({target:{dataset:{input:"pc"},value:"22"}});
+  h.nodes.get("parameter-fields").listeners.get("click")({target:{closest:()=>({})}});
+  let state=h.app.state();
+  assert.equal(saved.length,0);assert.equal(state.current.inputs.cooling_bartz_mode,0);
+  assert.equal(state.draft.cooling_bartz_mode,1);assert.equal(state.draft.pc,22e6);
+  assert.equal(state.draft.cooling_heat_load,17e6);assert.equal(state.draft.cooling_dp_pa,2e6);
+  assert.equal(state.dirty,true);assert.deepEqual(copy(state.resultRecord),record);
+  await h.app.saveProject();state=h.app.state();
+  assert.equal(saved.length,1);assert.equal(saved[0].revision,1);
+  assert.equal(state.current.revision,2);assert.equal(state.current.inputs.cooling_bartz_mode,1);
+  assert.deepEqual(copy(state.resultRecord),record);assert.equal(oldProject.inputs.cooling_bartz_mode,0);
+});
+
+test("cooling candidate adoption changes only a draft and keeps unrelated edits and the saved record",async()=>{
+  const patch={cooling_n_channels:280,cooling_channel_height_m:.007,cooling_channel_auto_size:0,cooling_wall_temp_limit_status:"unset"};
+  const calls=[];
+  const h=harness(async(url,options)=>{calls.push(url);assert.equal(options.method,"GET");return response({project_id:project.id,input_patch:patch});});
+  const inputs={...defaults,propellant_pair:"lox_methane",cooling_bartz_mode:1,cooling_channel_table_json:"",pc:42e6};
+  h.app.seed(copy({current:project,draft:inputs,dirty:true,user,info,groups:schema.groups,fields,page:"project",projectJobs:[],connected:true}));
+  await h.app.adoptCoolingCandidate({studyId:"study1",candidateId:2});
+  const state=h.app.state();assert.equal(state.draft.pc,42e6);assert.equal(state.draft.cooling_channel_height_m,.007);
+  assert.equal(state.dirty,true);assert.deepEqual(copy(state.current),project);assert.equal(state.resultRecord,null);
+  assert.deepEqual(calls,["/api/cooling-designs/study1/candidates/2/draft"]);
+});
+
+test("cooling candidate adoption rejects a different project and an active axial channel table",async()=>{
+  for(const scenario of [{returnedProject:"different",table:""},{returnedProject:project.id,table:'[{"x_m":0}]'}]){
+    const h=harness(async()=>response({project_id:scenario.returnedProject,input_patch:{cooling_n_channels:280}}));
+    const inputs={...defaults,propellant_pair:"lox_methane",cooling_bartz_mode:1,cooling_channel_table_json:scenario.table};
+    h.app.seed(copy({current:project,draft:inputs,dirty:true,user,info,groups:schema.groups,fields,page:"project",projectJobs:[],connected:true}));
+    await assert.rejects(h.app.adoptCoolingCandidate({studyId:"s",candidateId:1}));
+    assert.deepEqual(copy(h.app.state().draft),inputs);
+  }
 });

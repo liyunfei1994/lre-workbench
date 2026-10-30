@@ -38,8 +38,11 @@ class NozzleGeometry:
     contour_r: List[float] = field(default_factory=list)  # 半径 [m]
 
     # ── V7.1 新增:CAD 建模必需字段 ──────────────────
-    bell_fraction: float = 0.80             # 钟形长度比(0.80 = 80% bell;TOP 的核心定义参数之一)
-    nozzle_type: str = "TOP"                # 喷管类型:TOP=推力优化抛物线(Thrust-Optimized Parabola)
+    bell_fraction: float = 0.80             # 相对同喉部/出口 15° 锥形喷管长度比
+    nozzle_type: str = "parabolic_bell_engineering"  # 系统级工程近似，未进行推力优化
+    nozzle_contour_method: str = "legacy_log_v1"
+    angle_source: str = "historical_log_rule_unvalidated"
+    coordinate_origin: str = "nozzle_throat"
     wall_thickness_mm: float = 0.0          # 喷管壁(含再生冷却层)总厚度
     inner_surface_area_m2: float = 0.0      # 燃气侧内表面积(用于热流分析)
     throat_axial_position_m: float = 0.0    # 喉部相对于燃烧室入口的轴向位置
@@ -71,11 +74,20 @@ class ChamberGeometry:
 
 @dataclass
 class InjectorGeometry:
-    """喷注器几何参数"""
-    face_diameter_m: float
-    face_area_m2: float
-    num_elements: int                # 喷注单元数估算
-    element_spacing_mm: float        # 单元间距
+    """同一计算记录中的主喷注器尺寸；缺失值不以当前默认值补齐。"""
+    face_diameter_m: float | None
+    face_area_m2: float | None
+    num_elements: int | None
+    element_spacing_mm: float | None  # sqrt(A_face / N)，不是已设计的孔中心距
+    d_ox_mm: float | None = None      # 中心流体圆孔直径
+    d_post_mm: float | None = None    # 中心管外径（环缝内边界）
+    d_outer_mm: float | None = None   # 环缝外边界（外筒内径）
+    delta_fuel_mm: float | None = None  # 单侧径向环缝宽
+    post_wall_thickness_mm: float | None = None
+    geometry_closure_passed: bool | None = None
+    geometry_source: str = "unavailable"
+    geometry_status: str = "unavailable"
+    geometry_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
