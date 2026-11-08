@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication
-from cfd_runner import CfdProcessRunner
-from cfd_exchange import create_cfd_job, load_cfd_job, import_cfd_result
-from core import CycleResults, EngineInputs, FlowState
+from lre_workbench.desktop.cfd.runner import CfdProcessRunner
+from lre_workbench.integrations.cfd_exchange import create_cfd_job, load_cfd_job, import_cfd_result
+from lre_workbench.domain.models import CycleResults, EngineInputs, FlowState
 
 
 class CfdRunnerTests(unittest.TestCase):

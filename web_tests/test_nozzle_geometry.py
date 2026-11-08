@@ -10,7 +10,8 @@ import unittest
 from webapp.solver import EngineInputs, input_values, presets
 from webapp.nozzle_geometry import nozzle_geometry_view
 from webapp.ui_schema import design_ui_schema
-from regen_geometry import build_regen_geometry
+from lre_workbench.components.cooling.geometry import build_regen_geometry
+from lre_workbench.components.chambers.contour import convergent_geometry
 
 
 def fixture(method="parabolic_bell_explicit_v1", cover=0):
@@ -19,6 +20,7 @@ def fixture(method="parabolic_bell_explicit_v1", cover=0):
     geom = build_regen_geometry(r_t=.1, r_c=.15, L_cyl=.3, expansion_ratio=16,
         cover_eps=cover, nozzle_contour_method=method, n_points=80,
         n_channels=300, channel_width_m=.001, channel_height_m=.018, wall_thickness_m=.002)
+    values["chamber_l_star_m"] = (.3 * math.pi * .15**2 + convergent_geometry(.15, .1, 30)["V_conv_m3"]) / (math.pi * .1**2)
     return {"calculation": {"inputs": values, "components": {
         "cooling_channel": {"profile": {"geometry": geom}},
         "nozzle": {"outputs": {"At_m2": math.pi * .1**2, "expansion_ratio": 16}}}}}
@@ -44,6 +46,106 @@ class NozzleGeometryViewTests(unittest.TestCase):
         after = nozzle_geometry_view(result)
         self.assertEqual(first["contour"], after["contour"])
         self.assertEqual(first["dimensions"], after["dimensions"])
+        self.assertEqual(after["consistency"]["status"], "fail")
+        self.assertFalse(after["export_allowed"])
+
+    def test_complete_saved_evidence_matches_and_allows_export(self):
+        result = fixture()
+        components = result["calculation"]["components"]
+        components["main_chamber"] = {"outputs": {"cc_diameter_m": .3, "cc_length_m": .3}}
+        components["cooling_channel"]["outputs"] = {"A_throat_m2": math.pi * .1**2}
+        view = nozzle_geometry_view(result)
+        self.assertEqual(view["consistency"]["status"], "pass", view["consistency"])
+        self.assertTrue(view["export_allowed"])
+        result["nozzle_geometry"] = deepcopy(view)
+        before = deepcopy(result)
+        reread = nozzle_geometry_view(result, "a-new-record-label")
+        self.assertEqual(reread["consistency"]["status"], "pass")
+        self.assertEqual(result, before)
+
+    def test_partial_evidence_does_not_claim_full_cycle_consistency(self):
+        view = nozzle_geometry_view(fixture())
+        self.assertEqual(view["consistency"]["status"], "partial")
+        self.assertTrue(view["export_allowed"])
+        self.assertIn("部分历史证据", view["consistency"]["messages"][0])
+
+    def test_cycle_area_difference_uses_coupling_tolerance(self):
+        result = fixture()
+        original = nozzle_geometry_view(result)
+        result["nozzle_geometry"] = deepcopy(original)
+        nozzle = result["calculation"]["components"]["nozzle"]["outputs"]
+        nozzle["At_m2"] *= 1 + 1e-9
+        view = nozzle_geometry_view(result)
+        checks = {row["id"]: row for row in view["consistency"]["checks"]}
+        self.assertEqual(checks["nozzle_area"]["status"], "pass")
+        nozzle["At_m2"] *= 1.01
+        view = nozzle_geometry_view(result)
+        self.assertTrue(view["available"])
+        self.assertFalse(view["export_allowed"])
+        self.assertEqual(view["consistency"]["status"], "fail")
+        self.assertEqual(view["contour"], original["contour"])
+
+    def test_saved_snapshot_is_validated_without_replacing_it_from_profile(self):
+        result = fixture()
+        result["nozzle_geometry"] = nozzle_geometry_view(result)
+        for damage in ("duplicate", "dimension", "hash", "origin"):
+            broken = deepcopy(result)
+            snapshot = broken["nozzle_geometry"]
+            if damage == "duplicate":
+                snapshot["contour"]["x_m"][1] = snapshot["contour"]["x_m"][0]
+            elif damage == "dimension":
+                snapshot["dimensions"]["total_length_m"] *= 2
+            elif damage == "hash":
+                snapshot["contour_sha256"] = "incorrect"
+            else:
+                snapshot["contour"]["coordinate_origin"] = "unknown"
+            before = deepcopy(broken)
+            with self.subTest(damage=damage):
+                view = nozzle_geometry_view(broken)
+                self.assertFalse(view["available"])
+                self.assertFalse(view["export_allowed"])
+                self.assertEqual(broken, before)
+
+    def test_profile_divergence_does_not_replace_saved_snapshot(self):
+        result = fixture()
+        original = nozzle_geometry_view(result)
+        result["nozzle_geometry"] = deepcopy(original)
+        result["calculation"]["components"]["cooling_channel"]["profile"]["geometry"]["full_nodes"][-1]["r_m"] *= 1.02
+        view = nozzle_geometry_view(result)
+        self.assertEqual(view["contour"], original["contour"])
+        self.assertFalse(view["export_allowed"])
+        self.assertEqual(view["consistency"]["status"], "fail")
+
+    def test_malformed_nested_records_are_unavailable_without_api_errors(self):
+        result = fixture()
+        result["nozzle_geometry"] = nozzle_geometry_view(result)
+        cases = (
+            ("calculation",), ("calculation", "components"),
+            ("calculation", "inputs"),
+            ("calculation", "components", "nozzle", "outputs"),
+            ("calculation", "components", "cooling_channel", "profile"),
+        )
+        for path in cases:
+            for bad in (["invalid"], "invalid"):
+                broken = deepcopy(result)
+                target = broken
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = bad
+                before = deepcopy(broken)
+                with self.subTest(path=path, bad=bad):
+                    view = nozzle_geometry_view(broken)
+                    self.assertFalse(view["available"])
+                    self.assertFalse(view["export_allowed"])
+                    self.assertEqual(broken, before)
+
+    def test_foreign_cycle_identity_does_not_acquire_ffsc_geometry(self):
+        result = fixture()
+        result["nozzle_geometry"] = nozzle_geometry_view(result)
+        result["calculation"]["inputs"]["cycle_type"] = "gg"
+        view = nozzle_geometry_view(result)
+        self.assertFalse(view["available"])
+        self.assertFalse(view["export_allowed"])
 
     def test_old_saved_nodes_keep_old_method_without_rewriting_result(self):
         result = fixture("legacy_log_v1")
@@ -90,6 +192,12 @@ class NozzleGeometryViewTests(unittest.TestCase):
         result["calculation"]["components"]["cooling_channel"]["profile"]["geometry"]["nodes"] = [None]
         self.assertFalse(nozzle_geometry_view(result)["available"])
         self.assertFalse(nozzle_geometry_view({"nozzle_geometry": {"available": True, "source": None}})["available"])
+        result = fixture()
+        result["nozzle_geometry"] = None
+        self.assertFalse(nozzle_geometry_view(result)["available"])
+        result.pop("nozzle_geometry")
+        result["calculation"]["components"]["cooling_channel"]["profile"]["geometry"] = None
+        self.assertFalse(nozzle_geometry_view(result)["available"])
 
     def test_missing_or_invalid_essential_data_has_no_invented_dimensions(self):
         self.assertFalse(nozzle_geometry_view(None)["available"])

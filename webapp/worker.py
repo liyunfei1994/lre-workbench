@@ -8,7 +8,23 @@ import threading
 import time
 import traceback
 from webapp.store import Store
-from webapp.solver import calculate, science_environment
+from webapp.design_scope import require_supported_design, require_supported_source
+from webapp.solver import calculate_design_job, initialization_failure_result, science_environment
+
+
+def persist_failure(store, job, exc):
+    """Keep diagnostic evidence atomically with the failed job status.
+
+    Preserve partial results from other study types and never overwrite a
+    cancellation or timeout which won the race with this worker.
+    """
+    diagnostic_result = initialization_failure_result(exc, job)
+    payload = (json.dumps(diagnostic_result, ensure_ascii=False, allow_nan=False)
+               if diagnostic_result is not None else None)
+    return store.execute(
+        "UPDATE jobs SET status='failed',error=?,result=COALESCE(?,result),finished=? "
+        "WHERE id=? AND status='running'",
+        (f"{type(exc).__name__}: {exc}"[:1600], payload, time.time(), job["id"]))
 
 
 def main():
@@ -26,7 +42,7 @@ def main():
     # NumPy's Windows native import can deadlock when another thread is
     # already blocked reading a pipe. Load the scientific stack first.
     # No calculation starts until the controller watcher is connected.
-    from gg_cycle import make_cycle_model
+    from lre_workbench.systems.ffsc import FFSCCycleModel
     science_environment()
 
     def controller_watch():
@@ -60,8 +76,15 @@ def main():
         store.execute("UPDATE jobs SET progress=? WHERE id=? AND status='running'",
                       (payload, args.job))
     try:
-        if job.get("kind") in ("throttle", "transient", "feed_network", "chilldown", "ignition", "shutdown", "cooling_design"):
-            if job["kind"] == "cooling_design":
+        project = store.one("SELECT inputs FROM projects WHERE id=?", (job["project_id"],))
+        if project:
+            require_supported_design(json.loads(project["inputs"]))
+        if job.get("kind") == "throttle":
+            raise ValueError("旧设计匹配扫描已停止执行；请从工况与运行提交固定几何节流分析。历史结果保留。")
+        if job.get("kind") in ("operating_throttle", "transient", "feed_network", "chilldown", "ignition", "shutdown", "cooling_design"):
+            if job["kind"] == "operating_throttle":
+                from webapp.operating_throttle import calculate_operating_throttle as calculate_study
+            elif job["kind"] == "cooling_design":
                 from webapp.cooling_design import calculate_cooling_design as calculate_study
             elif job["kind"] == "shutdown":
                 from webapp.shutdown import calculate_shutdown as calculate_study
@@ -73,14 +96,13 @@ def main():
                 from webapp.feed_network import calculate_feed_network as calculate_study
             elif job["kind"] == "transient":
                 from webapp.transient import calculate_transient as calculate_study
-            else:
-                from webapp.throttle import calculate_throttle as calculate_study
             payload = json.loads(job["inputs"])
             source = store.one("SELECT * FROM jobs WHERE id=? AND kind='design' AND status='succeeded'",
                                (payload["source_job_id"],))
             if not source or source["project_id"] != job["project_id"]:
                 raise ValueError("来源计算记录不存在或尚未完成。")
             source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            require_supported_source(source)
 
             def study_progress(status, partial):
                 # Persist complete points atomically with progress. Cancellation,
@@ -98,20 +120,22 @@ def main():
             if not source or source["project_id"] != job["project_id"]:
                 raise ValueError("来源计算记录不存在或尚未完成。")
             source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
+            require_supported_source(source)
             def validation_progress(done, total, point):
                 store.execute("UPDATE jobs SET progress=? WHERE id=? AND status='running'",
                               (json.dumps({"iteration": done, "maximum": total, "phase": "热化学对比"}), args.job))
             result = calculate_validation(payload, source, validation_progress)
+        elif job.get("kind") == "design":
+            result = calculate_design_job(job, progress)
         else:
-            result = calculate(json.loads(job["inputs"]), progress, saved_snapshot=True)
+            raise ValueError(f"不支持的计算任务类型：{job.get('kind')}")
         store.execute("UPDATE jobs SET status='succeeded',result=?,finished=? "
                       "WHERE id=? AND status='running'",
                       (json.dumps(result, ensure_ascii=False, allow_nan=False), time.time(), args.job))
         return 0
     except Exception as exc:
         traceback.print_exc()
-        store.execute("UPDATE jobs SET status='failed',error=?,finished=? WHERE id=? AND status='running'",
-                      (f"{type(exc).__name__}: {exc}"[:1600], time.time(), args.job))
+        persist_failure(store, job, exc)
         return 1
     finally:
         faulthandler.cancel_dump_traceback_later()

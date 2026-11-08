@@ -96,7 +96,7 @@ def setup_lock(root: Path = ROOT):
 
 def probe_runtime(python: Path, root: Path = ROOT, mode: str = "full") -> dict:
     code = ("import sys,json; sys.path.insert(0,sys.argv[1]); "
-            "from runtime_environment import environment_report; "
+            "from lre_workbench.runtime.environment import environment_report; "
             "print(json.dumps(environment_report(sys.argv[2],sys.argv[3])))")
     result = subprocess.run([str(python), "-c", code, str(root / "src"), str(root), mode],
                             capture_output=True, text=True, encoding="utf-8", check=True, timeout=90)

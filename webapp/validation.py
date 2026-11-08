@@ -18,6 +18,8 @@ def capabilities():
 
 
 def normalize_request(value, source):
+    from webapp.design_scope import require_supported_source
+    require_supported_source(source)
     if not isinstance(value, dict):
         raise ValueError("校核请求必须是对象。")
     allowed = {"source_job_id", "thermochemistry", "properties", "experiment", "gas_screening"}
@@ -54,6 +56,8 @@ def normalize_request(value, source):
 
 
 def calculate_validation(request, source, progress=None):
+    from webapp.design_scope import require_supported_source
+    require_supported_source(source)
     from webapp.validation_checks import conservation_checks, property_checks, experiment_checks
     from webapp.solver import plain
     original = source["result"]
@@ -74,7 +78,7 @@ def calculate_validation(request, source, progress=None):
     if request.get("properties") is not None:
         result["properties"] = property_checks(request["properties"])
     if request.get("gas_screening") is not None:
-        from gas_handoff import capture_gas_handoff
+        from lre_workbench.integrations.gas_handoff import capture_gas_handoff
         from webapp.gas_screening import screen_gas_record
         from webapp.chamber_handoff_compare import compare_chamber_handoff
         result["gas_handoff"] = capture_gas_handoff(original)

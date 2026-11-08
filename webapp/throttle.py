@@ -1,4 +1,4 @@
-"""Steady throttle studies anchored to an immutable, completed design calculation.
+"""Legacy design-rematching scans anchored to a completed design calculation.
 
 The existing desktop fixed-throat solver is reused. This module adds the web
 execution boundary, provenance, per-point acceptance and JSON-safe persistence.
@@ -12,9 +12,10 @@ import warnings
 from webapp.solver import EngineInputs, input_values, plain, science_environment
 from webapp.validation import fingerprint
 from webapp.steady_sensitivity import throttle_response_gains
-from convergence import numerical_convergence
-from steady_closure import audit_energy
-from steady_network import audit_network, validate_hardware
+from lre_workbench.solvers.convergence import numerical_convergence
+from lre_workbench.systems.steady_closure import audit_energy
+from lre_workbench.systems.steady_network import audit_network, validate_hardware
+from lre_workbench.solvers.state import ffsc_warm_state_compatible
 
 MAX_POINTS = 15
 AREA_TOLERANCE = 5e-4
@@ -36,8 +37,8 @@ def _wall_material_binding(profile, values):
     deliberately does not promote unknown manufacturing state or out-of-range
     diagnostic results into material qualification.
     """
-    from wall_materials import get_wall_dataset
-    from wall_thermal import (parse_material_zones, validate_manufacturing_state,
+    from lre_workbench.materials.wall import get_wall_dataset
+    from lre_workbench.components.cooling.wall_thermal import (parse_material_zones, validate_manufacturing_state,
                               material_for_cell, audit_cell, material_summary)
 
     def require(condition, detail):
@@ -51,12 +52,20 @@ def _wall_material_binding(profile, values):
     try:
         default_id = values["wall_thermal_dataset_id"]
         state = validate_manufacturing_state(values["wall_manufacturing_state"])
-        get_wall_dataset(default_id)
+        default_dataset = get_wall_dataset(default_id)
         zones = parse_material_zones(values["wall_material_zones_json"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("来源设计点的壁面材料输入无法识别；请重新计算设计点。") from exc
     expected_assignment = dict(default_dataset_id=default_id,
         default_manufacturing_state=state, zones=zones, coordinate="axial_x_from_injector_m")
+    # Older records contain the four original fields. New records additionally
+    # persist actual alloy identities as a complete pair; neither half may be
+    # missing, altered, or filled from today's catalog into the saved record.
+    if "default_material_id" in assignment or "zone_material_ids" in assignment:
+        expected_assignment.update(default_material_id=default_dataset.material_id,
+            zone_material_ids=[dict(x_start_m=z["x_start_m"], x_end_m=z["x_end_m"],
+                dataset_id=z["dataset_id"], material_id=get_wall_dataset(z["dataset_id"]).material_id)
+                for z in zones])
     require(assignment == expected_assignment, "分区或制造状态与保存输入不一致")
     channels = [c for c in profile.get("cells", []) if isinstance(c, dict) and c.get("kind") == "channel"]
     require(bool(channels) and all(isinstance(c.get("material"), dict) for c in channels),
@@ -138,7 +147,7 @@ def _cooling_baseline(calculation, values, throat_area, height):
     material_binding = _wall_material_binding(profile, values)
     geometry = profile.get("geometry")
     require(isinstance(geometry, dict) and geometry.get("version") in (2, 3), "几何快照缺失或曲率来源版本过旧")
-    from cooling_marching import BARTZ_GEOMETRY_ID
+    from lre_workbench.components.cooling.marching import BARTZ_GEOMETRY_ID
     gas_heat = profile.get("gas_heat_transfer")
     require(isinstance(gas_heat, dict) and gas_heat.get("geometry_model_id") == BARTZ_GEOMETRY_ID
             and gas_heat.get("curvature_source") == "geometry.throat_upstream_radius_m",
@@ -151,8 +160,8 @@ def _cooling_baseline(calculation, values, throat_area, height):
     # Geometric reconstruction is inexpensive and involves no fluid-property or
     # engine solve. It rejects stale coverage, table geometry, flow direction or
     # scalar inputs, while retaining the saved design throat within its tolerance.
-    from chamber_contour import convergent_geometry
-    from regen_geometry import build_regen_geometry
+    from lre_workbench.components.chambers.contour import convergent_geometry
+    from lre_workbench.components.cooling.geometry import build_regen_geometry
     rc = rt*math.sqrt(values["chamber_contraction_ratio"])
     convergent = convergent_geometry(rc, rt, values["chamber_conv_half_angle_deg"])
     length = (values["chamber_l_star_m"]*math.pi*rt*rt-convergent["V_conv_m3"])/(math.pi*rc*rc)
@@ -327,6 +336,8 @@ def _cooling_baseline(calculation, values, throat_area, height):
     close(coupling["hot_side_relative_residual"],vector_error,"重算热侧状态相对差",atol=1e-12)
     return {"mode":"regen_quasi1d_ph_v1", "geometry":deepcopy(geometry),
             "geometry_sha256":fingerprint(geometry), "profile_sha256":fingerprint(profile),
+            "hydraulic_parameters":deepcopy(profile.get("hydraulic_parameters")),
+            "heat_transfer_correction":deepcopy(profile.get("heat_transfer_correction")),
             "wall_material_binding":material_binding,
             "status":"saved_model_balances_checked", "validation_status":"requires_independent_validation",
             "limitations":["守恒与模型域检查不验证凝结、温区外推误差、高压燃气 EOS 或传热相关式。"]}
@@ -334,6 +345,8 @@ def _cooling_baseline(calculation, values, throat_area, height):
 
 def source_baseline(source):
     """Read actual solved inputs and hardware; never substitute current edits."""
+    from webapp.design_scope import require_supported_source
+    require_supported_source(source)
     original = source.get("result") or {}
     calculation = original.get("calculation") or {}
     raw_inputs = calculation.get("inputs")
@@ -360,7 +373,7 @@ def source_baseline(source):
         "ambient_pressure_Pa": values["ambient_pressure"], "of_ratio": values["of_ratio"],
         "expansion_ratio": values["expansion_ratio"], "throat_area_m2": area,
         "cooling_height_m": height, "cycle_type": values["cycle_type"],
-        "propellant_pair": values["propellant_pair"], "gg_layout": values["gg_layout"],
+        "propellant_pair": values["propellant_pair"],
         "contour_inputs": {key: values[key] for key in (
             "nozzle_contour_method", "nozzle_initial_angle_deg", "nozzle_exit_angle_deg",
             "nozzle_bell_fraction", "chamber_conv_half_angle_deg", "expansion_ratio")},
@@ -394,12 +407,14 @@ def source_baseline(source):
             raise ValueError("来源 FFSC 记录没有完整有效的四支路阻力快照，请重新计算设计点。") from exc
         solution = (calculation.get("convergence") or {}).get("solution")
         warm_state = None
-        if isinstance(solution, dict) and isinstance(solution.get("x"), list) and len(solution["x"]) == 3:
-            warm_values = [*solution["x"], *(solution.get(key) for key in
-                           ("chamber_temp_guess", "chamber_gamma", "molar_mass"))]
-            if all(finite(value) is not None and value > 0 for value in warm_values) and solution["chamber_gamma"] > 1:
-                warm_state = deepcopy(solution)
+        # Numeric shape alone cannot distinguish turbine pressure ratios from
+        # cross-branch mass flows. Untagged historical vectors remain readable
+        # in their source record, but cannot seed a new solve.
+        if ffsc_warm_state_compatible(solution, target_mixture_ratio=target_mr):
+            warm_state = deepcopy(solution)
         baseline["warm_state"] = warm_state
+        if solution is not None and warm_state is None:
+            baseline["warm_start_rejection_reason"] = "incompatible_or_unversioned_vector"
         if warm_state is not None:
             for key, source_key in (("warm_state_thrust_N", "thrust_N"), ("warm_state_pc_Pa", "chamber_pressure_Pa")):
                 actual = finite(summary.get(source_key))
@@ -427,15 +442,16 @@ def normalize_request(value, source):
 
 
 def calculate_throttle(request, source, progress=None):
-    from engineering_assessment import assess_engineering
-    from gg_cycle import make_cycle_model
-    from version import APP_VERSION
+    from lre_workbench.analysis.assessment import assess_engineering
+    from lre_workbench.systems.ffsc import FFSCCycleModel
+    from lre_workbench.version import APP_VERSION
 
     request = normalize_request(request, source)
     values, baseline = source_baseline(source)
     environment = science_environment(values["propellant_pair"], values.get("methane_thermo_dataset", "gri30"))
     result = {
         "schema_version": 1, "application_version": APP_VERSION,
+        "analysis_mode": "concept_design_rematch",
         "analysis_type": "steady_throttle", "source": {
             "job_id": source["id"], "project_id": source["project_id"], "revision": source["revision"],
             "created": source.get("created"), "inputs_sha256": fingerprint(source["inputs"]),
@@ -445,9 +461,9 @@ def calculate_throttle(request, source, progress=None):
         }, "request": deepcopy(request), "baseline": baseline, "environment": environment,
         "source_inputs": deepcopy(values), "complete": False, "points": [],
         "limitations": [
+            "此入口为旧版设计匹配扫描，不是固定硬件稳态分析；各点仍沿用来源的预燃室温度或混合比目标反求逻辑。",
             "节流比例表示目标推力占来源设计点目标推力的比例；按各独立稳态工况求解，不是时间历程。",
             "主喷管喉部面积和膨胀比固定；启用冷却通道自动定尺寸时，通道高度冻结为来源设计结果。室压由固定喉部闭合反解。",
-            "GG 排气喷管仍按各工况重算，不属于完整固定整机硬件模型；推力与比冲包含 GG 排气贡献并使用来源环境压力。",
             "入口条件、总混合比、效率和压降等模型假设沿用来源设计点；尚未使用完整泵/涡轮特性图及执行机构调节规律。",
             "每点独立显示数值收敛、喉部闭合与系统约束；失败点保留且不得用插值替代。约束通过不代表已验证可用节流范围。",
             "当前喷管模型未求解深节流下的流动分离与侧向载荷；最低通过点不能视为经验证的最低节流能力。",
@@ -456,7 +472,6 @@ def calculate_throttle(request, source, progress=None):
         ],
     }
     if values["cycle_type"] == "ffsc":
-        result["limitations"] = [line for line in result["limitations"] if not line.startswith("GG 排气")]
         result["limitations"].insert(2, "FFSC 冻结来源设计点四支路的管路与喷注阻力系数，并使用当前密度求压降；主喉部及冷却通道高度同时冻结。")
         result["limitations"].insert(3, "这仍是固定阻力下的最低压头与调节阀再匹配；缺少泵/涡轮特性图和阀门行程限制，不能称为完整固定硬件节流包线。")
     values["throttle_min"] = request["throttle_min"]
@@ -525,7 +540,7 @@ def calculate_throttle(request, source, progress=None):
     publish("准备节流扫描")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        make_cycle_model(EngineInputs(**values)).throttle_sweep(
+        FFSCCycleModel(EngineInputs(**values)).throttle_sweep(
             progress_callback=starting, record_callback=record,
             design_baseline=deepcopy(baseline), include_cooling_marching=False)
     result["warnings"] = list(dict.fromkeys(str(w.message) for w in caught))

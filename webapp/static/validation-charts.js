@@ -84,17 +84,17 @@ function plotSvg(panel,data,difference=false){
   const y=value=>top+(high-value)/(high-low)*innerHeight;
   const xticks=data.xValues.length<=8?data.xValues:Array.from({length:6},(_,i)=>first+(last-first)*i/5);
   const yticks=Array.from({length:difference?3:5},(_,i)=>low+(high-low)*i/(difference?2:4));
-  const label=difference?`${panel.label}相对差，百分比`:`${panel.label}，${panel.unit}，横轴为 O/F 氧燃质量比`;
+  const label=difference?`${panel.label}相对差，百分比`:`${panel.label}，${panel.unit}，横轴为 氧燃质量比`;
   const axes=yticks.map(value=>`<line class="tc-grid" x1="${left}" x2="${width-right}" y1="${y(value)}" y2="${y(value)}"/><text class="tc-tick" x="${left-11}" y="${y(value)+4}" text-anchor="end">${escape(axisNumber(value,high-low))}</text>`).join("")+
     xticks.map(value=>`<line class="tc-grid" x1="${x(value)}" x2="${x(value)}" y1="${top}" y2="${height-bottom}"/><text class="tc-tick" x="${x(value)}" y="${height-bottom+18}" text-anchor="middle">${escape(axisNumber(value,last-first))}</text>`).join("")+
     `<line class="tc-axis" x1="${left}" x2="${left}" y1="${top}" y2="${height-bottom}"/><line class="tc-axis" x1="${left}" x2="${width-right}" y1="${height-bottom}" y2="${height-bottom}"/>`+
     (difference?`<line class="tc-zero" x1="${left}" x2="${width-right}" y1="${y(0)}" y2="${y(0)}"/><text class="tc-unit" x="${left}" y="13">相对差 / %</text>`:
-      `<text class="tc-unit" x="${left}" y="13">${escape(panel.symbol)} / ${escape(panel.unit)}</text><text class="tc-axis-title" x="${left+innerWidth/2}" y="${height-4}" text-anchor="middle">O/F 氧燃质量比</text>`);
+      `<text class="tc-unit" x="${left}" y="13">${escape(panel.symbol)} / ${escape(panel.unit)}</text><text class="tc-axis-title" x="${left+innerWidth/2}" y="${height-4}" text-anchor="middle">氧燃质量比</text>`);
   const series=panel.groups.map(group=>(difference?["relative"]:["cantera","cea"]).map(backend=>{
     const isDiff=backend==="relative",name=isDiff?"CEA − Cantera":backend==="cantera"?"Cantera":"CEA";
     const paths=segments(group.values,backend).filter(s=>s.length>1).map(s=>`<polyline class="tc-series ${backend==="cea"?"tc-dashed":""}" stroke="${group.color}" data-backend="${backend}" data-eps="${group.eps??"all"}" points="${s.map(p=>`${x(p.of)},${y(p[backend])}`).join(" ")}"/>`).join("");
     const marks=group.values.filter(p=>finite(p[backend])).map(p=>marker(backend,x(p.of),y(p[backend]),group.color,
-      `${name} · O/F = ${number(p.of)} · ${group.label}: ${number(p[backend])} ${isDiff?"%":panel.unit}`,
+      `${name} · 氧燃质量比 = ${number(p.of)} · ${group.label}: ${number(p[backend])} ${isDiff?"%":panel.unit}`,
       `data-backend="${backend}" data-eps="${group.eps??"all"}" data-of="${p.of}" data-value="${p[backend]}"`)).join("");
     return paths+marks;
   }).join("")).join("");
@@ -131,9 +131,9 @@ function singleCard(panel,data){
 export function renderThermoCharts(result){
   const data=prepareThermoChartData(result);
   if(!data.xValues.length)return '<div class="tc-no-data">暂无已保存的热力学对比点。</div>';
-  const heading=data.singlePoint?`单工况对比 · O/F = ${number(data.xValues[0])}`:"性能对比曲线 · 随 O/F 的变化";
-  const explanation=data.singlePoint?"这条历史记录仅有一个 O/F，不能形成趋势曲线。下方同时比较四项指标；运行多点扫描后即可查看曲线。":
-    "横轴为实际 O/F；颜色区分膨胀比，线型区分计算后端。下方小图显示相对差，0 表示两个后端数值相同。悬停数据点查看数值。";
+  const heading=data.singlePoint?`单工况对比 · 氧燃质量比 = ${number(data.xValues[0])}`:"性能对比曲线 · 随 氧燃质量比 的变化";
+  const explanation=data.singlePoint?"这条历史记录仅有一个 氧燃质量比，不能形成趋势曲线。下方同时比较四项指标；运行多点扫描后即可查看曲线。":
+    "横轴为实际 氧燃质量比；颜色区分膨胀比，线型区分计算后端。下方小图显示相对差，0 表示两个后端数值相同。悬停数据点查看数值。";
   return `<section class="tc-dashboard" aria-label="热力学性能图形对比"><div class="tc-chart-heading">${data.singlePoint?`<h3>${escape(heading)}</h3>`:""}<p>${escape(conditionText(data))}</p></div><p class="tc-reading-guide">${escape(explanation)}</p>${!data.singlePoint?methodLegend():""}<div class="tc-chart-grid">${data.panels.map(panel=>data.singlePoint?singleCard(panel,data):
     `<article class="tc-panel" data-thermo-metric="${panel.key}"><header><h4>${escape(panel.label)} <span>${escape(panel.symbol)} / ${escape(panel.unit)}</span></h4><p>${escape(panelHint(panel,data))}</p></header>${plotSvg(panel,data)}${seriesLegend(panel)}${plotSvg(panel,data,true)}${panel.missing?`<p class="tc-gap-note">${panel.missing} 个工况缺少完整配对；曲线在缺失处断开，不填零。</p>`:""}</article>`).join("")}</div><p class="tc-chart-foot">相对差 = (CEA − Cantera) / |Cantera| × 100%，采用该记录保存的差值。曲线接近表示数值接近；数据库、允许产物及物态的差异仍需结合本次比较条件判断。</p></section>`;
 }
@@ -173,7 +173,7 @@ export function buildThermoChartSvg(result){
     }
     return `<g transform="translate(${px} ${py})"><rect width="${panelWidth}" height="${panelHeight}" fill="#fff" stroke="#cbd7e0"/><text class="tc-export-panel-title" x="18" y="29">${escape(`${panel.label} · ${panel.symbol} / ${panel.unit}`)}</text><text class="tc-export-label" x="18" y="49">${escape(panelHint(panel,data))}</text>${contents}</g>`;
   }).join("");
-  const guide=data.singlePoint?`单工况 O/F = ${number(data.xValues[0])} · 仅比较保存的数值，不生成趋势曲线。`:
-    "横轴 O/F · 颜色区分 ε · Cantera 实线圆点 / CEA 虚线方点 · 小图为相对差 / % · 缺失处断开";
+  const guide=data.singlePoint?`单工况 氧燃质量比 = ${number(data.xValues[0])} · 仅比较保存的数值，不生成趋势曲线。`:
+    "横轴 氧燃质量比 · 颜色区分 ε · Cantera 实线圆点 / CEA 虚线方点 · 小图为相对差 / % · 缺失处断开";
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="NASA CEA 与 Cantera 四项热力学指标对比"><defs><style>${SVG_STYLE}</style></defs><rect width="${width}" height="${height}" fill="#f5f8fa"/><text class="tc-export-title" x="18" y="34">NASA CEA × Cantera · 热力学对比</text><text class="tc-export-subtitle" x="18" y="61">${escape(conditionText(data))}</text><text class="tc-export-subtitle" x="18" y="87">${escape(guide)}</text>${panels}<text class="tc-export-label" x="18" y="${height-32}">相对差 = (CEA − Cantera) / |Cantera| × 100%，来自保存记录；数值接近不等同于实机验证或精度合格。</text><text class="tc-export-label" x="18" y="${height-13}">产品数据库、允许物种和相态的适用范围，请结合该校核记录的比较条件说明。</text></svg>`;
 }

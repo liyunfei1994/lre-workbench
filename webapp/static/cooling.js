@@ -276,7 +276,7 @@ export function coolingMaterialState(profile={}) {
 function materialDetails(profile) {
   const {audit,available,complete,kind,label,match}=coolingMaterialState(profile);
   const matchKind=audit.manufacturing_match==="matched" ? "pass" : audit.manufacturing_match==="mismatch" ? "review" : "unknown";
-  const heading=`<summary>壁面材料与数据适用性 ${badge(kind,label)}${available ? ` ${badge(matchKind,match)}` : ""}</summary>`;
+  const heading=`<summary>推力室内衬材料与数据适用性 ${badge(kind,label)}${available ? ` ${badge(matchKind,match)}` : ""}</summary>`;
   if(!available)return `<details class="cool-details cool-materials">${heading}<p class="cool-note">历史记录未保存逐单元材料数据与温区检查；需重新计算，不能用当前材料设置补写历史证据。</p></details>`;
   const datasets=list(audit.datasets).map(raw=>obj(raw));
   const title=(dataset)=>dataset.label || dataset.display_name || dataset.material_name || dataset.dataset_id || "未记录";
@@ -286,7 +286,8 @@ function materialDetails(profile) {
     const source=obj(list(dataset.sources)[0]), manufacturing=obj(dataset.manufacturing_state);
     const url=/^https:\/\//i.test(source.url || dataset.source_url || "") ? source.url || dataset.source_url : null;
     const sourceLabel=source.title || dataset.source_title || "来源未记录";
-    return `<tr>${cell(title(dataset))}${cell(dataset.dataset_id || "未记录")}${cell(manufacturing.label || "未记录")}${cell(span(conductivity.range_K))}${cell(span(heatCapacity.range_K))}${cell(quantity(dataset.reference_density_kg_m3,"kg/m³"))}<td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(sourceLabel)}</a>` : esc(sourceLabel)}</td></tr>`;
+    const capacityNote=heatCapacity.statistic==="composition_weighted_estimate" ? "；成分加权估算，非独立实测" : "";
+    return `<tr>${cell(title(dataset))}${cell(dataset.dataset_id || "未记录")}${cell(manufacturing.label || "未记录")}${cell(span(conductivity.range_K))}${cell(span(heatCapacity.range_K)+capacityNote)}${cell(quantity(dataset.reference_density_kg_m3,"kg/m³"))}<td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(sourceLabel)}</a>` : esc(sourceLabel)}</td></tr>`;
   });
   const details=list(audit.cells).filter(raw=>obj(raw).status!=="within_range").map(raw=>{
     const row=obj(raw),material=obj(row.material),range=row.actual_temperature_range_K || row.temperature_range_K || [row.min_temperature_K,row.max_temperature_K];

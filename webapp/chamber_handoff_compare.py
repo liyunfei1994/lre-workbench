@@ -11,8 +11,8 @@ import math
 import re
 
 from webapp.solver import ROOT  # also installs the existing src import path
-import thermo
-from task_control import checkpoint
+import lre_workbench.properties.thermochemistry as thermo
+from lre_workbench.runtime.tasks import checkpoint
 from webapp.thermo_compare import (
     _LOCK, _comparison_gas, _cea_object, _cea_mass_fractions,
     _cea_species_metadata, _prepare_cea_scratch, COMMON_CHO_SPECIES,
@@ -29,7 +29,7 @@ def _finite(value, name, positive=False):
 
 
 def _load_source_gas(source, ports):
-    from gas_handoff import load_verified_gas_model
+    from lre_workbench.integrations.gas_handoff import load_verified_gas_model
     inputs = source.get("calculation", {}).get("inputs", {})
     if inputs.get("propellant_pair") != "lox_methane" or inputs.get("cycle_type") != "ffsc":
         raise ValueError("本次交接对照仅支持 FFSC 液氧甲烷记录。")
@@ -190,7 +190,7 @@ def compare_chamber_handoff(source_result, handoff=None, progress=None):
     try:
         checkpoint()
         if handoff is None:
-            from gas_handoff import capture_gas_handoff
+            from lre_workbench.integrations.gas_handoff import capture_gas_handoff
             handoff = capture_gas_handoff(source_result)
         gas, ports, target, mixed, outputs = _budgets(source_result, handoff)
         result.update(source_ports=ports, target=target)

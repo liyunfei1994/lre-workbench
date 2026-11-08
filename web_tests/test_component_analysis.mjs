@@ -17,15 +17,15 @@ const nozzle=()=>component("nozzle",[
 ],"主喷管");
 
 test("workspace groups every supported cycle component and retains every detail panel",()=>{
-  const ids=["ox_pump","fuel_pump","ox_preburner","fuel_preburner","gas_generator","main_chamber","injector",
-    "ox_preburner_turbine","fuel_preburner_turbine","gg_turbine","gg_turbine_ox","gg_turbine_fuel","cooling_channel","nozzle","gg_exhaust_nozzle"];
+  const ids=["ox_pump","fuel_pump","ox_preburner","fuel_preburner","main_chamber","injector",
+    "ox_preburner_turbine","fuel_preburner_turbine","cooling_channel","nozzle"];
   const html=renderComponentWorkspace(ids.map(id=>component(id,[field("test",3)])));
   for (const title of ["泵与供给","涡轮与轴功","燃烧与喷注","冷却与换热","喷管与推力"]) assert(html.includes(title));
   assert.equal((html.match(/data-ca-panel=/g)||[]).length,ids.length);
   assert.equal((html.match(/data-ca-object=/g)||[]).length,ids.length);
   assert.equal((html.match(/aria-label="[^"]*性能结果" hidden/g)||[]).length,ids.length-1);
-  assert.match(html,/data-ca-category="shaft" aria-pressed="false">涡轮与轴功<span>5<\/span>/);
-  assert.match(html,/data-ca-category="combustion" aria-pressed="false">燃烧与喷注<span>5<\/span>/);
+  assert.match(html,/data-ca-category="shaft" aria-pressed="false">涡轮与轴功<span>2<\/span>/);
+  assert.match(html,/data-ca-category="combustion" aria-pressed="false">燃烧与喷注<span>4<\/span>/);
   assert.match(html,/aria-current="true" title="ox_pump"/);
   assert.match(html,/<th scope="col">参数<\/th><th scope="col">符号<\/th><th scope="col">数值<\/th><th scope="col">单位<\/th>/);
 });
@@ -90,13 +90,13 @@ test("zero and extreme finite comparisons stay truthful without nonfinite SVG co
   }
 });
 
-test("symbols retain the physical meaning of gas-generator pressure and ambient coefficients",()=>{
+test("symbols retain the physical meaning of preburner pressure and ambient coefficients",()=>{
   const html=renderComponentWorkspace([
-    component("gas_generator",[field("preburner_pressure_MPa",6,"MPa")]),
+    component("fuel_preburner",[field("preburner_pressure_MPa",6,"MPa")]),
     component("nozzle",[field("Cf_sl",1.7)]),
     component("ox_pump",[field("power_hydraulic_W",2,"MW")]),
   ]);
-  assert.match(html,/title="preburner_pressure_MPa">pGG<\/td>/);
+  assert.match(html,/title="preburner_pressure_MPa">pPB<\/td>/);
   assert.match(html,/title="Cf_sl">CF,amb<\/td>/);
   assert.match(html,/title="power_hydraulic_W">Pinc<\/td>/);
 });
@@ -113,17 +113,14 @@ test("nozzle comparisons describe the recorded environment and never claim a coe
 });
 
 test("combustion charts use actual branch flows, including nonclosing reported totals",()=>{
-  const item=component("gas_generator",[
+  const item=component("fuel_preburner",[
     field("mdot_ox_kgs",4,"kg/s"),field("mdot_fuel_kgs",2,"kg/s"),field("mdot_total_kgs",9,"kg/s"),
     field("T_combustion_K",900,"K"),
-  ],"燃气发生器");
+  ],"富燃预燃室");
   const html=renderComponentWorkspace([item]);
   assert.match(html,/已报告支路流量。氧化剂 4 kg\/s；燃料 2 kg\/s/);
   assert.match(html,/<td class="ca-value">9<\/td><td class="ca-unit">kg\/s<\/td>/);
   assert.doesNotMatch(html,/66\.667|33\.333|100%|总流量 6|平衡通过/);
-  const dual=renderComponentWorkspace([component("gg_turbine_ox",[],"GG 涡轮（液氧泵轴）")]);
-  assert.match(dual,/GG 涡轮（液氧泵轴）/);
-  assert.doesNotMatch(dual,/富氧/);
 });
 
 test("all text and attributes are escaped, and nonfinite values remain missing without mutation",()=>{

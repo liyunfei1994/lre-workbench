@@ -23,6 +23,7 @@ const textarea = (name,label,value,extra="") => `<label>${escape(label)}<textare
 
 function sourceRecord(context){
   const record=context?.record;
+  if([record?.inputs,record?.result?.submitted_inputs,record?.result?.calculation?.inputs].some(p=>p&&((p.cycle_type??'ffsc')!=='ffsc'||(p.propellant_pair??'lox_methane')!=='lox_methane')))return null;
   return record?.status==="succeeded"&&record.result&&record.id&&record.project_id===context.project?.id ? record : null;
 }
 function sourceInputs(context){const record=sourceRecord(context);return record?.inputs||record?.result?.submitted_inputs||record?.result?.calculation?.inputs||record?.result?.inputs||{};}
@@ -32,20 +33,20 @@ function values(text,label){const output=String(text).split(/[,，;；\s]+/).fil
 
 export function scanValues(form){
   if(form.scan_mode==="range"){
-    const start=positive(form.of_start,"O/F 起始值"),end=positive(form.of_end,"O/F 终止值"),count=positive(form.of_count,"O/F 点数");
-    if(!Number.isInteger(count)||count<2||count>20)throw Error("O/F 扫描点数须为 2–20 的整数。");
-    if(end<=start)throw Error("O/F 终止值必须大于起始值。");
+    const start=positive(form.of_start,"氧燃质量比 起始值"),end=positive(form.of_end,"氧燃质量比 终止值"),count=positive(form.of_count,"氧燃质量比 点数");
+    if(!Number.isInteger(count)||count<2||count>20)throw Error("氧燃质量比 扫描点数须为 2–20 的整数。");
+    if(end<=start)throw Error("氧燃质量比 终止值必须大于起始值。");
     return Array.from({length:count},(_,i)=>i===count-1?end:Number((start+(end-start)*i/(count-1)).toPrecision(12)));
   }
-  if(form.scan_mode==="point")return [positive(form.of_values,"O/F")];
+  if(form.scan_mode==="point")return [positive(form.of_values,"氧燃质量比")];
   if(form.scan_mode!=="list"&&form.scan_mode!==undefined)throw Error("请选择有效的扫描方式。");
-  return values(form.of_values,"O/F");
+  return values(form.of_values,"氧燃质量比");
 }
 
 function scanSummary(form){
   try{
     const count=scanValues(form).length,eps=values(form.eps_values,"膨胀比").length,total=count*eps;
-    return `<b>${count} 个 O/F 点 × ${eps} 个膨胀比 = ${total} 个工况</b><span>${total>60?"超出上限：每次最多 60 个工况。":count===1?"单个 O/F 显示数值对照；扫描多个 O/F 才能绘制趋势。":"运行后同时绘制 Isp、c*、Cf 和燃烧室温度四张图。"}</span>`;
+    return `<b>${count} 个 氧燃质量比 点 × ${eps} 个膨胀比 = ${total} 个工况</b><span>${total>60?"超出上限：每次最多 60 个工况。":count===1?"单个 氧燃质量比 显示数值对照；扫描多个 氧燃质量比 才能绘制趋势。":"运行后同时绘制 Isp、c*、Cf 和燃烧室温度四张图。"}</span>`;
   }catch(problem){return `<span>${escape(problem.message)}</span>`;}
 }
 
@@ -108,7 +109,7 @@ export function createValidationForm(context){
     condition_of:p.of_ratio?String(p.of_ratio):"",condition_fuel_K:p.fuel_inlet_temp==null?"":String(p.fuel_inlet_temp),
     condition_ox_K:p.ox_inlet_temp==null?"":String(p.ox_inlet_temp),condition_ambient_MPa:p.ambient_pressure==null?"":String(p.ambient_pressure/1e6),
     condition_pc_tolerance:"0",condition_of_tolerance:"0",condition_temp_tolerance:"0",condition_ambient_tolerance:"0",
-    architecture_label:`${(p.propellant_pair||"lox_methane")==="lox_kerosene"?"液氧 / 煤油（正十二烷替代）":"液氧 / 甲烷"} · ${p.cycle_type==="gg"?`GG · ${p.gg_layout==="dual_shaft"?"双轴":"单轴"}`:"FFSC"}`,
+    architecture_label:`液氧 / 甲烷 · FFSC`,
     exp_thrust:"",exp_thrust_tolerance:"",exp_thrust_uncertainty:"",exp_isp:"",exp_isp_tolerance:"",exp_isp_uncertainty:"",
     exp_mdot:"",exp_mdot_tolerance:"",exp_mdot_uncertainty:""};
 }
@@ -119,9 +120,9 @@ export function buildValidationRequest(context,form,tab){
   const p=sourceInputs(context),request={source_job_id:record.id};
   if(tab==="thermochemistry"){
     const of_values=scanValues(form),eps_values=values(form.eps_values,"膨胀比");
-    if(of_values.some(value=>value<.05||value>20))throw Error("O/F 必须在 0.05–20 范围内。");
+    if(of_values.some(value=>value<.05||value>20))throw Error("氧燃质量比 必须在 0.05–20 范围内。");
     if(eps_values.some(value=>value<1||value>1000))throw Error("膨胀比必须在 1–1000 范围内。");
-    if(of_values.length*eps_values.length>60)throw Error("O/F × 膨胀比的组合不得超过 60 个点。");
+    if(of_values.length*eps_values.length>60)throw Error("氧燃质量比 × 膨胀比的组合不得超过 60 个点。");
     if(!["equilibrium","frozen_chamber","frozen_throat"].includes(form.mode))throw Error("请选择有效的喷管膨胀假设。");
     const productPolicy=form.product_policy||"native_databases",dataset=form.cantera_dataset||"production";
     if(!["native_databases","matched_cho_gas"].includes(productPolicy)||!["production","nasa_gas_candidate"].includes(dataset))throw Error("请选择有效的对照物种集合和热力学数据集。");
@@ -138,7 +139,6 @@ export function buildValidationRequest(context,form,tab){
     if(!form.conditions_confirmed)throw Error("请核对并确认试验工况；从方案复制的条件不能自动视为试验条件。");
     if(!["holdout","calibration"].includes(form.experiment_role))throw Error("请选择试验数据用途。");
     const conditions={propellant_pair:p.propellant_pair||"lox_methane",cycle_type:p.cycle_type};
-    if(p.cycle_type==="gg")conditions.gg_layout=p.gg_layout||"single_shaft";
     for(const [key,field,unit,tolerance] of [["pc","condition_pc_MPa","MPa","condition_pc_tolerance"],["of_ratio","condition_of","1","condition_of_tolerance"],
       ["fuel_inlet_temp","condition_fuel_K","K","condition_temp_tolerance"],["ox_inlet_temp","condition_ox_K","K","condition_temp_tolerance"]]){
       conditions[key]={value:positive(form[field],"试验工况"),unit};
@@ -230,7 +230,7 @@ function thermochemistryResult(result,metric,selection){
     `<div class="validation-chart-toolbar"><div><h3>性能对比曲线</h3></div><div><button data-validation-action="export-png">导出 PNG</button><button data-validation-action="export-svg">导出 SVG</button></div></div>`+
     comparisonExplanation(result)+renderThermoCharts(result)+
     `<details class="validation-data-details" open><summary>逐点数据与差值 · ${points.length} 个工况</summary><label class="validation-metric">表格指标<select data-validation-metric>${Object.entries(metricLabels).map(([key,[label,unit]])=>`<option value="${key}" ${metric===key?"selected":""}>${label} / ${unit}</option>`).join("")}</select></label>`+
-    table(["点","O/F / ε",`Cantera / ${metricLabels[metric]?.[1]||""}`,`CEA / ${metricLabels[metric]?.[1]||""}`,"差值 CEA−Cantera","相对差 / %","比较条件"],rows)+`</details>`+
+    table(["点","氧燃质量比 / ε",`Cantera / ${metricLabels[metric]?.[1]||""}`,`CEA / ${metricLabels[metric]?.[1]||""}`,"差值 CEA−Cantera","相对差 / %","比较条件"],rows)+`</details>`+
     message("相对差 = (CEA − Cantera) / |Cantera| × 100%。曲线和差值用于定位模型差异；小差值不等于真实发动机的预测误差。")+
     renderThermoStations(result,selection)+comparisonRangeEvidence(points)+provenancePanel(result.provenance);
 }
@@ -242,8 +242,8 @@ function comparisonControls(form){
 function checkResults(section,kind){
   if(!section)return message(kind==="experiment"?"尚无试验测量记录。请填写独立测量与工况，再进行试验验证。":"尚未运行本项校核。", "note");
   const checks=Array.isArray(section.checks)?section.checks:[];
-  const labels={condition_ambient_pressure:"可比工况 · 环境压力",condition_cycle_type:"可比工况 · 循环方式",condition_fuel_inlet_temp:"可比工况 · 燃料入口温度",condition_gg_layout:"可比工况 · GG 轴系布局",condition_of_ratio:"可比工况 · 总体氧燃比 O/F",condition_ox_inlet_temp:"可比工况 · 氧化剂入口温度",condition_pc:"可比工况 · 燃烧室压力",condition_propellant_pair:"可比工况 · 推进剂组合",condition_fuel_tank_pressure:"可比工况 · 燃料贮箱压力",condition_ox_tank_pressure:"可比工况 · 氧化剂贮箱压力"};
-  const names={gg:"燃气发生器循环（GG）",ffsc:"全流量分级燃烧（FFSC）",single_shaft:"单轴",dual_shaft:"双轴",lox_methane:"液氧 / 甲烷",lox_kerosene:"液氧 / 正十二烷（煤油替代）",liquid:"液相",gas:"气相",supercritical:"超临界",supercritical_gas:"超临界气相",supercritical_liquid:"超临界液相",critical_point:"临界点"};
+  const labels={condition_ambient_pressure:"可比工况 · 环境压力",condition_cycle_type:"可比工况 · 循环方式",condition_fuel_inlet_temp:"可比工况 · 燃料入口温度",condition_of_ratio:"可比工况 · 总体氧燃质量比",condition_ox_inlet_temp:"可比工况 · 氧化剂入口温度",condition_pc:"可比工况 · 燃烧室压力",condition_propellant_pair:"可比工况 · 推进剂组合",condition_fuel_tank_pressure:"可比工况 · 燃料贮箱压力",condition_ox_tank_pressure:"可比工况 · 氧化剂贮箱压力"};
+  const names={ffsc:"全流量分级燃烧（FFSC）",lox_methane:"液氧 / 甲烷",lox_kerosene:"液氧 / 正十二烷（煤油替代）",liquid:"液相",gas:"气相",supercritical:"超临界",supercritical_gas:"超临界气相",supercritical_liquid:"超临界液相",critical_point:"临界点"};
   const named=value=>Object.hasOwn(names,value)?names[value]:value;
   const format=(value,unit)=>`${typeof value==="string"?escape(named(value)):escape(number(value))}${finite(value)&&unit?` <small>${escape(unit)}</small>`:""}`;
   let headers,rows;
@@ -264,16 +264,16 @@ export function renderValidationResult(result,tab,metric="Isp_vac_s",propertySel
 }
 
 function controls(form,tab){
-  if(tab==="gas_handoff")return message("读取所选设计记录各燃气端口的完整组成、元素流、焓基准和总／静态定义，并运行独立 EOS／凝聚相筛查及实际主室入口复核。不会使用当前草稿补全历史记录，不会把候选物性模型替换进生产循环。")+message("主室复核沿用该记录真实涡轮排气的质量流量、元素和焓；这里没有可覆盖这些条件的温度或混合比输入。缺少数据、后端不可用或超出模型范围时保留原因。","note");
-  if(tab==="thermochemistry")return message("纯推进剂一次燃烧是独立理论性能基线，用于对齐入口焓、产物集合和喷管假设后检查 Cantera／CEA 的差异。它不是 FFSC 实际主燃烧室复核；实际两股涡轮排气请到“燃气交接与筛查”查看。")+`<div class="validation-scan-fields"><label>计算方式<select data-validation-field="scan_mode">${[["range","O/F 等间隔扫描"],["point","单点校核"],["list","自定义 O/F 点"]].map(([key,label])=>`<option value="${key}" ${form.scan_mode===key?"selected":""}>${label}</option>`).join("")}</select></label>${input("pc_MPa","燃烧室压力 / MPa",form.pc_MPa,'type="number" min="0" step="any"')}${form.scan_mode==="range"?`${input("of_start","O/F 起始值",form.of_start,'type="number" min="0.05" max="20" step="any"')}${input("of_end","O/F 终止值",form.of_end,'type="number" min="0.05" max="20" step="any"')}${input("of_count","O/F 点数",form.of_count,'type="number" min="2" max="20" step="1"')}`:input("of_values",form.scan_mode==="point"?"O/F 混合比":"O/F 点（逗号分隔）",form.of_values)}${input("eps_values","膨胀比 ε（可填多个）",form.eps_values,'placeholder="如 40,80,120"')}${input("T_fuel_K","纯燃料入口温度 / K",form.T_fuel_K,'type="number" min="0" step="any"')}${input("T_ox_K","纯氧化剂入口温度 / K",form.T_ox_K,'type="number" min="0" step="any"')}<label>喷管膨胀假设<select data-validation-field="mode">${[["equilibrium","平衡流"],["frozen_chamber","燃烧室冻结"],["frozen_throat","喉部冻结"]].map(([key,label])=>`<option value="${key}" ${form.mode===key?"selected":""}>${label}</option>`).join("")}</select></label></div>${comparisonControls(form)}<div class="validation-scan-summary" data-validation-scan-summary>${scanSummary(form)}</div><details class="validation-scope-help"><summary>扫描条件说明</summary><p>扫描初值以来源设计点的 O/F 为中心展开，可自行修改；膨胀比、压力和纯推进剂入口温度复制自来源记录，不复制涡轮排气温度；常用液氧甲烷基线是甲烷 110 K、氧 90 K，实际以本次输入为准。若要复现原桌面的 24 点扫描，可填 O/F 2.5–5.0、8 点，膨胀比 40,80,120。</p><p>用于独立的推进剂燃烧与喷管基准；不等同于 GG 冷却后的主室入口或 FFSC 预燃室排气。每次最多 60 个 O/F × ε 组合。</p></details>`;
+  if(tab==="gas_handoff")return message("读取所选设计记录各燃气端口的完整组成、元素流、焓基准和总／静态定义，并运行独立 EOS／凝聚相筛查及实际主室入口复核。不会使用当前草稿补全历史记录，不会把候选物性模型替换进生产循环。")+message("主室复核沿用该记录真实涡轮排气的质量流量、元素和焓；这里没有可覆盖这些条件的温度或氧燃质量比输入。缺少数据、后端不可用或超出模型范围时保留原因。","note");
+  if(tab==="thermochemistry")return message("纯推进剂一次燃烧是独立理论性能基线，用于对齐入口焓、产物集合和喷管假设后检查 Cantera／CEA 的差异。它不是 FFSC 实际主燃烧室复核；实际两股涡轮排气请到“燃气交接与筛查”查看。")+`<div class="validation-scan-fields"><label>计算方式<select data-validation-field="scan_mode">${[["range","氧燃质量比 等间隔扫描"],["point","单点校核"],["list","自定义 氧燃质量比 点"]].map(([key,label])=>`<option value="${key}" ${form.scan_mode===key?"selected":""}>${label}</option>`).join("")}</select></label>${input("pc_MPa","燃烧室压力 / MPa",form.pc_MPa,'type="number" min="0" step="any"')}${form.scan_mode==="range"?`${input("of_start","氧燃质量比 起始值",form.of_start,'type="number" min="0.05" max="20" step="any"')}${input("of_end","氧燃质量比 终止值",form.of_end,'type="number" min="0.05" max="20" step="any"')}${input("of_count","氧燃质量比 点数",form.of_count,'type="number" min="2" max="20" step="1"')}`:input("of_values",form.scan_mode==="point"?"氧燃质量比":"氧燃质量比 点（逗号分隔）",form.of_values)}${input("eps_values","膨胀比 ε（可填多个）",form.eps_values,'placeholder="如 40,80,120"')}${input("T_fuel_K","纯燃料入口温度 / K",form.T_fuel_K,'type="number" min="0" step="any"')}${input("T_ox_K","纯氧化剂入口温度 / K",form.T_ox_K,'type="number" min="0" step="any"')}<label>喷管膨胀假设<select data-validation-field="mode">${[["equilibrium","平衡流"],["frozen_chamber","燃烧室冻结"],["frozen_throat","喉部冻结"]].map(([key,label])=>`<option value="${key}" ${form.mode===key?"selected":""}>${label}</option>`).join("")}</select></label></div>${comparisonControls(form)}<div class="validation-scan-summary" data-validation-scan-summary>${scanSummary(form)}</div><details class="validation-scope-help"><summary>扫描条件说明</summary><p>扫描初值以来源设计点的 氧燃质量比 为中心展开，可自行修改；膨胀比、压力和纯推进剂入口温度复制自来源记录，不复制涡轮排气温度；常用液氧甲烷基线是甲烷 110 K、氧 90 K，实际以本次输入为准。若要复现原桌面的 24 点扫描，可填 氧燃质量比 2.5–5.0、8 点，膨胀比 40,80,120。</p><p>用于独立的推进剂燃烧与喷管基准；不等同于 FFSC 预燃室排气。每次最多 60 个 氧燃质量比 × ε 组合。</p></details>`;
   if(tab==="conservation")return message("按所选已完成设计记录检查质量流量与轴功率闭合。仅检查系统数值一致性，不替代热化学模型检查或试验验证；当前草稿不参与本次校核。");
   if(tab==="properties")return `<div class="validation-property-inputs"><label>分析方式<select data-validation-field="property_mode">${[["points","系统状态点对比"],["temperature","温度扫描 · 定压"],["pressure","压力扫描 · 定温"]].map(([key,label])=>`<option value="${key}" ${form.property_mode===key?"selected":""}>${label}</option>`).join("")}</select></label>${form.property_mode==="points"?textarea("property_points","状态点：每行 工质, 温度 K, 压力 MPa",form.property_points,'rows="3" spellcheck="false"'): `<label>扫描工质<select data-validation-field="property_fluid">${[["Oxygen","氧气 / 液氧"],["Methane","甲烷"],["n-Dodecane","正十二烷（煤油替代）"]].map(([key,label])=>`<option value="${key}" ${form.property_fluid===key?"selected":""}>${label}</option>`).join("")}</select></label>${input("property_start",form.property_mode==="temperature"?"起始温度 / K":"起始压力 / MPa",form.property_start,'type="number" min="0" step="any"')}${input("property_end",form.property_mode==="temperature"?"终止温度 / K":"终止压力 / MPa",form.property_end,'type="number" min="0" step="any"')}${input("property_count","扫描点数",form.property_count,'type="number" min="2" max="20" step="1"')}${input("property_fixed",form.property_mode==="temperature"?"固定压力 / MPa":"固定温度 / K",form.property_fixed,'type="number" min="0" step="any"')}`}</div><label class="validation-checkbox"><input data-validation-field="compare_refprop" type="checkbox" ${form.compare_refprop?"checked":""}>同时对比本机 REFPROP（通过 CoolProp 接口调用）</label><p class="fine">当前循环使用 CoolProp 的 HEOS 模型计算纯推进剂物性；这里用 REFPROP 作独立数据对照。两者都不替代 Cantera / CEA 的燃烧产物化学平衡。</p><div class="validation-scan-summary" data-property-scan-summary>${propertySummary(form)}</div><details class="validation-scope-help"><summary>状态点来源与物性对比说明</summary><p>支持 Oxygen、Methane、n-Dodecane，每次最多 20 点。状态点初值复制自所选设计记录的主泵入口，缺失时使用已记录的贮箱或供给输入；缺项留空。切换扫描方式或工质时，扫描初值设为上述状态的 ±10%，可自行修改；未包含该工质时请填写条件。</p><p>逐点检查两端的实际适用范围与相态，失败点保留原因。焓、熵采用共同参考态后的增量对比；原始绝对值仅供查阅。差异不设自动精度验收阈值。REFPROP 不可用时不会生成替代数据。</p></details>`;
   return `<label>数据用途<select data-validation-field="experiment_role"><option value="holdout" ${form.experiment_role==="holdout"?"selected":""}>独立验证数据（未用于标定）</option><option value="calibration" ${form.experiment_role==="calibration"?"selected":""}>标定数据（不能作为独立验证）</option></select></label>`+
     message(`来源架构：${form.architecture_label}`)+`<div class="validation-form-grid">`+
-    input("condition_pc_MPa","试验燃烧室压力 / MPa",form.condition_pc_MPa)+input("condition_of","试验 O/F",form.condition_of)+
+    input("condition_pc_MPa","试验燃烧室压力 / MPa",form.condition_pc_MPa)+input("condition_of","试验 氧燃质量比",form.condition_of)+
     input("condition_fuel_K","试验燃料入口温度 / K",form.condition_fuel_K)+input("condition_ox_K","试验氧化剂入口温度 / K",form.condition_ox_K)+
     input("condition_ambient_MPa","试验环境压力 / MPa",form.condition_ambient_MPa)+input("condition_pc_tolerance","压力匹配容差 / MPa",form.condition_pc_tolerance)+
-    input("condition_of_tolerance","O/F 匹配容差",form.condition_of_tolerance)+input("condition_temp_tolerance","入口温度匹配容差 / K",form.condition_temp_tolerance)+
+    input("condition_of_tolerance","氧燃质量比 匹配容差",form.condition_of_tolerance)+input("condition_temp_tolerance","入口温度匹配容差 / K",form.condition_temp_tolerance)+
     input("condition_ambient_tolerance","环境压力匹配容差 / MPa",form.condition_ambient_tolerance)+
     `</div><label class="validation-checkbox"><input data-validation-field="conditions_confirmed" type="checkbox" ${form.conditions_confirmed?"checked":""}>已核对试验工况与所示推进剂、循环、轴系；以上条件确为该次试验条件。</label>`+
     table(["测量指标","实测值","判定容差（绝对）","测量不确定度（绝对）"],[["exp_thrust","环境压力下推力","kN"],["exp_isp","环境压力下比冲","s"],["exp_mdot","总流量","kg/s"]].map(([name,label,unit])=>[

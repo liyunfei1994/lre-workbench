@@ -19,11 +19,11 @@ LIMITATIONS=[
     '守恒审计和解析极限对照属于数值验证；不能替代有边界测量及不确定度的独立关机/再启动试验。',
 ]
 MODES={
-    'gas':('气相关机与给定再点火','shutdown_gas','ShutdownGasModel',
+    'gas':('气相关机与给定再点火','lre_workbench.operations.shutdown_gas','ShutdownGasModel',
            '氧气/甲烷有限速率反应容腔：首次点火 → 关阀余气泄放 → 热浸 → 再次供给与给定热脉冲。'),
-    'inventory':('残余工质泄放与再充填','shutdown_inventory','ShutdownInventoryModel',
+    'inventory':('残余工质泄放与再充填','lre_workbench.operations.shutdown_inventory','ShutdownInventoryModel',
                  '纯工质均相气液库存与金属壁：关入口、泄放、余热交换与再次充填；出口含理想止回。'),
-    'rotor':('轴系惰转与液压反流','shutdown_rotor','ShutdownRotorModel',
+    'rotor':('轴系惰转与液压反流','lre_workbench.operations.shutdown_rotor','ShutdownRotorModel',
              '满液管网、四象限泵、实际阀位和转子动力学：撤除驱动力矩、关阀、惰转与再次驱动。'),
 }
 
@@ -76,6 +76,8 @@ def _module(mode):
 
 
 def _source(source,mode=None):
+    from webapp.design_scope import require_supported_source
+    require_supported_source(source)
     calc=(source.get('result') or {}).get('calculation') or {}
     if source.get('status')!='succeeded' or not isinstance(calc.get('inputs'),dict):
         raise ValueError('请选择已完成的稳态设计记录用于追溯。')
@@ -108,7 +110,7 @@ def descriptors(mode,defaults):
     cs=defaults['circuits'][0]
     cp=[deepcopy(p) for p in CIRCUIT_PARAMETERS if p['key'] in cs]
     if mode=='inventory':
-        cp += [dict(key='fluid',label='独立研究纯工质',group='容腔与初态',description='更换工质后须相应设置有效温压；正十二烷是煤油代理。',options=[dict(value=v,label=l) for v,l in [('Oxygen','氧'),('Methane','甲烷'),('n-Dodecane','正十二烷（煤油代理）')]]),
+        cp += [dict(key='fluid',label='独立研究纯工质',group='容腔与初态',description='更换工质后须相应设置有效温压。',options=[dict(value=v,label=l) for v,l in [('Oxygen','氧'),('Methane','甲烷')]]),
                dict(key='initial_mode',label='初始物性输入',group='容腔与初态',options=[dict(value='PT',label='压力与温度（单相）'),dict(value='PQ',label='压力与蒸气质量分数（饱和）')])]
         for stage,cn in [('shutdown','停机阶段'),('restart','再充填阶段')]:
             for port,label in [('inlet','入口'),('outlet','出口')]:
@@ -156,6 +158,8 @@ def normalize_request(value,source):
     module=_module(mode);settings=module.default_settings();custom=value.get('settings',{})
     if not isinstance(custom,dict) or set(custom)-set(settings):raise ValueError('研究设置包含未知字段。')
     settings.update(deepcopy(custom))
+    if mode=='inventory' and any(c.get('fluid') not in ('Oxygen','Methane') for c in settings.get('circuits',[]) if isinstance(c,dict)):
+        raise ValueError('库存研究仅支持氧与甲烷纯工质。')
     # Every core owns its strict physical contract; UI display bounds are not
     # silently substituted for the governing model's validation.
     settings=module.validate_settings(settings)
@@ -167,7 +171,7 @@ def normalize_request(value,source):
 
 
 def calculate_shutdown(request,source,progress=None):
-    from version import APP_VERSION
+    from lre_workbench.version import APP_VERSION
     request=normalize_request(request,source);mode=request['mode'];module=_module(mode)
     model=getattr(module,MODES[mode][2])(request['settings'])
     result=dict(schema_version=1,application_version=APP_VERSION,analysis_type='shutdown_restart_research',mode=mode,

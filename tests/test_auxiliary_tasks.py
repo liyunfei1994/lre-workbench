@@ -14,12 +14,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from PySide6.QtCore import QThreadPool, QTimer
 from PySide6.QtWidgets import QApplication
-from auxiliary_worker import CallableWorker
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
-from ui_chamber_design import _PreviewWorker
-from core import EngineInputs
-from workbench import WorkbenchWindow
-import fea_chamber
+from lre_workbench.desktop.workers import CallableWorker
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.desktop.chamber_design import _PreviewWorker
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.desktop.workbench import WorkbenchWindow
+import lre_workbench.analysis.chamber_fea as fea_chamber
 
 
 class AuxiliaryTaskTests(unittest.TestCase):
@@ -91,7 +91,7 @@ class AuxiliaryTaskTests(unittest.TestCase):
         worker.setAutoDelete(False)
         events = self.collect(worker)
         pool = QThreadPool()
-        with patch("ui_chamber_design.cd.marching_preview", side_effect=preview):
+        with patch('lre_workbench.desktop.chamber_design.cd.marching_preview', side_effect=preview):
             pool.start(worker)
             self.wait_for(entered.is_set)
             worker.request_cancel()
@@ -136,7 +136,7 @@ class AuxiliaryTaskTests(unittest.TestCase):
         def render(payload):
             rendered.append((get_ident(), payload))
         main_thread = get_ident()
-        with patch("fea_chamber.solve_from_wallfield", side_effect=solve):
+        with patch('lre_workbench.analysis.chamber_fea.solve_from_wallfield', side_effect=solve):
             with patch.object(w, "_show_throat_fea_result", side_effect=render):
                 w._run_throat_fea()
                 self.wait_for(entered.is_set)
@@ -164,7 +164,7 @@ class AuxiliaryTaskTests(unittest.TestCase):
             entered.set()
             release.wait(5)
             return [fea_chamber.FEAResult(ok=False)]
-        with patch("fea_chamber.compare_liner_materials_2d", side_effect=compare):
+        with patch('lre_workbench.analysis.chamber_fea.compare_liner_materials_2d', side_effect=compare):
             with patch.object(w, "_show_material_comparison_result") as render:
                 w._run_material_comparison_2d()
                 self.wait_for(entered.is_set)
@@ -189,7 +189,7 @@ class AuxiliaryTaskTests(unittest.TestCase):
             release.wait(5)
             return fea_chamber.FEAResult(ok=False)
         with patch.object(panel, "_get_geom", return_value=w._last_geometry_for_fea):
-            with patch("fea_chamber.solve_from_wallfield", side_effect=solve):
+            with patch('lre_workbench.analysis.chamber_fea.solve_from_wallfield', side_effect=solve):
                 with patch.object(panel, "_show_station_fea_result") as render:
                     panel._run_station_fea()
                     self.wait_for(entered.is_set)

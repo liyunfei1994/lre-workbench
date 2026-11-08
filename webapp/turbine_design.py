@@ -5,6 +5,7 @@ selected mechanism. ``turbine_design_view`` only audits saved data. A complete
 global setup is not a blade design, a validated CFD boundary, or a CFturbo file.
 """
 from copy import deepcopy
+from webapp.design_scope import require_supported_source
 import hashlib
 import json
 import math
@@ -68,10 +69,8 @@ def _json_safe(value):
 
 
 def _state_keys(component_key):
-    if component_key == "gg_turbine":
-        return "gg_outlet", "gg_turbine_exhaust"
-    if component_key.startswith("gg_turbine_"):
-        return "gg_outlet", component_key + "_exhaust"
+    if component_key not in ("ox_preburner_turbine", "fuel_preburner_turbine"):
+        raise ValueError("当前平台仅支持 FFSC 富氧和富燃涡轮。")
     prefix = "ox" if component_key.startswith("ox_") else "fuel"
     return prefix + "_preburner_outlet", prefix + "_turbine_exhaust"
 
@@ -262,7 +261,7 @@ def _source_readiness_checks(result):
         # Same lazy import boundary used by webapp.validation_checks. Importing
         # the serializer initializes src imports; it performs no science solve.
         from webapp.solver import EngineInputs  # noqa: F401
-        from convergence import numerical_convergence
+        from lre_workbench.solvers.convergence import numerical_convergence
         numerical = numerical_convergence(calc)
         known_failure = (numerical["status"] == "fail" or convergence.get("status") == "fail"
                          or _dict(assessment.get("numerical")).get("status") == "fail")
@@ -452,16 +451,12 @@ def _gas_view(result, side, component_key, point, inlet, checks):
 
 
 def _power_matching(point, components, inputs, side, component_key, checks):
-    gg = component_key.startswith("gg_turbine")
-    pump_keys = ["ox_pump", "fuel_pump"] if side == "shared" else ["ox_pump" if side == "ox" else "fuel_pump"]
+    pump_keys = ["ox_pump" if side == "ox" else "fuel_pump"]
     pump_powers = [_num(_dict(_dict(components.get(key)).get("outputs")).get("power_W"), positive=True) for key in pump_keys]
     demand = sum(pump_powers) if all(p is not None for p in pump_powers) else None
-    mech = _num(inputs.get("gg_mech_efficiency"), positive=True) if gg else None
-    delivered = _product(point["power_w"], mech) if gg else point["power_w"]
+    delivered = point["power_w"]
     power_checks = []
-    if gg and (mech is None or mech > 1):
-        _check(power_checks, "mechanical_efficiency", "GG 机械效率", "missing" if mech is None else "conflict", "必须使用本记录保存的 gg_mech_efficiency；不以涡轮等熵效率或默认值代替。")
-    note = "GG 使用保存机械效率计算传递功率。" if gg else "FFSC 当前保存循环采用涡轮气体实际功率直接匹配同轴主泵；未另建轴承/密封机械损失预算，不据此填入 CFturbo ηm 或 ηadd。"
+    note = "FFSC 当前保存循环采用涡轮气体实际功率直接匹配同轴主泵；未另建轴承/密封机械损失预算，不据此填入 CFturbo ηm 或 ηadd。"
     if delivered is None or demand is None:
         _check(power_checks, "shaft_power_balance", "轴系功率匹配", "missing", "缺少涡轮功率、同轴主泵功率或机械效率。")
     else:
@@ -473,7 +468,7 @@ def _power_matching(point, components, inputs, side, component_key, checks):
         _field("isentropic_power_w", "等熵参考功率 PQ", _product(point["mass_flow_kg_s"], point["isentropic_drop_j_kg"]), "W", "derived", "PQ=ṁ·Δhs；与实际气体功率及轴端输出功率不同。"),
         _field("actual_gas_power_w", "实际气体功率", point["power_w"], "W", source="components." + component_key + ".outputs.turbine_power_W"),
         _field("turbine_isentropic_efficiency", "系统涡轮等熵效率", point["efficiency"], note="ηt=Δha/Δhs；是整台系统涡轮效率，未自动分配给各叶排。"),
-        _field("mechanical_efficiency", "独立机械效率 ηm", mech, note="仅 GG 的已保存机械效率；它也不等于 CFturbo 的附加流动损失效率。", source="inputs.gg_mech_efficiency" if gg else "未单独建模"),
+        _field("mechanical_efficiency", "独立机械效率 ηm", None, note="循环未单独建模机械损失；不能填入默认机械效率。", source="未单独建模"),
         _field("additional_efficiency", "CFturbo 附加效率 ηadd", None, note="独立的附加非典型流动损失项；本系统未保存该预算，不能复制 ηt、ηm，也不自动填 1。"),
         _field("delivered_power_w", "循环轴系记账功率", delivered, "W", "derived", note),
         _field("pump_power_required_w", "同轴主泵所需功率", demand, "W", "derived", "只汇总实际同轴主泵，增压泵外部功源不重复计入。", ", ".join(pump_keys)),
@@ -511,17 +506,10 @@ def _build(result, side, component_key, prefix, label, components, inputs, recor
     for end, state, state_key in (("in", inlet, inlet_key), ("out", outlet, outlet_key)):
         _equal(checks, "node_pressure_" + end, "部件压力与节点 " + state_key, point["pressure_" + end + "_pa"], state.get("pressure"))
         _equal(checks, "node_temperature_" + end, "部件温度与节点 " + state_key, point["temperature_" + end + "_k"], state.get("temperature"))
-        # GG parallel inlet is the common generator node, whose mass is total.
-        if end != "in" or not component_key.startswith("gg_turbine_"):
-            _equal(checks, "node_mass_" + end, "部件流量与节点 " + state_key, point["mass_flow_kg_s"], state.get("mass_flow"))
+        _equal(checks, "node_mass_" + end, "部件流量与节点 " + state_key, point["mass_flow_kg_s"], state.get("mass_flow"))
     actual_from_states = (point["inlet_enthalpy_j_kg"] - point["outlet_enthalpy_j_kg"]
                           if point["inlet_enthalpy_j_kg"] is not None and point["outlet_enthalpy_j_kg"] is not None else None)
     _equal(checks, "node_enthalpy_drop", "实际焓降与保存节点焓差", point["actual_drop_j_kg"], actual_from_states)
-    if component_key.startswith("gg_turbine_"):
-        branch_flows = [_num(_dict(_dict(components.get(k)).get("outputs")).get("mass_flow_kgs"), positive=True)
-                        for k in ("gg_turbine_ox", "gg_turbine_fuel")]
-        total = sum(branch_flows) if all(value is not None for value in branch_flows) else None
-        _equal(checks, "parallel_mass", "GG 两支路流量与公共入口", total, inlet.get("mass_flow"))
     try:
         if _composition(inlet) != _composition(outlet):
             # Float noise from a saved Cantera reconstitution is acceptable.
@@ -581,19 +569,19 @@ def _build(result, side, component_key, prefix, label, components, inputs, recor
                 geometry["status"] = "conflict"
                 _check(checks, "geometry_integrity", "概念几何快照完整性", "conflict", geometry["note"])
     stage = {"fields": [
-        _field("stages", "保存级数", point["stages"], source=raw_source + "n_stages_recommended"),
+        _field("stages", "保存的候选级数", point["stages"], source=raw_source + "n_stages_recommended", note="来自用户初选或整机速比区间经验估算，尚未完成逐级气动校核。"),
         _field("isentropic_drop_j_kg", "整台等熵焓降", point["isentropic_drop_j_kg"], "J/kg", source=raw_source + "isentropic_drop_Jkg"),
         _field("actual_drop_j_kg", "整台实际焓降", point["actual_drop_j_kg"], "J/kg", source=raw_source + "actual_drop_Jkg"),
         _field("mean_diameter_m", "系统估算平均直径", point["mean_diameter_m"], "m", note="保留系统已有直径及其限幅；不是已经优化的详细设计直径。"),
-        _field("u_over_c_target", "目标 U/C0", point["u_over_c_target"], note="目标值不等于限幅后实际速比。"),
-        _field("u_over_c_actual", "实际 U/C0", point["u_over_c_actual"]),
-        _field("reaction_degree_target", "系统反动度目标", point["reaction_degree_target"], note="保存目标仅用于后续设计约束；不代表各级已解反动度。"),
+        _field("u_over_c_target", "速比初选值 U/C0", point["u_over_c_target"], note="用于中径初估；中径限幅后计算的速比可能偏离此值。"),
+        _field("u_over_c_actual", "按初估中径计算的 U/C0", point["u_over_c_actual"], note="由保存的中径、转速与整台等熵焓降计算；不是经性能验证的速比。"),
+        _field("reaction_degree_target", "反动度初选值", point["reaction_degree_target"], note="保存的初选假设；不代表各级已解反动度或优化结果。"),
         _field("per_stage_pressure_ratio", "逐级压比", None, note="无逐级热力学状态求解，不能等分/开方整机压比填入。"),
     ], "missing_requirements": ["逐级负荷与焓降分配、反动度分配及其适用假设", "各叶排速度三角形的边界约束与可行性核对", "叶片数量、型线、扭转、弦长、厚度、喉部及泄漏/间隙预算", "逐级总静态、损失模型、结构与材料验证"],
-             "note": "此处仅移交保存的整机标量；不从反动度目标和概念环道自动编造逐级压比、静态或叶型。"}
+             "note": "此处列出保存的循环设计点与部件初选值；逐级压比、静态和叶型仍需后续设计。"}
     try:
         from webapp.turbine_meanline import meanline_view
-        meanline = meanline_view(outputs, inputs, "fuel" if side == "shared" else side)
+        meanline = meanline_view(outputs, inputs, side)
     except ImportError:
         meanline = {"available": False, "status": "disabled", "reason": "未启用独立的一维级设计。"}
     _update_stage_handoff(stage, meanline)
@@ -656,6 +644,7 @@ def turbine_design_view(result, record_id=None):
     try:
         if not isinstance(result, dict):
             raise ValueError("请选择已经保存的系统计算记录。")
+        require_supported_source({"result": result})
         source_checks = _source_readiness_checks(result)
         saved = result.get("turbine_design")
         if saved is not None:
@@ -664,7 +653,7 @@ def turbine_design_view(result, record_id=None):
             if saved.get("source_fingerprint_version") != SOURCE_FINGERPRINT_VERSION:
                 raise ValueError("保存的任务书来源指纹版本无法识别；不能按另一种指纹约定验证。")
             turbines = saved.get("turbines")
-            if not isinstance(turbines, dict) or set(turbines) not in ({"ox", "fuel"}, {"shared"}):
+            if not isinstance(turbines, dict) or set(turbines) != {"ox", "fuel"}:
                 raise ValueError("保存的涡轮设计任务书轴系拓扑无效。")
             failure_labels = {side: _dict(value).get("label", "涡轮设计任务书") for side, value in turbines.items()}
             if "calculation" in result and saved.get("source_sha256") != _result_fingerprint(result):
@@ -674,6 +663,8 @@ def turbine_design_view(result, record_id=None):
                 if not isinstance(value, dict) or value.get("design_sha256") != _design_digest(value):
                     answer["turbines"][side] = _failure("涡轮设计任务书", record_id, "保存的任务书校验值不一致；不从当前输入补建。")
                     continue
+                if _dict(value.get("source")).get("component_key") != side + "_preburner_turbine":
+                    raise ValueError("保存的任务书不是 FFSC 涡轮来源。")
                 value = deepcopy(value)
                 value["source"]["record_id"] = record_id
                 if "calculation" in result:

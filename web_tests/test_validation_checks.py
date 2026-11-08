@@ -9,7 +9,7 @@ from webapp import validation_checks as v
 from web_tests.convergence_fixture import converged_evidence
 
 
-def source(cycle="gg", layout="single_shaft"):
+def source(cycle="ffsc", layout="dual_shaft"):
     inputs = {"propellant_pair": "lox_methane", "cycle_type": cycle, "gg_layout": layout,
               "pc": 10e6, "of_ratio": 3, "fuel_inlet_temp": 100, "ox_inlet_temp": 90,
               "ambient_pressure": 101325}
@@ -35,7 +35,7 @@ def source(cycle="gg", layout="single_shaft"):
 
 def experiment():
     return {"role": "holdout", "conditions": {
-        "propellant_pair": "lox_methane", "cycle_type": "gg", "gg_layout": "single_shaft",
+        "propellant_pair": "lox_methane", "cycle_type": "ffsc",
         "pc": {"value": 10, "unit": "MPa", "tolerance": .01},
         "of_ratio": {"value": 3, "unit": "1", "tolerance": .01},
         "fuel_inlet_temp": {"value": 100, "unit": "K", "tolerance": .2},
@@ -50,7 +50,7 @@ def checks(result):
 
 class ConservationTests(unittest.TestCase):
     def test_three_architectures_recompute_mass_and_shaft_closure(self):
-        for cycle, layout in (("gg", "single_shaft"), ("gg", "dual_shaft"), ("ffsc", "dual_shaft")):
+        for cycle, layout in (("ffsc", "dual_shaft"),):
             with self.subTest(cycle=cycle, layout=layout):
                 record = source(cycle, layout)
                 before = deepcopy(record)
@@ -67,14 +67,14 @@ class ConservationTests(unittest.TestCase):
 
     def test_perturbed_mass_and_power_do_not_trust_reported_ratios(self):
         record = source()
-        record["calculation"]["summary"].update(mdot_chamber_kg_s=96, gg_turbine_power_MW=2, power_balance_ratio=1)
+        record["calculation"]["summary"].update(mdot_LO_ox_exhaust_kg_s=68, turbine_power_MW=2, power_balance_ratio=1)
         result = v.conservation_checks(record)
         self.assertEqual(result["status"], "fail")
-        self.assertEqual(checks(result)["chamber_gg_split"]["difference_si"], -1)
+        self.assertEqual(checks(result)["exhaust_mass"]["difference_si"], -1)
         self.assertEqual(checks(result)["shaft_power"]["status"], "fail")
 
     def test_dual_shaft_detects_compensating_side_errors(self):
-        record = source("gg", "dual_shaft")
+        record = source("ffsc", "dual_shaft")
         record["calculation"]["summary"].update(ox_turbine_power_MW=1, fuel_turbine_power_MW=2)
         rows = checks(v.conservation_checks(record))
         self.assertEqual(rows["shaft_power"]["status"], "pass")
@@ -329,8 +329,7 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(row["uncertainty_si"], 1000)
 
     def test_mismatched_and_missing_conditions_cannot_validate_predictions(self):
-        for key, replacement in (("propellant_pair", "lox_kerosene"), ("gg_layout", "dual_shaft"),
-                                 ("pc", {"value": 12, "unit": "MPa", "tolerance": .1})):
+        for key, replacement in (("pc", {"value": 12, "unit": "MPa", "tolerance": .1}),):
             request = experiment()
             request["conditions"][key] = replacement
             result = v.experiment_checks(source(), request)

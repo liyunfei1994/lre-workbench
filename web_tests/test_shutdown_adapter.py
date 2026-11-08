@@ -19,12 +19,11 @@ class ShutdownAdapterTests(unittest.TestCase):
             self.assertNotEqual(req['settings'].get('initial_pressure_Pa'),source['result']['calculation']['inputs']['pc'])
         self.assertEqual(original,source)
 
-    def test_kerosene_never_runs_methane_reaction_substitute(self):
-        source=source_fixture('gg',True)
-        modes={m['value']:m for m in shutdown_setup(source)['modes']}
-        self.assertFalse(modes['gas']['ready']);self.assertTrue(modes['inventory']['ready'])
-        self.assertTrue(modes['rotor']['ready'])
-        with self.assertRaises(ValueError):normalize_request(dict(source_job_id=source['id'],mode='gas'),source)
+    def test_removed_cycle_and_propellant_cannot_start_any_research_mode(self):
+        for source in (source_fixture('gg'),source_fixture('ffsc',True)):
+            with self.assertRaises(ValueError):shutdown_setup(source)
+            for mode in ('gas','inventory','rotor'):
+                with self.assertRaises(ValueError):normalize_request(dict(source_job_id=source['id'],mode=mode),source)
 
     def test_all_modes_keep_serializable_progress_events_and_frozen_charts(self):
         source=source_fixture();original=deepcopy(source)

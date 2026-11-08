@@ -8,6 +8,8 @@ import hashlib
 import json
 import math
 
+from webapp.pump_design import pump_design_handoff
+
 
 G = 9.80665
 METHOD = "radial_impeller_meridional_v1"
@@ -257,4 +259,5 @@ def pump_geometry_view(result, record_id=""):
             pump = {"available": False, "label": "液氧主泵" if side == "ox" else "燃料主泵",
                     "source": deepcopy(source), "reason": str(exc), "design_point": {}, "dimensions": {}}
         response["pumps"][side] = pump
+    response["design_handoff"] = pump_design_handoff(result, response["pumps"])
     return response

@@ -74,7 +74,7 @@ const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {
 
 test('controller shows frozen source diagnostics without blocking an independent ready thermal unit',async()=>{
  const view=container(),calls=[];const ui=mountChilldown(view,{getContext:context,api:async(path,method,body)=>{calls.push({path,method,body});return path.includes('/setup?')?config():method==='POST'?{id:'new',status:'queued'}:[];}});
- await ui.refresh();assert.match(view.innerHTML,/原设计交叉供给压力不足/);assert.match(view.innerHTML,/-4.367 MPa/);assert.match(view.innerHTML,/左侧当前编辑参数不参与/);assert.doesNotMatch(view.innerHTML,/data-chill-action="run" disabled/);assert.match(view.innerHTML,/step="0.01"/);
+ await ui.refresh();assert.match(view.innerHTML,/原设计交叉供给压力不足/);assert.match(view.innerHTML,/-4.367 MPa/);assert.match(view.innerHTML,/概念设计草稿中的参数不参与/);assert.doesNotMatch(view.innerHTML,/data-chill-action="run" disabled/);assert.match(view.innerHTML,/step="0.01"/);
  view.field('initial_pressure_Pa','0.3','ox');view.action('run');await tick();assert.equal(calls.find(call=>call.method==='POST').body.circuits[0].initial_pressure_Pa,3e5);ui.onLeave();
 });
 test('mode switching shows only the active temperature or quality field and keeps other fluid independent',async()=>{

@@ -7,14 +7,15 @@ transient studies and unrelated metadata are intentionally outside its scope.
 import hashlib
 import json
 import math
+from webapp.design_scope import require_supported_source
 
 
 _ABS_TOL = 1e-8
 _REL_TOL = 2e-7
-_TURBINES = ("ox_preburner_turbine", "fuel_preburner_turbine",
-             "gg_turbine", "gg_turbine_ox", "gg_turbine_fuel")
+_MISSING = object()
+_TURBINES = ("ox_preburner_turbine", "fuel_preburner_turbine")
 _COMPONENTS = ("ox_pump", "fuel_pump", "ox_preburner", "fuel_preburner",
-               "gas_generator", "main_chamber", "nozzle", "cooling_channel") + _TURBINES
+               "main_chamber", "nozzle", "cooling_channel") + _TURBINES
 
 
 def _dict(value):
@@ -55,11 +56,11 @@ class _Audit:
         self.result = result
         self.checks = []
 
-    def get(self, path):
+    def get(self, path, default=None):
         value = self.result
         for key in path.split("."):
             if not isinstance(value, dict) or key not in value:
-                return None
+                return default
             value = value[key]
         return value
 
@@ -74,8 +75,11 @@ class _Audit:
         missing = False
         for spec in specs:
             path, scale = spec[:2]
-            value = self.get(path)
-            ok = (value is not None and not (isinstance(value, float) and not _finite(value))) if structural else _finite(value)
+            value = self.get(path, _MISSING)
+            present = value is not _MISSING
+            if not present:
+                value = None
+            ok = (present and not (isinstance(value, float) and not _finite(value))) if structural else _finite(value)
             normalized = value if structural else value * scale if ok else None
             if ok and len(spec) > 2:
                 try:
@@ -162,7 +166,7 @@ def _power_total(audit, field, component_keys, power_field):
     status = ("partial" if any(v is None for v in values) else
               "pass" if _equal(values[0], sum(values[1:])) else "conflict")
     audit.add("summary." + field + ".total", "汇总功率与部件功率合计：" + field, status, rows,
-              "按保存的独立部件求和；GG 共轴涡轮仅计一次，不将机械传动后功率混入原始涡轮功率。")
+              "按保存的独立部件求和，不将机械传动后功率混入原始涡轮功率。")
 
 
 def _audit_system(audit, calculation):
@@ -181,14 +185,8 @@ def _audit_system(audit, calculation):
             _summary(audit, alias, audit.options(base, _pressure_options("out")), "Pa", 1e6)
         _summary(audit, f"{key}_power_MW", audit.options(base, [("power_W", 1), ("power_MW", 1e6)]), "W", 1e6)
 
-    if "gg_turbine" in components or (inputs.get("cycle_type") == "gg" and inputs.get("gg_layout") == "single_shaft"):
-        turbines = [("gg_turbine", "gg_outlet", "gg_turbine_exhaust", "gg")]
-    elif any(key in components for key in ("gg_turbine_ox", "gg_turbine_fuel")) or inputs.get("cycle_type") == "gg":
-        turbines = [("gg_turbine_ox", "gg_outlet", "gg_turbine_ox_exhaust", "ox"),
-                    ("gg_turbine_fuel", "gg_outlet", "gg_turbine_fuel_exhaust", "fuel")]
-    else:
-        turbines = [("ox_preburner_turbine", "ox_preburner_outlet", "ox_turbine_exhaust", "ox"),
-                    ("fuel_preburner_turbine", "fuel_preburner_outlet", "fuel_turbine_exhaust", "fuel")]
+    turbines = [("ox_preburner_turbine", "ox_preburner_outlet", "ox_turbine_exhaust", "ox"),
+                ("fuel_preburner_turbine", "fuel_preburner_outlet", "fuel_turbine_exhaust", "fuel")]
     for key, inlet, outlet, side in turbines:
         _station(audit, key, inlet, "in")
         _station(audit, key, outlet, "out", mass=True)
@@ -198,7 +196,7 @@ def _audit_system(audit, calculation):
             _summary(audit, f"{side}_turbine_exhaust_T_K", [(base + "T_exhaust_K", 1)], "K")
             _summary(audit, f"{side}_turbine_exhaust_pressure_Pa", [(base + "p_out_Pa", 1)], "Pa")
             _summary(audit, f"{side}_preburner_pressure_Pa", [(base + "p_in_Pa", 1)], "Pa")
-    combustion = [("gas_generator", "gg_outlet", "gg_T_combustion_K", "gg_pressure_Pa")] if inputs.get("cycle_type") == "gg" or any(k.startswith("gg_") for k, *_ in turbines) else [
+    combustion = [
         ("ox_preburner", "ox_preburner_outlet", "ox_preburner_T_combustion_K", "ox_preburner_pressure_Pa"),
         ("fuel_preburner", "fuel_preburner_outlet", "fuel_preburner_T_combustion_K", "fuel_preburner_pressure_Pa")]
     for key, state, temp_summary, pressure_summary in combustion:
@@ -208,14 +206,6 @@ def _audit_system(audit, calculation):
                       [("calculation.summary." + pressure_summary, 1), (base + "preburner_pressure_Pa", 1), (node + "pressure", 1)], "Pa")
     _summary(audit, "chamber_temperature_K", [("calculation.states.main_chamber.temperature", 1)], "K")
     _summary(audit, "chamber_pressure_Pa", [("calculation.states.main_chamber.pressure", 1)], "Pa")
-    if any(key.startswith("gg_") for key, *_ in turbines):
-        _summary(audit, "gg_turbine_exhaust_T_K", [("calculation.states.gg_turbine_exhaust.temperature", 1)], "K",
-                 note="旧 GG 双轴合并排气温度沿用氧支路；不据此推断燃料支路温度。")
-        _summary(audit, "gg_turbine_backpressure_Pa", [("calculation.states.gg_turbine_exhaust.pressure", 1)], "Pa")
-        _power_total(audit, "gg_turbine_power_MW", [key for key, *_ in turbines], "turbine_power_W")
-        if len(turbines) == 1 and audit.get("calculation.summary.ox_turbine_power_MW") is not None:
-            _summary(audit, "ox_turbine_power_MW", [(_component_base("gg_turbine") + "turbine_power_W", 1)], "W", 1e6,
-                     note="GG 单轴旧汇总中氧侧功率键代表唯一共享涡轮。")
     _power_total(audit, "turbine_power_MW", [key for key, *_ in turbines], "turbine_power_W")
     _power_total(audit, "pump_power_MW", ["ox_pump", "fuel_pump"], "power_W")
     return turbines
@@ -342,6 +332,12 @@ def result_consistency_view(result, record_id=""):
     result = _dict(result)
     audit = _Audit(result)
     calculation = _dict(result.get("calculation"))
+    try:
+        require_supported_source({"result": result})
+    except ValueError as exc:
+        return {"schema_version": 1, "record_id": record_id, "status": "not_applicable",
+                "checks": [], "checked_count": 0, "conflicts": [], "conflict_count": 0,
+                "partial_count": 0, "scope": str(exc)}
     _audit_inputs(audit, calculation)
     _audit_aliases(audit, _dict(calculation.get("components")))
     _audit_system(audit, calculation)

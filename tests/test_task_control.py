@@ -13,13 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThreadPool
-from core import EngineInputs
-from cycle import FFSCCycleModel
-from gg_cycle import GGCycleModel
-from gui_pyside6 import SolveWorker, ThrottleWorker, ThermoWorker, OFSweepWorker
-from task_control import CancellationToken, TaskCancelled, cancellation_scope, checkpoint
-import sweep
-import thermo
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.systems.ffsc import FFSCCycleModel
+from lre_workbench.legacy.gg_cycle import GGCycleModel
+from lre_workbench.desktop.legacy_window import SolveWorker, ThrottleWorker, ThermoWorker, OFSweepWorker
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope, checkpoint
+import lre_workbench.analysis.sweep as sweep
+import lre_workbench.properties.thermochemistry as thermo
 
 
 def fake_result():
@@ -60,7 +60,7 @@ class CancellationTests(unittest.TestCase):
             with self.subTest(worker=type(worker).__name__):
                 events = self.collect(worker)
                 worker.request_cancel()
-                with patch("gui_pyside6.make_cycle_model") as make_model:
+                with patch('lre_workbench.desktop.legacy_window.make_cycle_model') as make_model:
                     worker.run()
                 make_model.assert_not_called()
                 self.assertEqual(len(events["cancelled"]), 1)
@@ -136,7 +136,7 @@ class CancellationTests(unittest.TestCase):
         worker = ThermoWorker([3.4, 3.6], [40], 30e6, 110, 90)
         events = self.collect(worker)
         worker.signals.record_ready.connect(lambda record: worker.request_cancel())
-        with patch("thermo.cross_validate_cea_cantera", return_value=[{"of": 3.4, "eps": 40}]) as compute:
+        with patch('lre_workbench.properties.thermochemistry.cross_validate_cea_cantera', return_value=[{"of": 3.4, "eps": 40}]) as compute:
             worker.run()
         self.assertEqual(compute.call_count, 1)
         self.assertEqual(events["cancelled"][0]["records"], events["record_ready"])
@@ -149,7 +149,7 @@ class CancellationTests(unittest.TestCase):
             def equilibrate(self, mode):
                 token.cancel()  # Simulate cancellation while a native call was running.
         with cancellation_scope(token):
-            with patch("thermo._equilibrate_HP_bisection") as fallback:
+            with patch('lre_workbench.properties.thermochemistry._equilibrate_HP_bisection') as fallback:
                 with self.assertRaises(TaskCancelled):
                     thermo._equilibrate_HP(Gas(), -1e6, 30e6, "CH4:1,O2:1")
         fallback.assert_not_called()

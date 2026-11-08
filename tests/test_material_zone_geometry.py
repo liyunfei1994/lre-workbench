@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from regen_geometry import build_regen_geometry
+from lre_workbench.components.cooling.geometry import build_regen_geometry
 
 
 GEOMETRY = dict(r_t=.1, r_c=.15, L_cyl=.3, expansion_ratio=16.,

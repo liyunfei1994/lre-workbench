@@ -12,9 +12,9 @@ import warnings
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import thermo
-from core import FlowState
-from turbine import Turbine
+import lre_workbench.properties.thermochemistry as thermo
+from lre_workbench.domain.models import FlowState
+from lre_workbench.components.turbines.model import Turbine
 from webapp.turbine_design import capture_turbine_gas_properties, turbine_design_view, _hash
 from webapp.turbine_geometry import turbine_geometry_view
 
@@ -272,9 +272,7 @@ class TurbineDesignTests(unittest.TestCase):
         self.assertEqual(first(result)["status"], "conflict")
 
     def test_json_save_read_preserves_machine_names_sources_and_hashes(self):
-        names = {"ffsc": {"ox": "富氧涡轮", "fuel": "富燃涡轮"},
-                 "single_shaft": {"shared": "燃气发生器共轴涡轮"},
-                 "dual_shaft": {"ox": "氧泵轴涡轮（GG 燃气）", "fuel": "燃料泵轴涡轮（GG 燃气）"}}
+        names = {"ffsc": {"ox": "富氧涡轮", "fuel": "富燃涡轮"}}
         for layout, expected in names.items():
             result = fixture(layout=layout)
             result["turbine_geometry"] = turbine_geometry_view(result)
@@ -423,66 +421,36 @@ class TurbineDesignTests(unittest.TestCase):
         json.dumps(turbine_design_view(result), allow_nan=False)
 
 
-class GasGeneratorDesignTests(unittest.TestCase):
-    def test_single_shaft_has_one_real_turbine_and_both_pump_demands(self):
-        result = fixture(layout="single_shaft")
-        turbines = turbine_design_view(result)["turbines"]
-        self.assertEqual(set(turbines), {"shared"})
-        t = turbines["shared"]
-        self.assertEqual(t["status"], "ready", t["checks"])
-        self.assertEqual(set(t["power_matching"]["pump_component_keys"]), {"ox_pump", "fuel_pump"})
-        self.assertAlmostEqual(field(t, "delivered_power_w", "power_matching")["value"], .96 * field(t, "actual_gas_power_w", "power_matching")["value"])
-        self.assertIsNone(field(t, "additional_efficiency")["value"])
+class UnsupportedTurbineDesignTests(unittest.TestCase):
+    def test_removed_cycle_is_rejected_even_with_saved_ready_snapshot(self):
+        for location in ("calculation", "submitted_inputs"):
+            result = fixture()
+            result["turbine_design"] = turbine_design_view(result)
+            if location == "calculation":
+                result[location]["inputs"]["cycle_type"] = "gg"
+            else:
+                result[location] = {"cycle_type": "gg"}
+            original = deepcopy(result)
+            view = turbine_design_view(result)
+            self.assertTrue(all(not t["ready_for_global_setup"] for t in view["turbines"].values()))
+            self.assertEqual(result, original)
 
-    def test_parallel_uses_branch_flows_and_each_branch_exhaust(self):
-        result = fixture(layout="dual_shaft")
-        turbines = turbine_design_view(result)["turbines"]
-        self.assertEqual(set(turbines), {"ox", "fuel"})
-        for side, mdot in (("ox", 8), ("fuel", 12)):
-            t = turbines[side]
-            self.assertEqual(t["status"], "ready", t["checks"])
-            self.assertEqual(field(t, "mass_flow_kg_s")["value"], mdot)
-            self.assertEqual(t["source"]["outlet_state_key"], "gg_turbine_" + side + "_exhaust")
-
-    def test_historical_parallel_mixed_exhaust_cannot_replace_missing_branch(self):
-        result = fixture(layout="dual_shaft", capture=False)
-        states = result["calculation"]["states"]
-        states["gg_turbine_exhaust"] = deepcopy(states.pop("gg_turbine_ox_exhaust"))
-        states["gg_turbine_exhaust"]["mass_flow"] = 20
-        t = first(result)
-        self.assertEqual(t["status"], "incomplete")
-        self.assertIsNone(t["design_point"]["outlet_enthalpy_j_kg"])
-
-    def test_missing_parallel_branch_flow_is_missing_not_assumed_zero(self):
-        result = fixture(layout="dual_shaft", capture=False)
-        result["calculation"]["components"]["gg_turbine_fuel"]["outputs"].pop("mass_flow_kgs")
-        t = first(result)
-        check = next(c for c in t["checks"] if c["id"] == "parallel_mass")
-        self.assertEqual(check["status"], "missing")
-
-    def test_tampered_shared_snapshot_keeps_single_machine_topology(self):
-        result = fixture(layout="single_shaft")
-        result["turbine_design"] = turbine_design_view(result)
-        result["calculation"]["inputs"]["gg_mech_efficiency"] = .5
-        turbines = turbine_design_view(result)["turbines"]
-        self.assertEqual(set(turbines), {"shared"})
-        self.assertEqual(turbines["shared"]["status"], "conflict")
 
 
 @unittest.skipUnless(thermo.CANTERA_AVAILABLE and thermo.COOLPROP_AVAILABLE, "Real scientific libraries are required")
 class RealSavedPipelineTests(unittest.TestCase):
     def test_complete_calculate_consistency_json_save_get_roundtrip(self):
-        from engine_presets import preset_input_values
+        from lre_workbench.application.presets import preset_input_values
         from webapp.solver import calculate
         from webapp.result_consistency import result_consistency_view
-        values = preset_input_values("tq12a_gg")
-        values.update(gg_layout="single_shaft", cooling_bartz_mode=0., cooling_heat_load=10e6,
+        values = preset_input_values("raptor3_ffsc")
+        values.update(cooling_bartz_mode=0., cooling_heat_load=130e6,
                       turbine_boundary_basis="total_to_total", turbine_meanline_mode="disabled")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             result = calculate(values)
         before = deepcopy(result)
-        self.assertEqual(result["turbine_design"]["turbines"]["shared"]["status"], "ready")
+        self.assertEqual(result["turbine_design"]["turbines"]["ox"]["status"], "ready")
         # The downstream audit and each view must not modify source evidence.
         result_consistency_view(result, "audit-id")
         with tempfile.TemporaryDirectory() as directory:
@@ -490,10 +458,10 @@ class RealSavedPipelineTests(unittest.TestCase):
             path.write_text(json.dumps(result, ensure_ascii=False, allow_nan=False), encoding="utf-8")
             loaded = json.loads(path.read_text(encoding="utf-8"))
         reread = turbine_design_view(loaded, "real-record-id")
-        item = reread["turbines"]["shared"]
+        item = reread["turbines"]["ox"]
         self.assertEqual(item["status"], "ready", item.get("reason", item.get("checks")))
-        self.assertEqual(item["label"], "燃气发生器共轴涡轮")
-        self.assertEqual(item["source"]["component_key"], "gg_turbine")
+        self.assertEqual(item["label"], "富氧涡轮")
+        self.assertEqual(item["source"]["component_key"], "ox_preburner_turbine")
         self.assertEqual(item["source"]["record_id"], "real-record-id")
         self.assertEqual(reread["source_sha256"], result["turbine_design"]["source_sha256"])
         self.assertEqual(result, before)

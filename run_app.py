@@ -9,7 +9,8 @@ import traceback
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
-from version import APP_NAME, APP_FORMAL_NAME, APP_ENGLISH_NAME, APP_VERSION
+from lre_workbench.version import APP_NAME, APP_FORMAL_NAME, APP_ENGLISH_NAME, APP_VERSION
+from lre_workbench.resources import ASSET_ROOT
 
 
 def log_directory():
@@ -32,7 +33,7 @@ def main():
     handler = RotatingFileHandler(log_file, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
     logging.basicConfig(level=logging.INFO, handlers=[handler], format="%(asctime)s %(levelname)s %(message)s")
     try:
-        from windows_identity import configure_process_identity, current_process_identity
+        from lre_workbench.desktop.windows_identity import configure_process_identity, current_process_identity
         configure_process_identity()
         if sys.platform == "win32":
             logging.info("Windows AppUserModelID: %s", current_process_identity())
@@ -46,10 +47,10 @@ def main():
         app.setApplicationDisplayName(APP_FORMAL_NAME)
         app.setApplicationVersion(APP_VERSION)
         app.setOrganizationName("LRE Workbench")
-        icon_path = ROOT / "assets" / ("app.ico" if sys.platform == "win32" else "app.svg")
+        icon_path = ASSET_ROOT / ("app.ico" if sys.platform == "win32" else "app.svg")
         app.setWindowIcon(QIcon(str(icon_path)))
         app.setStyle("Fusion")
-        from workbench_fonts import configure_fonts
+        from lre_workbench.desktop.fonts import configure_fonts
         configure_fonts(app)
 
         def qt_message(mode, context, message):
@@ -62,7 +63,7 @@ def main():
             logging.error("Unhandled exception", exc_info=(kind, value, tb))
             QMessageBox.critical(None, "操作失败", f"{value}\n\n诊断日志：{log_file}")
         sys.excepthook = exception_hook
-        from workbench import WorkbenchWindow
+        from lre_workbench.desktop.workbench import WorkbenchWindow
         # Legacy plotting modules configure rcParams at import; reapply our
         # shared font after all modules have loaded.
         configure_fonts(app)

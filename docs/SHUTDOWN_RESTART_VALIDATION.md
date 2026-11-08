@@ -10,7 +10,7 @@
 
 ## 2. 两相库存、余热与再充填模式
 
-实现文件：`src/shutdown_inventory.py`；专用测试：`web_tests/test_shutdown_inventory.py`。复用 `src/chilldown.py` 的质量/总内能/壁温、HEOS 物性闭合及 HEM 均相出口，仅扩展三阶段阀序。现有预冷模型增加默认行为不变的 `command_for()`、`event_times()`、`output_times()` 钩子；新模式在事件边界重新启动积分器，并保持状态和累计账本连续。
+实现文件：`src/lre_workbench/operations/shutdown_inventory.py`；专用测试：`web_tests/test_shutdown_inventory.py`。复用 `src/lre_workbench/operations/chilldown.py` 的质量/总内能/壁温、HEOS 物性闭合及 HEM 均相出口，仅扩展三阶段阀序。现有预冷模型增加默认行为不变的 `command_for()`、`event_times()`、`output_times()` 钩子；新模式在事件边界重新启动积分器，并保持状态和累计账本连续。
 
 ### 2.1 实际执行的测试
 
@@ -104,7 +104,7 @@ m × u(rho, Teq) + Cwall × Teq
 
 ## 3. 气相关阀、热浸与再次给定点火事件
 
-实现文件：`src/shutdown_gas.py`。5 项专项覆盖连续库存/组分、密闭壁流换热、两次热脉冲的积分能量与事件时刻、越域后的有效片段，以及严格输入检查。原点火模型只增加事件枚举扩展点，原有点火物理与参考校核继续通过。
+实现文件：`src/lre_workbench/operations/shutdown_gas.py`。5 项专项覆盖连续库存/组分、密闭壁流换热、两次热脉冲的积分能量与事件时刻、越域后的有效片段，以及严格输入检查。原点火模型只增加事件枚举扩展点，原有点火物理与参考校核继续通过。
 
 默认算例中，关阀指令在 2 s 开始，再次供给在 4 s 开始；两次给定热脉冲能量分别为 1500 J、500 J。2 s 气相库存为 `0.0023586647104 kg`，4 s 为 `0.0019615029179 kg`，6 s 为 `0.0035253588844 kg`。再次供给时壁温为 `656.503987 K`；质量、组分、内能和壁温没有被重置为初态。两个热脉冲总积分能量为约 2000 J。
 
@@ -120,7 +120,7 @@ m × u(rho, Teq) + Cwall × Teq
 
 ## 4. 转子惰转与有符号管网流动
 
-实现文件：`src/shutdown_rotor.py`。最终 **13 项专项通过**，覆盖：
+实现文件：`src/lre_workbench/operations/shutdown_rotor.py`。最终 **13 项专项通过**，覆盖：
 
 - 从独立给定的初始液压/转矩平衡出发，撤矩后降速，再驱动后恢复；关阀后仍保留泄漏面积与满液库存。
 - 直接对液压储能和转动能求导，独立于积分账本核对正流、反流、正转、反转及零转速时的瞬时能量恒等式。

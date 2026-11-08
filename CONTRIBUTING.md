@@ -68,8 +68,8 @@ git push -u origin feature/your-change
 | 个人方案、实验数据、CFD 任务和结果 | `user_data/` 或团队数据存储，另行备份 |
 | 经过审查的版本 | CI 构建产物，附版本、源码清单与 SHA-256 |
 
-代码仓库不代替实验数据管理。现阶段方案 JSON 仍是单人编辑文件，
-没有多人同时编辑、账户权限、服务器任务队列或数据库。
+代码仓库不代替实验数据管理。桌面方案仍按文件保存；Web 工作区已有账号、项目、版本、任务队列和本机数据库，
+也没有因此成为多人同时编辑同一个方案的协同系统。工作区数据库和个人结果需另行备份，不能随源码提交。
 
 ## 依赖与计算模块
 
@@ -77,8 +77,42 @@ git push -u origin feature/your-change
 `constraints.txt` 固定其传递依赖。修改依赖必须同步这些文件并在标准版 Python 3.14 x64 上检查。
 不要在本地安装最新依赖后直接把虚拟环境打包给别人。
 
-UI 修改尽量放在 `workbench.py` 和相关界面文件；计算改动放在对应计算模块，
-并增加能证明行为变化的测试。数值收敛、工程约束通过、真实 CFD 验证是不同结论。
+规范计算包为 `src/lre_workbench/`，入口统一使用 `lre_workbench.*` 导入。IDE 将 `src` 标记为源码根；
+不要把某个部件子目录单独加入 `sys.path`，也不要继续使用旧的短模块名或 `src.*` 导入。
+包初始化显式拒绝 `src.lre_workbench`，避免同一个模型以两套类身份和缓存加载。
+
+| 修改内容 | 位置 |
+| --- | --- |
+| 泵、涡轮、燃烧室、喷管、喷注器、预燃室、冷却 | `src/lre_workbench/components/` 对应子包 |
+| FFSC 循环、支路、压降预算和系统耦合 | `src/lre_workbench/systems/` |
+| 通用迭代、初值、收敛和求解状态 | `src/lre_workbench/solvers/` |
+| 数据合同、物性、材料 | `src/lre_workbench/domain/`、`properties/`、`materials/` |
+| 动态运行研究和工程分析 | `src/lre_workbench/operations/`、`analysis/` |
+| Qt 窗口、绘图与桌面交互 | `src/lre_workbench/desktop/`，工作台入口为 `desktop/workbench.py` |
+| Web 接口、存储、任务与浏览器展示 | `webapp/` 和 `webapp/static/` |
+| 外部软件交接和开发工具 | `src/lre_workbench/integrations/` 和 `scripts/` |
+
+部件与物性模块不能新增对 Qt、HTTP、数据库或浏览器状态的依赖。包初始化保持轻量，避免纯计算导入触发界面启动。
+共享热化学比较使用 `lre_workbench.properties.comparison`；`webapp.thermo_compare` 仅通过 `sys.modules` 别名兼容已有 Web 调用与测试补丁，不能反过来成为内核依赖。
+桌面与研究入口通过 `lre_workbench.application.cycle_factory` 延迟选择循环，不能为运行 FFSC 提前导入历史循环实现。
+历史代码仍有需要逐步拆分的局部依赖；本轮目录迁移不代表完全消除了这些耦合。详细职责和扩展规则见
+[源码架构说明](docs/SOURCE_ARCHITECTURE.md)。
+
+移动文件时同步普通/局部/动态导入、子进程命令、测试替换目标、资源路径及打包清单。
+共享资源通过 `src/lre_workbench/resources.py` 定位，不按模块的新目录层数各自猜测项目根。
+目录重组应保持物理公式、容差和保存数据合同；算法修改另行说明，并增加能证明行为变化的测试。
+数值收敛、工程约束通过、真实 CFD 验证是不同结论。
+
+计算回归使用 `tests/`，Web 适配与前端回归使用 `web_tests/`。结构变动同时验证两个入口和纯计算导入：
+
+```powershell
+.\.venv-web\Scripts\python.exe -m unittest discover -s web_tests -p "test_*.py" -v
+# 使用已配置完整桌面依赖的环境检查桌面入口。
+.\.venv\Scripts\python.exe run_app.py
+```
+
+网页开发入口为 `python -m webapp.run --personal-workspace`，已运行同一端口时先按正常停止流程关闭服务。
+上述命令从项目根目录执行；不要直接运行某个包内界面文件。
 
 ## 发布与回退
 

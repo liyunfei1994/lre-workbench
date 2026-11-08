@@ -10,9 +10,9 @@ import unittest
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import EngineInputs, ValidationError
-from pump import Pump
-from thermo_data import methane_dataset_scope
+from lre_workbench.domain.models import EngineInputs, ValidationError
+from lre_workbench.components.pumps.model import Pump
+from lre_workbench.properties.datasets import methane_dataset_scope
 from webapp.pump_geometry import pump_geometry_view
 from webapp.ui_schema import design_ui_schema
 from web_tests.test_pump_geometry import fixture
@@ -53,6 +53,20 @@ class PumpPointIntegrationTests(unittest.TestCase):
         self.assertLess(o["head_m_per_stage"], 1.)
         self.assertAlmostEqual(o["u_tip_est_ms"]**2 * .6, o["delta_p_Pa"] / o["rho_in_kgm3"])
         self.assertAlmostEqual(o["d_impeller_est_m"] * math.pi / 60., o["u_tip_est_ms"])
+
+    def test_available_suction_condition_does_not_certify_an_inducer_choice(self):
+        with warnings.catch_warnings(), methane_dataset_scope("gri30_highT"):
+            warnings.simplefilter("ignore")
+            for pressure_margin in (2e4, 8e5):
+                _, result = Pump("suction", "LOX", 100., 1e6, 75e6, 80., .85,
+                    nr_rpm=26500., n_stages=1, npsh_available_pa=pressure_margin).evaluate()
+                o = result.outputs
+                self.assertAlmostEqual(o["npsh_available_m"], pressure_margin / o["rho_in_kgm3"] / 9.80665)
+                text = "\n".join(result.notes)
+                self.assertIn("部件 NPSHr", text)
+                self.assertNotIn("无诱导轮可行", text)
+                self.assertNotIn("需诱导轮", text)
+                self.assertNotIn("须强诱导轮", text)
 
     def test_invalid_stage_or_geometric_assumption_is_not_silently_coerced(self):
         for prefix in ("lox", "fuel"):

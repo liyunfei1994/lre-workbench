@@ -10,7 +10,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from version import APP_FOLDER_NAME, APP_VERSION
+from lre_workbench.version import APP_FOLDER_NAME, APP_VERSION
 
 
 def build_release(destination: Path):
@@ -22,8 +22,9 @@ def build_release(destination: Path):
     source_files.extend(ROOT / name for name in ["run_app.py", "requirements.txt", "requirements-science.txt",
                         "constraints.txt", ".python-version", ".gitignore", ".gitattributes",
                         "start_windows.bat", "start_windows.vbs", "setup_windows.bat", "diagnose_windows.bat",
-                        "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "requirements-web.txt",
-                        "start_web_windows.bat", "setup_web_windows.bat", "stop_web_windows.bat"])
+                        "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "requirements-web.txt", "requirements-web-test.txt",
+                        "start_web_windows.bat", "setup_web_windows.bat", "stop_web_windows.bat",
+                        "start_web_pilot_windows.bat"])
     source_files.extend((ROOT / "docs").glob("*.md"))
     manifest = {"app_version": APP_VERSION, "created_at": datetime.now(timezone.utc).isoformat(),
                 "sha256": {}, "commit": None, "working_tree_changed": None}

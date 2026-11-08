@@ -10,7 +10,7 @@ import sys
 def write_diagnostics(root: Path) -> tuple[Path, bool]:
     from bootstrap import probe_interpreter, probe_runtime
     sys.path.insert(0, str(root / "src"))
-    from version import APP_VERSION
+    from lre_workbench.version import APP_VERSION
     python = root / ".venv" / "Scripts" / "python.exe"
     report = {"application_version": APP_VERSION, "created_at": datetime.now(timezone.utc).isoformat(),
               "project_directory": str(root), "interpreter": str(python),

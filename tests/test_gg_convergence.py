@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from core import CycleResults, EngineInputs, FlowState
-from convergence import numerical_convergence
-from gg_cycle import GGCycleModel
+from lre_workbench.domain.models import CycleResults, EngineInputs, FlowState
+from lre_workbench.solvers.convergence import numerical_convergence
+from lre_workbench.legacy.gg_cycle import GGCycleModel
 
 
 class AnalyticGG(GGCycleModel):
@@ -50,7 +50,7 @@ class AnalyticGG(GGCycleModel):
 class GGConvergenceTests(unittest.TestCase):
     def test_bisection_returns_evaluated_temperature_match(self):
         model = AnalyticGG()
-        with patch("thermo.combustion_equilibrium",
+        with patch('lre_workbench.properties.thermochemistry.combustion_equilibrium',
                    side_effect=lambda **kw: SimpleNamespace(temperature=1000 * kw["mdot_ox"])):
             mr = model._mr_for_target_gg_temp(475, 100, 90, 1e6)
         self.assertAlmostEqual(mr, .475)
@@ -58,7 +58,7 @@ class GGConvergenceTests(unittest.TestCase):
 
     def test_bisection_preserves_exact_bracket_endpoints(self):
         model = AnalyticGG()
-        with patch("thermo.combustion_equilibrium",
+        with patch('lre_workbench.properties.thermochemistry.combustion_equilibrium',
                    side_effect=lambda **kw: SimpleNamespace(temperature=1000 * kw["mdot_ox"])):
             self.assertEqual(model._mr_for_target_gg_temp(50, 100, 90, 1e6), .05)
             self.assertEqual(model._mr_for_target_gg_temp(900, 100, 90, 1e6), .90)

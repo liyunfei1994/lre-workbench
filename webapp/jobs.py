@@ -51,6 +51,13 @@ class JobQueue:
             job = self.store.one("SELECT * FROM jobs WHERE status='queued' ORDER BY created LIMIT 1")
             if not job:
                 continue
+            if job.get("kind") == "throttle":
+                # An old queued design rematch must not resume as an operating
+                # analysis after an upgrade. Keep any partial historical result.
+                self.store.execute(
+                    "UPDATE jobs SET status='failed',finished=?,error=? WHERE id=? AND status='queued'",
+                    (time.time(), "旧设计匹配扫描已停止执行；请重新提交固定几何节流分析。", job["id"]))
+                continue
             started = time.time()
             if not self.store.execute(
                 "UPDATE jobs SET status='running',started=? WHERE id=? AND status='queued'",

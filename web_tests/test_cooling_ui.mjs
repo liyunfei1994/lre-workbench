@@ -259,6 +259,23 @@ test("historical or inconsistent wall evidence never gets backfilled or a positi
   assert.match(renderCooling(result),/制造状态不匹配/);
 });
 
+test("saved estimated heat capacity remains explicitly distinguished from measured data",()=>{
+  const result=record(),profile=result.calculation.components.cooling_channel.profile;
+  profile.material_applicability={schema_version:1,status:"within_range",dataset_ids:["saved42"],
+    out_of_range_cell_count:0,total_cells:1,min_temperature_K:400,max_temperature_K:800,
+    manufacturing_match:"unknown",datasets:[{dataset_id:"saved42",label:"GRCop-42",
+      conductivity_property:{range_K:[298.15,973.15]},
+      heat_capacity_property:{range_K:[298.15,973.15],statistic:"composition_weighted_estimate"},
+      reference_density_kg_m3:null}]};
+  const html=renderCooling(result);
+  assert.match(html,/成分加权估算，非独立实测/);
+  assert.match(html,/比热温区（未启用）/);
+  assert.match(html,/制造状态未确认/);
+  // A later draft must never change the evidence of this saved result.
+  result.calculation.inputs={wall_thermal_dataset_id:"current84"};
+  assert.equal(renderCooling(result),html);
+});
+
 test("material data HTML escapes source text and rejects unsafe links",()=>{
   const result=record(),profile=result.calculation.components.cooling_channel.profile;
   profile.material_applicability={schema_version:1,status:"within_range",dataset_ids:["x"],total_cells:2,out_of_range_cell_count:0,

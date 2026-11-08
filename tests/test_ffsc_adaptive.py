@@ -8,9 +8,10 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import EngineInputs, ValidationError
-from cycle import FFSCCycleModel
-from task_control import TaskCancelled
+from lre_workbench.domain.models import EngineInputs, ValidationError
+from lre_workbench.systems.ffsc import FFSCCycleModel
+from lre_workbench.solvers.state import ffsc_design_vector_schema
+from lre_workbench.runtime.tasks import TaskCancelled
 from tests.test_ffsc_convergence import inner_result, result_for
 
 
@@ -24,7 +25,8 @@ class AdaptivePathTests(unittest.TestCase):
 
     def warm_state(self):
         i = self.model.inputs
-        return dict(x=[100, 2, 2], chamber_temp_guess=i.chamber_temp_guess,
+        return dict(vector_schema=ffsc_design_vector_schema(target_mixture_ratio=self.model._target_mr_mode()),
+                    x=[100, 2, 2], chamber_temp_guess=i.chamber_temp_guess,
                     chamber_gamma=i.chamber_gamma, molar_mass=i.molar_mass)
 
     def test_successful_full_warm_state_bypasses_cold_stages_and_restores_inputs(self):
@@ -182,7 +184,7 @@ class ScalingAndBackendTests(unittest.TestCase):
         self.assertEqual(residual.call_count, 1)
         self.assertEqual(result.summary["solver_function_evaluations"], 1)
 
-    def test_power_scales_are_frozen_from_initial_pump_demand(self):
+    def test_power_scales_are_frozen_but_acceptance_uses_the_task_tolerances(self):
         model = FFSCCycleModel(EngineInputs())
         def residual(*x):
             result = result_for(model)
@@ -195,11 +197,18 @@ class ScalingAndBackendTests(unittest.TestCase):
             _, result = model.solve_cycle(x_init=[10, 2, 3])
         run = result.convergence["inner_runs"][0]
         self.assertEqual(run["residual_scales"][1:], [1e6, 2e6])
-        self.assertEqual(run["physical_tolerances"][1:], [1, 2])
+        self.assertEqual(run["physical_tolerances"][1:], [1, 1])
+        self.assertEqual(run["acceptance_policy"]["id"], "ffsc_task_absolute_residuals_v1")
+        self.assertEqual(result.convergence["layers"]["inner"]["tolerance"], 1)
         self.assertEqual(result.convergence["layers"]["inner"]["status"], "pass")
+        diagnostics = run["diagnostics"]
+        self.assertEqual([row["unit"] for row in diagnostics["equations"]], ["N", "W", "W"])
+        self.assertEqual([row["absolute_tolerance"] for row in diagnostics["equations"]], run["physical_tolerances"])
+        self.assertIn("膨胀压力比", diagnostics["variables"][1]["name"])
+        self.assertEqual(diagnostics["model_evaluations"], run["nfev"])
 
     def test_free_split_fraction_coordinates_obey_physical_bounds_for_both_backends(self):
-        for backend in ("newton", "trf"):
+        for backend in ("newton", "broyden", "trf"):
             with self.subTest(backend=backend):
                 model = FFSCCycleModel(EngineInputs(use_target_preburner_mr=0,
                                       use_target_preburner_temp=0, nonlinear_solver=backend))
@@ -220,6 +229,46 @@ class ScalingAndBackendTests(unittest.TestCase):
                     _, result = model.solve_cycle(x_init=[90, .08 * fuel, .08 * ox])
                 self.assertEqual(result.convergence["layers"]["inner"]["status"], "pass")
                 self.assertEqual(len(calls), result.summary["solver_function_evaluations"])
+                diagnostics = result.convergence["inner_runs"][0]["diagnostics"]
+                self.assertIn("质量分数", diagnostics["variables"][1]["name"])
+                self.assertAlmostEqual(diagnostics["variables"][1]["value"], .05)
+                self.assertEqual(diagnostics["per_variable_step_limits_supported"], backend != "trf")
+
+    def test_initial_failure_uses_actual_projected_model_vector_and_one_call(self):
+        model = FFSCCycleModel(EngineInputs())
+        calls = []
+        def residual(*values):
+            calls.append(list(values))
+            raise RuntimeError("initial physical evaluation failed")
+        with patch.object(model, "residual_vector", side_effect=residual):
+            with self.assertRaises(RuntimeError) as caught:
+                model.solve_cycle(x_init=[100, 20, .1])
+        diagnostics = model._nonlinear_attempt.failure(caught.exception)
+        self.assertEqual(diagnostics["model_evaluations"], 1)
+        self.assertEqual(diagnostics["failures"][0]["x"], calls[0])
+        self.assertNotEqual(calls[0], [100, 20, .1])
+
+    def test_outer_records_zero_model_calls_for_invalid_seed(self):
+        model = FFSCCycleModel(EngineInputs(use_target_preburner_temp=0, cooling_bartz_mode=0))
+        original = model.solve_cycle
+        with patch.object(model, "solve_cycle", side_effect=lambda **kw:
+                          original(x_init=[float("nan"), 2, 2])), \
+                patch.object(model, "residual_vector") as residual:
+            result = model._evaluate_design_core()
+        self.assertEqual(residual.call_count, 0)
+        self.assertEqual(result.summary["solver_function_evaluations"], 0)
+        for run in result.convergence["inner_runs"]:
+            self.assertEqual(run["nfev"], 0)
+            self.assertEqual(run["diagnostics"]["failures"][0]["stage"], "input_validation")
+
+    def test_uninstrumented_solver_failure_keeps_work_count_unknown(self):
+        model = FFSCCycleModel(EngineInputs(use_target_preburner_temp=0, cooling_bartz_mode=0))
+        with patch.object(model, "solve_cycle", side_effect=RuntimeError("replacement solver failed")):
+            result = model._evaluate_design_core()
+        self.assertIsNone(result.summary["solver_function_evaluations"])
+        self.assertIsNone(result.summary["solver_jacobian_evaluations"])
+        self.assertIsNone(result.summary["solver_rejected_steps"])
+        self.assertTrue(all(run["nfev"] is None for run in result.convergence["inner_runs"]))
 
 
 if __name__ == "__main__":

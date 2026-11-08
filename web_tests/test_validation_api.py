@@ -26,7 +26,7 @@ class ValidationAPITests(unittest.TestCase):
         self.admin = client(self.app)
         self.addCleanup(self.admin.close)
         self.admin.post("/api/auth/setup", json={"username": "admin", "display_name": "测试管理员", "password": TEST_PASSWORD})
-        values = next(p["inputs"] for p in presets() if p["key"] == "tq12a_gg")
+        values = next(p["inputs"] for p in presets() if p["key"] == "raptor3_ffsc")
         self.project = self.admin.post("/api/projects", json={"name": "合成校核测试", "inputs": values}).json()["project"]
         self.source_id = self.admin.post(f"/api/projects/{self.project['id']}/jobs", json={"revision": 1}).json()["id"]
         self.source = {"application_version": "test", "submitted_inputs": values, "environment": {"test": True},
@@ -91,6 +91,28 @@ class ValidationAPITests(unittest.TestCase):
         self.assertEqual(self.admin.post("/api/projects/other/validations", json={"source_job_id": self.source_id}).status_code, 422)
         self.app.state.store.execute("UPDATE jobs SET status='running' WHERE id=?", (self.source_id,))
         self.assertEqual(self.submit().status_code, 422)
+
+    def test_gg_source_remains_readable_but_cannot_start_a_new_validation(self):
+        for identity_location in ("inputs", "result"):
+            with self.subTest(identity_location=identity_location):
+                source = deepcopy(self.source)
+                values = deepcopy(self.project["inputs"])
+                if identity_location == "inputs":
+                    values["cycle_type"] = "gg"
+                else:
+                    source["calculation"]["inputs"]["cycle_type"] = "gg"
+                self.app.state.store.execute("UPDATE jobs SET inputs=?,result=? WHERE id=?",
+                    (json.dumps(values), json.dumps(source), self.source_id))
+                before = self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,))
+                response = self.submit()
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("FFSC", response.json()["detail"])
+                self.assertEqual(self.admin.get(self.endpoint).json(), [])
+                viewed = self.admin.get("/api/jobs/" + self.source_id)
+                self.assertEqual(viewed.status_code, 200, viewed.text)
+                self.assertEqual(viewed.json()["inputs"], values)
+                self.assertEqual(viewed.json()["result"], source)
+                self.assertEqual(self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,)), before)
 
     def test_gas_handoff_worker_preserves_source_and_keeps_baseline_separate(self):
         from tests.test_gas_handoff import fixture

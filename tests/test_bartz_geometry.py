@@ -5,11 +5,11 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from chamber_contour import convergent_geometry, convergent_contour
-from geometry.nozzle import compute_nozzle, full_hot_gas_geometry
-from regen_geometry import build_regen_geometry
-from chamber_design import ChannelRow
-import cooling_marching as cm
+from lre_workbench.components.chambers.contour import convergent_geometry, convergent_contour
+from lre_workbench.components.nozzles.geometry import compute_nozzle, full_hot_gas_geometry
+from lre_workbench.components.cooling.geometry import build_regen_geometry
+from lre_workbench.components.chambers.design import ChannelRow
+import lre_workbench.components.cooling.marching as cm
 from tests.test_regen_circuit import BASE, GEOM
 
 
@@ -79,7 +79,7 @@ class BartzGeometryTests(unittest.TestCase):
             full_hot_gas_geometry(.1, .4, .15, 25., .3)
 
     def test_insufficient_chamber_volume_is_not_reported_as_zero_length(self):
-        from chamber_sizing import size_combustion_chamber
+        from lre_workbench.components.chambers.sizing import size_combustion_chamber
         with self.assertRaisesRegex(ValueError, "特征容积不足"):
             size_combustion_chamber(At=.04, pc=33e6, mdot_total=765., T_c=3800.,
                 molar_mass=22., gamma=1.2, l_star=.001, contraction_ratio=2.5)

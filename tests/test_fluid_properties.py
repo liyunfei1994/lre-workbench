@@ -4,11 +4,11 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import thermo
-from fluid_properties import (fluid_spec, state_tp, state_ph, ideal_reference_enthalpy,
+import lre_workbench.properties.thermochemistry as thermo
+from lre_workbench.properties.fluids import (fluid_spec, state_tp, state_ph, ideal_reference_enthalpy,
                               saturation_pressure)
-from thermo_data import methane_dataset_scope
-from pump import Pump, fluid_density
+from lre_workbench.properties.datasets import methane_dataset_scope
+from lre_workbench.components.pumps.model import Pump, fluid_density
 
 
 @unittest.skipUnless(thermo.CANTERA_AVAILABLE and thermo.COOLPROP_AVAILABLE, "scientific libraries required")

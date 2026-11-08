@@ -8,8 +8,8 @@ import tempfile
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from core import EngineInputs
-from injector import Injector
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.components.injectors.model import Injector
 from webapp.injector_design import injector_design_view
 
 
@@ -49,7 +49,7 @@ class InjectorAPITests(unittest.TestCase):
                     self.assertEqual(api.get('/static/'+name).status_code,200)
 
     def test_saved_geometry_matches_core_and_desktop_projection(self):
-        from geometry.injector import compute_injector
+        from lre_workbench.components.injectors.geometry import compute_injector
         result=sample();component=result['calculation']['components']['injector']
         desktop=compute_injector(.15,400,component_outputs=component['outputs'],component_profile=component['profile'])
         view=injector_design_view(result)['stations'][0]

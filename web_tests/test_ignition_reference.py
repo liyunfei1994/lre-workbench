@@ -10,7 +10,7 @@ import cantera as ct
 import numpy as np
 from scipy.optimize import brentq
 
-from ignition import IgnitionModel, default_settings, gas_mass_flux
+from lre_workbench.operations.ignition import IgnitionModel, default_settings, gas_mass_flux
 
 
 def reference_gas():

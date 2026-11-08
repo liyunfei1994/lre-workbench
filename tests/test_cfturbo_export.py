@@ -8,8 +8,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from cfturbo_export import build_cfturbo_markdown, export_cfturbo_markdown
-from core import ComponentResult, CycleResults, EngineInputs, FlowState
+from lre_workbench.integrations.cfturbo import build_cfturbo_markdown, export_cfturbo_markdown
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs, FlowState
 
 
 def result_fixture(cycle="ffsc", layout="single_shaft", pair="lox_methane"):
@@ -44,7 +44,7 @@ def result_fixture(cycle="ffsc", layout="single_shaft", pair="lox_methane"):
 
 class CFturboExportTests(unittest.TestCase):
     def setUp(self):
-        self.props = patch("cfturbo_export._fluid_props", return_value=None).start()
+        self.props = patch('lre_workbench.integrations.cfturbo._fluid_props', return_value=None).start()
         self.addCleanup(patch.stopall)
 
     def test_legacy_nodes_are_not_presented_as_total_or_static_boundaries(self):
@@ -109,7 +109,7 @@ class CFturboExportTests(unittest.TestCase):
         self.assertIn("质量分数 Y（非摩尔分数）", text)
         self.assertIn("| O2 | 0.63 |", text)
         self.assertIn("| H2 | 0.2 |", text)
-        self.assertIn("记录的建议级数 | 3 |", text)
+        self.assertIn("记录的候选级数 | 3 |", text)
         for invented in ("92%", "78%", "CH₄ 为主", "**2 级**", "安全系数回到", "三者自洽 cp="):
             self.assertNotIn(invented, text)
 
@@ -133,7 +133,7 @@ class CFturboExportTests(unittest.TestCase):
         result.components["ox_preburner_turbine"].outputs["reaction_degree"] = 0
         result.states["ox_preburner_outlet"].composition = {"O2": .2, "H2O": .3}
         text = build_cfturbo_markdown(result)
-        self.assertIn("反动度 R | 0.00 |", text)
+        self.assertIn("反动度初选值 R | 0.00 |", text)
         self.assertIn("| O2 | 0.2 |", text)
         self.assertIn("未通过非负性／归一化检查", text)
 
@@ -147,6 +147,18 @@ class CFturboExportTests(unittest.TestCase):
             returned = export_cfturbo_markdown(result, str(destination))
             self.assertEqual(returned, destination.read_text(encoding="utf-8"))
             self.assertEqual(returned, text)
+
+    def test_pump_reference_head_and_available_suction_are_not_design_certification(self):
+        result = result_fixture()
+        result.components["ox_pump"].outputs.update(head_m=4000, npsh_available_m=25,
+            suction_specific_speed_nss_eu=500, suction_specific_speed_Nss=25800)
+        text = build_cfturbo_markdown(result)
+        self.assertIn("入口密度参考扬程 Href（非已校正总扬程） | 4000", text)
+        self.assertIn("吸入比转速 nss(EU)（按可用 NPSHa） | 500", text)
+        self.assertIn("系统效率不能直接替代液力效率和容积效率", text)
+        self.assertIn("不是原计算记录保存的物性快照", text)
+        self.assertNotIn("150–400", text)
+        self.assertNotIn("| Head H |", text)
 
 
 if __name__ == "__main__":

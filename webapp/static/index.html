@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="火箭发动机系统设计与运行仿真：稳态循环匹配、适用范围明确的瞬态研究与方案追溯。">
-  <title>火箭动力工作台 · 系统设计与运行仿真</title>
+  <title>火箭动力工作台 · 液氧甲烷全流量补燃循环</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/workbench.css">
   <link rel="stylesheet" href="/static/component-analysis.css">
@@ -14,11 +14,13 @@
   <link rel="stylesheet" href="/static/validation-charts.css">
   <link rel="stylesheet" href="/static/property-comparison.css">
   <link rel="stylesheet" href="/static/throttle.css">
+  <link rel="stylesheet" href="/static/fixed-steady.css">
   <link rel="stylesheet" href="/static/convergence.css">
   <link rel="stylesheet" href="/static/steady-closure.css">
   <link rel="stylesheet" href="/static/thermo-applicability.css">
   <link rel="stylesheet" href="/static/cooling.css">
   <link rel="stylesheet" href="/static/cooling-design.css">
+  <link rel="stylesheet" href="/static/cooling-channel-inputs.css">
   <link rel="stylesheet" href="/static/transient.css">
   <link rel="stylesheet" href="/static/feed-network.css">
   <link rel="stylesheet" href="/static/chilldown.css">
@@ -26,11 +28,16 @@
   <link rel="stylesheet" href="/static/shutdown.css">
   <link rel="stylesheet" href="/static/steady-workspace.css">
   <link rel="stylesheet" href="/static/nozzle-geometry.css">
+  <link rel="stylesheet" href="/static/nozzle-design.css">
+  <link rel="stylesheet" href="/static/chamber-design.css">
   <link rel="stylesheet" href="/static/pump-geometry.css">
   <link rel="stylesheet" href="/static/injector-design.css">
   <link rel="stylesheet" href="/static/turbine-geometry.css">
   <link rel="stylesheet" href="/static/turbine-design.css">
-  <script defer src="/static/bootstrap.js"></script>
+  <link rel="stylesheet" href="/static/navigation.css">
+  <link rel="stylesheet" href="/static/partitioned-workspace.css">
+  <link rel="stylesheet" href="/static/pressure-design.css">
+  <script defer crossorigin="use-credentials" src="/static/bootstrap.js"></script>
 </head>
 <body>
   <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -41,95 +48,152 @@
       <h1>从系统设计，<br>到运行仿真。</h1>
       <p>建立稳态设计点、匹配循环，并开展适用范围内的瞬态研究。<br>各分析页说明模型边界，每次计算保留可追溯记录。</p>
       <div class="story-flow"><span>01<br><b>设计参数</b></span><i>→</i><span>02<br><b>稳态匹配</b></span><i>→</i><span>03<br><b>运行研究</b></span></div>
-      <div class="local-note"><span class="dot"></span>本机试用版 · 当前仅此电脑可访问</div>
+      <div class="local-note"><span class="dot"></span><span id="auth-scope-note">正在连接计算服务</span></div>
     </div>
     <div class="auth-panel">
       <div class="auth-card">
         <span class="eyebrow">你的工程工作区</span>
         <h2 id="auth-title">正在连接工作台…</h2>
-        <p id="auth-description" class="muted">正在读取本机服务状态。</p>
+        <p id="auth-description" class="muted">正在读取服务状态。</p>
         <button id="auth-retry" hidden>重新连接</button>
+        <details id="auth-startup-details" hidden><summary>加载错误</summary><p id="auth-startup-error" class="fine"></p></details>
         <form id="auth-form" hidden>
           <label id="display-label">显示名称<input id="auth-display" maxlength="40" autocomplete="name" placeholder="例如：李老师"></label>
-          <label>用户名<input id="auth-username" required pattern="[a-zA-Z0-9_-]{3,32}" maxlength="32" autocomplete="username" placeholder="3–32 位字母、数字、下划线"></label>
+          <label>用户名<input id="auth-username" required pattern="[a-zA-Z0-9_\-]{3,32}" maxlength="32" autocomplete="username" placeholder="3–32 位字母、数字、下划线"></label>
           <label>密码<input id="auth-password" type="password" required maxlength="128" autocomplete="current-password"></label>
           <p id="auth-error" class="error" role="alert"></p>
           <button id="auth-submit" type="submit" class="primary wide">进入工作区</button>
         </form>
-        <p class="fine">数据保存在这台电脑。首个账号是管理员，可在“成员”中创建其他账号。账号密码不会上传 GitHub。</p>
+        <p id="auth-storage-note" class="fine">请使用管理员提供的账号登录。</p>
       </div>
     </div>
   </section>
   <div id="workspace" class="workspace" hidden>
     <header class="app-header">
-      <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>系统设计 · 运行仿真</small></div></div>
+      <button id="toggle-navigation" type="button" aria-label="打开工作区导航" aria-controls="workspace-sidebar" aria-expanded="false">☰</button>
+      <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>液氧甲烷 · 全流量补燃</small></div></div>
       <div class="document-heading"><b id="document-title">工作区</b><span id="document-meta"></span></div>
       <div class="actions header-actions"><button data-nav="projects">打开方案</button><button id="header-save" form="project-form" type="submit" hidden>保存方案</button><button id="header-run" class="primary" hidden>运行设计点</button><button id="header-cancel" hidden>取消计算</button></div>
-      <div class="user-area"><span id="user-label"></span><button class="text-btn" id="logout">退出</button></div>
+      <div class="user-area"><span id="user-label"></span><button class="text-btn" id="change-password">修改密码</button><button class="text-btn" id="logout">退出</button></div>
     </header>
     <div id="connection-banner" class="connection-banner" role="status" hidden><span id="connection-message"></span><button id="retry-connection">重新连接</button></div>
-    <aside class="sidebar">
+    <button id="navigation-backdrop" type="button" aria-label="关闭工作区导航" hidden></button>
+    <aside class="sidebar" id="workspace-sidebar">
+      <div class="nav-intro"><b>系统工作台</b><span>模型 · 配置 · 运行 · 验证</span></div>
       <nav class="design-nav" aria-label="系统设计与运行仿真">
-        <div class="nav-section"><span>01</span>系统仿真</div>
-        <button data-view="overview">稳态性能分析</button>
-        <button data-view="throttle">节流稳态性能分析</button>
-        <button data-view="transient">瞬态响应分析</button>
-        <button data-view="feed">供给网络动态</button>
-        <button data-view="chilldown">预冷与充填分析</button>
-        <button data-view="ignition">点火事件与建压分析</button>
-        <button data-view="shutdown">关机与再启动分析</button>
-        <div class="nav-divider"></div>
-        <button data-view="topology">发动机循环原理图</button><button data-view="states">流路状态分析</button><button data-view="components">部件性能分析</button>
-        <button data-view="geometry">推力室与喷管几何</button>
-        <button data-view="pump_geometry">泵初步几何</button>
-        <button data-view="injector_design">喷注器初步设计</button>
-        <button data-view="turbine_geometry">涡轮总体设计</button>
-        <button data-view="validation">热力学校核</button>
-        <div class="nav-section"><span>02</span>运行记录</div>
-        <button data-view="log">日志与警告</button><button data-view="history">方案与计算记录</button>
+        <details class="nav-group" data-nav-group="library">
+          <summary><span class="nav-group-number">01</span><span class="nav-group-title">模型与数据</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><button data-view="model_library"><span class="nav-item-label">模型资源与数据索引</span></button></div>
+        </details>
+        <details class="nav-group" data-nav-group="design" open>
+          <summary><span class="nav-group-number">02</span><span class="nav-group-title">设计与配置</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children">
+            <button data-view="overview"><span class="nav-item-label">概念设计</span></button>
+            <button data-view="topology"><span class="nav-item-label">循环原理图</span><small class="nav-item-badge">只读</small></button>
+            <div class="nav-subheading">部件初步设计</div>
+            <button data-view="geometry"><span class="nav-item-label">推力室内型面</span></button>
+            <button data-view="chamber_design"><span class="nav-item-label">主燃烧室设计与分析</span></button>
+            <button data-view="nozzle_design"><span class="nav-item-label">喷管设计与性能</span></button>
+            <button data-view="pump_geometry"><span class="nav-item-label">泵设计与建模交接</span></button>
+            <button data-view="injector_design"><span class="nav-item-label">喷注器初步设计</span></button>
+            <button data-view="turbine_geometry"><span class="nav-item-label">涡轮设计与建模交接</span></button>
+          </div>
+        </details>
+        <details class="nav-group" data-nav-group="simulation">
+          <summary><span class="nav-group-number">03</span><span class="nav-group-title">工况与运行</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children">
+            <button data-view="simulation_home"><span class="nav-item-label">运行任务总览</span></button>
+            <button data-view="operating_throttle"><span class="nav-item-label">发动机节流分析</span><small class="nav-item-badge">局部</small></button>
+            <button data-view="fixed_steady"><span class="nav-item-label">固定硬件稳态</span><small class="nav-item-badge">待接入</small></button>
+            <button data-view="transient"><span class="nav-item-label">瞬态响应研究</span><small class="nav-item-badge">局部</small></button>
+            <button type="button" disabled title="线性化模型尚未接入"><span class="nav-item-label">线性化分析</span><small class="nav-item-badge">未开放</small></button>
+            <div class="nav-subheading">专项运行研究</div>
+            <button data-view="feed"><span class="nav-item-label">供给网络动态</span></button>
+            <button data-view="chilldown"><span class="nav-item-label">预冷与充填</span></button>
+            <button data-view="ignition"><span class="nav-item-label">点火事件与建压</span></button>
+            <button data-view="shutdown"><span class="nav-item-label">关机与再启动</span></button>
+          </div>
+        </details>
+        <details class="nav-group" data-nav-group="results">
+          <summary><span class="nav-group-number">04</span><span class="nav-group-title">结果与诊断</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children">
+            <button data-view="results_overview"><span class="nav-item-label">计算结果总览</span></button>
+            <button data-view="solver_diagnostics"><span class="nav-item-label">收敛诊断</span></button>
+            <button data-view="states"><span class="nav-item-label">流路状态分析</span></button>
+            <button data-view="components"><span class="nav-item-label">部件性能分析</span></button>
+            <button data-view="validation"><span class="nav-item-label">热力学校核</span></button>
+            <button data-view="log"><span class="nav-item-label">日志与警告</span></button>
+            <div class="nav-subheading">历史记录</div>
+            <button data-view="history"><span class="nav-item-label">方案与计算记录</span></button>
+            <button data-view="throttle"><span class="nav-item-label">设计匹配扫描历史</span><small class="nav-item-badge">只读</small></button>
+          </div>
+        </details>
+        <details class="nav-group" data-nav-group="guide">
+          <summary><span class="nav-group-number">05</span><span class="nav-group-title">文档与维护</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><button data-view="guide"><span class="nav-item-label">使用说明与维护</span></button></div>
+        </details>
       </nav>
-      <div class="workspace-label">团队工作区 <span>本机</span></div>
+      <div class="workspace-label">工作区 <span id="workspace-location">本机</span></div>
       <nav aria-label="工作区导航">
-        <button data-nav="projects" class="active"><span>▦</span>共享项目</button>
+        <button data-nav="projects" class="active"><span>▦</span><span id="projects-nav-label">共享项目</span></button>
         <button data-nav="jobs"><span>◷</span>计算任务</button>
         <button data-nav="members" id="members-nav" hidden><span>♧</span>成员管理</button>
       </nav>
-      <div class="sidebar-bottom">稳态 / 瞬态研究 · V7.1.0<br>本机工作区</div>
+      <div class="sidebar-bottom">系统设计与运行仿真<br><span id="sidebar-location">本机工作区</span></div>
     </aside>
     <div class="main-wrap">
       <main>
         <section id="projects-page">
-          <div class="page-heading"><div><span class="eyebrow">PROJECTS</span><h1>共享项目</h1><p class="muted">把方案、修订与计算记录放在一起。工作区内的成员可访问全部项目。</p></div><button class="primary" id="new-project">＋ 新建项目</button></div>
+          <div class="page-heading"><div><span class="eyebrow">PROJECTS</span><h1 id="projects-heading">共享项目</h1><p id="projects-description" class="muted">把方案、修订与计算记录放在一起。</p></div><button class="primary" id="new-project">＋ 新建项目</button></div>
           <div class="stats"><div><span>工作区项目</span><b id="stat-projects">0</b></div><div><span>等待 / 计算中</span><b id="stat-active">0</b></div><div><span>最近 100 条中的已完成任务</span><b id="stat-done">0</b></div></div>
           <div id="projects-list" class="project-grid"></div>
         </section>
         <section id="project-page" hidden>
-          <div class="workbench-layout">
+          <div class="workbench-layout partitioned-workbench">
+            <div class="analysis-pane">
+              <div id="analysis-breadcrumb" class="workbench-breadcrumb" aria-label="当前位置"></div>
+              <div class="analysis-heading"><div><h1 id="analysis-title">概念设计</h1><p class="muted" id="analysis-subtitle">设计点循环匹配 · 部件需求与尺寸初估</p></div><button id="toggle-parameters" hidden>编辑相关参数</button></div>
+              <p id="workspace-error" class="error" role="alert" hidden></p>
+              <p id="project-scope-note" class="fine" role="status" hidden></p>
+              <div id="concept-navigation" role="tablist" aria-label="概念设计工作区">
+                <button id="concept-tab-settings" data-concept-section="settings" role="tab" aria-selected="true" aria-controls="concept-settings-host">设计输入</button>
+                <button id="concept-tab-results" data-concept-section="results" role="tab" aria-selected="false" tabindex="-1" aria-controls="concept-section-content">计算结果</button>
+                <button id="concept-tab-diagnostics" data-concept-section="diagnostics" role="tab" aria-selected="false" tabindex="-1" aria-controls="concept-section-content">收敛诊断</button>
+              </div>
+              <div id="concept-settings-host" role="tabpanel" aria-labelledby="concept-tab-settings">
             <section class="editor parameter-pane" id="parameter-pane" aria-label="参数设置">
-              <div class="parameter-heading"><div class="panel-heading"><h2>参数设置</h2><span id="dirty-label" class="badge">已保存</span></div><p class="fine">推力 kN · 压力 MPa · 温度 K</p>
+              <div class="parameter-heading"><div class="panel-heading"><h2>概念设计参数</h2><span id="dirty-label" class="badge">已保存</span></div><p class="fine">推力 kN · 压力 MPa · 温度 K</p>
               <input id="parameter-search" type="search" placeholder="搜索参数或单位…" aria-label="搜索参数或单位">
               <select id="parameter-group" aria-label="参数分组"></select></div>
               <form id="project-form" novalidate>
                 <div class="parameter-scroll">
-                  <div class="preset-box"><label>参考机型<select id="project-preset" aria-label="参考工况"></select></label><p class="fine">选择即载入整套示例参数，可撤销。</p><p id="preset-context" class="field-help"></p><div class="preset-actions"><button id="apply-preset" type="button">恢复示例参数</button><button id="open-references" type="button">机型资料</button></div><button id="undo-preset" type="button" class="wide" hidden>撤销机型切换</button></div>
-                  <div class="propellant-context" aria-label="当前推进剂模型"><b id="propellant-model-label"></b><div id="propellant-model-note" class="fine"></div><details id="propellant-model-details"><summary>数据来源、温区与模型说明</summary><div id="propellant-model-limits" class="fine"></div><button id="upgrade-methane-dataset" type="button" hidden>使用 high-T 建立新版草稿</button></details><p id="propellant-model-error" class="error" role="alert"></p><button id="load-propellant-example" type="button" hidden>加载配套工程示例</button></div>
+                  <div id="design-readiness" hidden></div>
+                  <details class="concept-reference"><summary>设计示例与物性模型</summary>
+                  <div class="preset-box"><label>概念设计示例<select id="project-preset" aria-label="概念设计示例"></select></label><p class="fine">载入示例会替换整套草稿，可撤销。自定义方案沿用当前值，需逐组确认。</p><p id="preset-context" class="field-help"></p><div class="preset-actions"><button id="apply-preset" type="button">重新载入示例参数</button><button id="open-references" type="button">参数来源与建模假设</button></div><button id="undo-preset" type="button" class="wide" hidden>撤销本次示例载入</button></div>
+                  <div class="propellant-context" aria-label="当前物性与热力学模型"><b>当前物性与热力学模型</b><p id="propellant-model-label" class="fine"></p><div id="propellant-model-note" class="fine"></div><details id="propellant-model-details"><summary>数据来源、温区与模型说明</summary><div id="propellant-model-limits" class="fine"></div><button id="upgrade-methane-dataset" type="button" hidden>使用 high-T 建立新版草稿</button></details><p id="propellant-model-error" class="error" role="alert"></p></div>
+                  </details>
+                  <div id="concept-design-scope"></div>
+                  <div id="concept-parameter-roles"></div>
                   <div id="parameter-fields"></div><p id="parameter-empty" class="small-empty" hidden>没有匹配的参数。</p>
                 </div>
                 <div class="parameter-footer">
                 <p id="editor-error" class="error" role="alert"></p>
-                <div class="editor-actions"><button id="submit-job" class="primary" type="button">运行设计点</button><button type="submit">保存方案</button></div>
-                <p class="fine">运行时自动保存修改，并保留版本快照。</p><p id="run-progress" class="fine" aria-live="polite">就绪 · 选择工况后运行设计点</p>
+                <div class="editor-actions"><button id="submit-job" class="primary" type="button" hidden>运行设计点</button><button type="submit">保存方案</button></div>
+                <p class="fine">运行时自动保存修改，并保留版本快照。</p><p id="run-progress" class="fine" aria-live="polite">请选择设计工况。</p>
                 </div>
               </form>
             </section>
-            <div class="analysis-pane">
-              <div class="analysis-heading"><div><h1 id="analysis-title">稳态性能分析</h1><p class="muted" id="analysis-subtitle">单工况设计点 · 循环匹配、功率平衡与系统约束</p></div><button id="toggle-parameters" aria-expanded="true">收起参数</button></div>
+              </div>
+              <div id="concept-section-content" hidden>
               <div id="result-toolbar" class="result-toolbar"><label>计算记录<select id="result-selector" aria-label="选择计算记录"><option value="">尚无计算记录</option></select></label><button id="export-current-result" hidden>导出结果</button></div>
               <div id="result-context" class="banner" role="status">尚无计算结果。选择参考工况后运行设计点。</div>
-              <div id="result-consistency" hidden></div>
               <div id="analysis-content"></div>
+              <div id="result-consistency" hidden></div>
+              </div>
               <div id="validation-content" hidden></div>
               <div id="throttle-content" hidden></div>
+              <div id="operating-throttle-content" hidden></div>
+              <div id="fixed-steady-content" hidden></div>
               <div id="transient-content" hidden></div>
               <div id="feed-content" hidden></div>
               <div id="chilldown-content" hidden></div>
@@ -154,13 +218,22 @@
           </div>
         </section>
         <section id="jobs-page" hidden><div class="page-heading"><div><span class="eyebrow">COMPUTE</span><h1>计算任务</h1><p class="muted">一次执行一个任务，其余排队。每个任务最多运行 10 分钟。</p></div><button id="refresh-jobs">刷新</button></div><section class="panel" id="all-jobs"></section></section>
-        <section id="members-page" hidden><div class="page-heading"><div><span class="eyebrow">PEOPLE</span><h1>成员管理</h1><p class="muted">成员共享本工作区的项目和结果，可编辑方案、提交任务。</p></div></div><div class="project-layout"><section class="panel"><h2>创建成员账号</h2><form id="member-form"><label>显示名称<input name="display_name" required maxlength="40"></label><label>用户名<input name="username" required pattern="[a-zA-Z0-9_-]{3,32}" maxlength="32"></label><label>初始密码<input name="password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label><button type="submit" class="primary">创建账号</button><p id="member-error" class="error"></p></form></section><section class="panel"><h2>工作区成员</h2><div id="members-list"></div></section></div></section>
+        <section id="members-page" hidden><div class="page-heading"><div><span class="eyebrow">PEOPLE</span><h1 id="members-heading">成员管理</h1><p id="members-description" class="muted">管理工作区账号。</p></div></div><div class="project-layout"><section class="panel"><h2>创建成员账号</h2><form id="member-form"><label>显示名称<input name="display_name" required maxlength="40"></label><label>用户名<input name="username" required pattern="[a-zA-Z0-9_\-]{3,32}" maxlength="32"></label><label>初始密码（必填，最多 128 位）<input name="password" type="password" required maxlength="128" autocomplete="new-password"></label><button type="submit" class="primary">创建账号</button><p id="member-error" class="error"></p></form></section><section class="panel"><h2>工作区成员</h2><div id="members-list"></div></section></div></section>
       </main>
     </div>
     <footer class="status-bar"><span id="connection-status">正在连接服务…</span><span id="page-name">共享项目</span><span id="runtime-version"></span></footer>
   </div>
-  <dialog id="new-dialog"><form id="new-form"><div class="panel-heading"><h2>新建共享项目</h2><button type="button" class="text-btn" data-close="new-dialog" aria-label="关闭">×</button></div><label>项目名称<input name="name" required maxlength="80" placeholder="例如：方案对比研究"></label><label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="说明本项目的目的，便于成员理解"></textarea></label><label>起始工程示例<select name="preset" id="new-preset"></select></label><p class="fine">支持液氧／甲烷与液氧／煤油系统级初算。煤油采用正十二烷替代工质，当前支持 GG 循环与指定冷却吸热量。所有示例包含工程假设，不代表厂商完整设计或实测性能。</p><p class="error" id="new-error"></p><button type="submit" class="primary wide">创建项目</button></form></dialog>
-  <dialog id="reference-dialog"><div class="panel-heading"><h2>参考机型资料</h2><button class="text-btn" data-close="reference-dialog" aria-label="关闭">×</button></div><label>机型<select id="reference-engine" aria-label="查看参考机型"></select></label><div id="reference-content"></div><div class="dialog-footer"><button data-close="reference-dialog">关闭</button></div></dialog>
+  <dialog id="password-dialog" aria-labelledby="password-title"><form id="password-form">
+    <div class="panel-heading"><h2 id="password-title">修改我的密码</h2><button type="button" class="text-btn" id="password-close" aria-label="关闭">×</button></div>
+    <label>当前密码<input id="password-current" type="password" required maxlength="128" autocomplete="current-password"></label>
+    <label>新密码（必填，最多 128 位）<input id="password-new" type="password" required maxlength="128" autocomplete="new-password"></label>
+    <label>再次输入新密码<input id="password-confirm" type="password" required maxlength="128" autocomplete="new-password"></label>
+    <p class="fine">修改后，所有已登录设备将退出，需要使用新密码重新登录。请先保存正在编辑的方案。</p>
+    <p class="error" id="password-error" role="alert"></p>
+    <div class="dialog-footer"><button type="button" id="password-cancel">取消</button><button type="submit" class="primary" id="password-submit">修改密码</button></div>
+  </form></dialog>
+  <dialog id="new-dialog"><form id="new-form"><div class="panel-heading"><h2 id="new-project-title">新建项目</h2><button type="button" class="text-btn" data-close="new-dialog" aria-label="关闭">×</button></div><label>项目名称<input name="name" required maxlength="80" placeholder="例如：方案对比研究"></label><label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="说明本项目的目的，便于成员理解"></textarea></label><label>起始工程示例<select name="preset" id="new-preset"></select></label><p class="fine">本平台专用于液氧甲烷全流量补燃循环（FFSC）发动机的系统设计与运行研究。起始示例包含工程假设，不代表厂商完整设计或实测性能。</p><p class="error" id="new-error"></p><button type="submit" class="primary wide">创建项目</button></form></dialog>
+  <dialog id="reference-dialog"><div class="panel-heading"><h2>参数来源与建模假设</h2><button class="text-btn" data-close="reference-dialog" aria-label="关闭">×</button></div><label>参考对象<select id="reference-engine" aria-label="查看参考对象资料"></select></label><div id="reference-content"></div><div class="dialog-footer"><button data-close="reference-dialog">关闭</button></div></dialog>
   <dialog id="result-dialog" class="result-dialog"><div class="panel-heading"><div><span class="eyebrow">CALCULATION RECORD</span><h2 id="result-title">计算结果</h2></div><button class="text-btn" data-close="result-dialog" aria-label="关闭">×</button></div><div id="result-content"></div><div class="dialog-footer"><button id="download-result">导出完整结果 JSON</button><button data-close="result-dialog" class="primary">关闭</button></div></dialog>
 </body>
 </html>

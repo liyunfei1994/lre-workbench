@@ -29,7 +29,7 @@ test("states use saved quantities, correct units and a collapsed default view",(
 test("point and station selections are bounded and switching can retain the open view",()=>{
   const result=fixture();result.points.push(structuredClone(result.points[0]));result.points[1].of=4;
   const html=renderThermoStations(result,{pointIndex:1,station:"throat",open:true});
-  assert.match(html,/data-thermo-stations open/);assert.match(html,/<option value="1" selected>2 · O\/F 4/);
+  assert.match(html,/data-thermo-stations open/);assert.match(html,/<option value="1" selected>2 · 氧燃质量比 4/);
   assert.match(html,/<option value="throat" selected>/);
   assert.match(stateRow(html,"temperature_K"),/<td>2,400<\/td><td>2,401<\/td><td>\+1<\/td>/);
   assert.match(stateRow(html,"pressure_Pa"),/<td>—<\/td><td>—<\/td><td>—<\/td>/);

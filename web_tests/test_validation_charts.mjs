@@ -50,7 +50,7 @@ test("chamber quantities collapse only exactly identical values, differences and
 
 test("one O/F gives four numerical cards, multiple epsilon rows and no fake trend",()=>{
   const fixture=result([point(3.6,40),point(3.6,80)]),html=renderThermoCharts(fixture);
-  assert.match(html,/单工况对比 · O\/F = 3.6/);assert.equal((html.match(/tc-single-card/g)||[]).length,4);
+  assert.match(html,/单工况对比 · 氧燃质量比 = 3.6/);assert.equal((html.match(/tc-single-card/g)||[]).length,4);
   assert.doesNotMatch(html,/<polyline|tc-plot/);assert.match(html,/不能形成趋势曲线/);
   assert.match(html,/>40<\/th>/);assert.match(html,/>80<\/th>/);
 });
@@ -75,6 +75,6 @@ test("untrusted strings and nonfinite values cannot become executable SVG markup
 test("export is self-contained with units, source conditions, four panels and legends",()=>{
   const svg=buildThermoChartSvg(result([point(2,40),point(3,40)]));
   assert.match(svg,/^<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/);assert.match(svg,/<style>/);
-  assert.match(svg,/Pc 30 MPa/);assert.match(svg,/O\/F/);assert.match(svg,/燃烧室温度/);
+  assert.match(svg,/Pc 30 MPa/);assert.match(svg,/氧燃质量比/);assert.match(svg,/燃烧室温度/);
   assert.match(svg,/特征速度/);assert.match(svg,/Cantera 实线圆点/);assert.doesNotMatch(svg,/<image|href=/);
 });

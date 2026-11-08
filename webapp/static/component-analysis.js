@@ -2,10 +2,10 @@
 // The immutable solver outputs are deliberately never read or changed here.
 const CATEGORIES = [
   {id:"supply", title:"泵与供给", short:"供给", mark:"P", ids:["ox_pump","fuel_pump"]},
-  {id:"shaft", title:"涡轮与轴功", short:"轴功", mark:"T", ids:["ox_preburner_turbine","fuel_preburner_turbine","gg_turbine","gg_turbine_ox","gg_turbine_fuel"]},
-  {id:"combustion", title:"燃烧与喷注", short:"燃烧", mark:"C", ids:["ox_preburner","fuel_preburner","gas_generator","main_chamber","injector"]},
+  {id:"shaft", title:"涡轮与轴功", short:"轴功", mark:"T", ids:["ox_preburner_turbine","fuel_preburner_turbine"]},
+  {id:"combustion", title:"燃烧与喷注", short:"燃烧", mark:"C", ids:["ox_preburner","fuel_preburner","main_chamber","injector"]},
   {id:"thermal", title:"冷却与换热", short:"冷却", mark:"Q", ids:["cooling_channel"]},
-  {id:"thrust", title:"喷管与推力", short:"推力", mark:"N", ids:["nozzle","gg_exhaust_nozzle"]},
+  {id:"thrust", title:"喷管与推力", short:"推力", mark:"N", ids:["nozzle"]},
 ];
 const OTHER_CATEGORY = {id:"other",title:"其他部件",short:"其他",mark:"·",ids:[]};
 const categoryOf = id => CATEGORIES.find(category=>category.ids.includes(id)) || OTHER_CATEGORY;
@@ -33,7 +33,7 @@ const SYMBOLS = {
   specific_work_isentropic_Jkg:"wₛ",turbine_power_W:"Pₜ",turbine_power_MW:"Pₜ",eta_turbine:"ηₜ",mass_flow_kgs:"ṁ",
   turbine_pressure_ratio:"πₜ",pressure_recovery_ratio:"σ",isentropic_drop_Jkg:"Δhₛ",actual_drop_Jkg:"Δh",actual_temp_drop_K:"ΔT",
   shaft_speed_rpm:"n",cp_in_Jkgk:"cₚ,ᵢₙ",gamma_in:"γᵢₙ",molar_mass_in:"Mᵢₙ",t_in_over_limit:"ΔTlim",
-  mdot_total_kgs:"ṁ",mdot_fuel_kgs:"ṁf",mdot_ox_kgs:"ṁox",mdot_chamber_kgs:"ṁcc",phi:"φ",mixture_ratio_OF:"O/F",fuel_fraction:"xf",
+  mdot_total_kgs:"ṁ",mdot_fuel_kgs:"ṁf",mdot_ox_kgs:"ṁox",mdot_chamber_kgs:"ṁcc",phi:"φ",mixture_ratio_OF:"氧燃质量比",fuel_fraction:"xf",
   T_combustion_K:"Tcomb",T_chamber_K:"Tcc",T_chamber_ideal_K:"Tcc,ideal",combustion_efficiency:"kT",
   h_in_Jkg:"hᵢₙ",h_combustion_Jkg:"hcomb",h_chamber_Jkg:"hcc",cp_Jkgk:"cₚ",gamma:"γ",molar_mass_kg_per_kmol:"M",
   preburner_pressure_Pa:"pPB",preburner_pressure_MPa:"pPB",injector_dp_Pa:"Δpᵢ",injector_dp_MPa:"Δpᵢ",injector_dp_bar:"Δpᵢ",injector_dp_ratio:"Δpᵢ/p",
@@ -42,8 +42,7 @@ const SYMBOLS = {
   Ve_ms:"Vexit",exit_velocity_ms:"Vexit",c_star_ms:"c*",Cf:"CF",Cf_vac:"CF,vac",Cf_sl:"CF,amb",Cf_momentum:"CF,mom",Cf_pressure:"CF,p",
   mach_exit:"Maexit",exit_mach:"Maexit",p_exit_Pa:"pexit",exit_pressure_Pa:"pexit",p_amb_Pa:"pamb",expansion_ratio:"ε",T_exit_K:"Texit",gamma_exit:"γexit",
 };
-const symbolFor = (item,field) => item.id==="gas_generator" && ["preburner_pressure_Pa","preburner_pressure_MPa"].includes(field.key)
-  ? "pGG" : SYMBOLS[field.key] || "—";
+const symbolFor = (item,field) => SYMBOLS[field.key] || "—";
 const PRESSURE_IN = ["p_in_MPa","p_in_Pa","P_in_Pa","p_in_bar"];
 const PRESSURE_OUT = ["p_out_MPa","p_out_Pa","P_out_Pa","p_out_bar"];
 const TEMP_OUT = ["T_out_K","T_exhaust_K"];
@@ -78,7 +77,7 @@ function primaryFields(item) {
 
 function kpis(item) {
   const fields=primaryFields(item);
-  const handoff=item.injectorDesign?`<div class="ca-design-link"><span>三处喷注位置、主喷注单元尺寸和回算依据统一在喷注器初步设计中查看。</span><button type="button" data-ca-injector-design="${escape(item.id)}">喷注器初步设计 →</button></div>`:item.category.id==="shaft"?`<div class="ca-design-link"><span>本页查看循环中的部件结果；设计输入、真实燃气物性与一维初选统一在涡轮总体设计中查看。</span><button type="button" data-ca-turbine-design="${escape(item.id)}">CFturbo 设计任务书 →</button></div>`:"";
+  const handoff=item.injectorDesign?`<div class="ca-design-link"><span>三处喷注位置、主喷注单元尺寸和回算依据统一在喷注器初步设计中查看。</span><button type="button" data-ca-injector-design="${escape(item.id)}">喷注器初步设计 →</button></div>`:item.category.id==="shaft"?`<div class="ca-design-link"><span>本页查看循环中的部件结果；设计输入、真实燃气物性与一维初选统一在涡轮设计条件中查看。</span><button type="button" data-ca-turbine-design="${escape(item.id)}">CFturbo 设计任务书 →</button></div>`:"";
   return handoff+(fields.length ? `<div class="ca-kpis">${fields.map(field=>`<div class="ca-kpi"><span>${escape(field.label)}</span><strong>${escape(format(field.value))}<small>${escape(unitText(field))}</small></strong><span class="ca-symbol">${escape(symbolFor(item,field))}</span></div>`).join("")}</div>` : "");
 }
 

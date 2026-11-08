@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from CoolProp.CoolProp import PropsSI
-from fluid_properties import supply_liquid_screen
+from lre_workbench.properties.fluids import supply_liquid_screen
 from webapp.steady_design import _supply_basis
 
 

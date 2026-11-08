@@ -8,11 +8,11 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from core import EngineInputs, ValidationError
-from geometry.nozzle import full_hot_gas_geometry, compute_nozzle, top_bell_angles
-from regen_geometry import build_regen_geometry
-from regen_coupling import cooling_arguments, fixed_contour_inputs
-from cooling_marching import march_regen_circuit
+from lre_workbench.domain.models import EngineInputs, ValidationError
+from lre_workbench.components.nozzles.geometry import full_hot_gas_geometry, compute_nozzle, top_bell_angles
+from lre_workbench.components.cooling.geometry import build_regen_geometry
+from lre_workbench.systems.regenerative import cooling_arguments, fixed_contour_inputs
+from lre_workbench.components.cooling.marching import march_regen_circuit
 from tests.test_regen_circuit import BASE
 from tests import test_geometry_consistency as geometry_checks
 
@@ -112,12 +112,17 @@ class NozzleContourMethodTests(unittest.TestCase):
         self.assertEqual(fixed_contour_inputs({'cooling_hardware':{'geometry':old}})['nozzle_contour_method'],'legacy_log_v1')
         self.assertEqual(fixed_contour_inputs({})['nozzle_contour_method'],'legacy_log_v1')
 
-    def test_ffsc_and_gg_throttle_use_saved_contour_not_later_edits(self):
+    def test_ffsc_legacy_scan_uses_saved_contour_and_foreign_cycles_are_blocked(self):
         from unittest.mock import patch
-        from cycle import FFSCCycleModel
-        from gg_cycle import GGCycleModel
+        from lre_workbench.systems.ffsc import FFSCCycleModel
         from web_tests.test_throttle_analysis import source_fixture, source_baseline, solved_fixture
-        for model_class, cycle in ((FFSCCycleModel, "ffsc"), (GGCycleModel, "gg")):
+        # The platform has retired GG design; historical foreign-cycle records
+        # cannot acquire a fresh FFSC baseline merely to exercise geometry.
+        foreign = source_fixture()
+        foreign["result"]["calculation"]["inputs"]["cycle_type"] = "gg"
+        with self.assertRaisesRegex(ValueError, "FFSC"):
+            source_baseline(foreign)
+        for model_class, cycle in ((FFSCCycleModel, "ffsc"),):
             with self.subTest(cycle=cycle):
                 source = source_fixture()
                 source["result"]["calculation"]["inputs"]["cycle_type"] = cycle

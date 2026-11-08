@@ -9,8 +9,8 @@ from unittest.mock import patch
 from webapp.solver import EngineInputs
 from webapp.cooling_design import (assess, calculate_cooling_design, configuration,
                                    normalize_request, pareto, source_data)
-from cooling import CoolingChannel
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.components.cooling.model import CoolingChannel
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 
 
 @lru_cache(maxsize=1)
@@ -130,7 +130,7 @@ class CoolingDesignTests(unittest.TestCase):
             geom = source["result"]["calculation"]["components"]["cooling_channel"]["profile"]["geometry"]
             record = geom[group][2] if group else geom
             record[field] += 1e-4
-            with self.subTest(group=group, field=field), patch("cooling_marching.march_regen_circuit", return_value=solved):
+            with self.subTest(group=group, field=field), patch('lre_workbench.components.cooling.marching.march_regen_circuit', return_value=solved):
                 candidate = calculate_cooling_design(request_fixture(source), source)["candidates"][0]
                 self.assertEqual(candidate["status"], "failed")
                 self.assertIn("固定热侧轮廓", candidate["error"])

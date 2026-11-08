@@ -1,6 +1,6 @@
 # 关机与再启动研究模型：方程、接口及适用范围
 
-本文对应 `src/shutdown_gas.py`、`src/shutdown_inventory.py`、`src/shutdown_rotor.py` 与 `webapp/shutdown.py` 的当前实现。建立的是三个物理边界明确、分别积分的研究单元；它们尚未连接为某一参考发动机的完整关机与再启动模型。
+本文对应 `src/lre_workbench/operations/shutdown_gas.py`、`src/lre_workbench/operations/shutdown_inventory.py`、`src/lre_workbench/operations/shutdown_rotor.py` 与 `webapp/shutdown.py` 的当前实现。建立的是三个物理边界明确、分别积分的研究单元；它们尚未连接为某一参考发动机的完整关机与再启动模型。
 
 来源设计记录提供项目与方案追溯。默认容积、阀序、热容量、换热系数、泵图、转动惯量等属于独立研究算例，不能视为 Merlin、Raptor、天鹊或其他实机的已知数据。改变参考机型不会自动把这些假设变成实机参数。
 
