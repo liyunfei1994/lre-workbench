@@ -15,9 +15,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QTableWidget, QMessageBox
-from core import ComponentResult, CycleResults, EngineInputs, FlowState
-from workbench import WorkbenchWindow
-from workbench_fonts import configure_fonts
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs, FlowState
+from lre_workbench.desktop.workbench import WorkbenchWindow
+from lre_workbench.desktop.fonts import configure_fonts
 from web_tests.convergence_fixture import converged_evidence
 from tests.cooling_profile_fixture import cooling_profile
 
@@ -134,6 +134,10 @@ class AssessmentUiTests(unittest.TestCase):
         self.assertEqual(window._signature(), signature)
 
     def test_preburner_provisional_limits_are_not_green_acceptance(self):
+        # A new custom EngineInputs leaves these limits unset. Exercise the
+        # provisional branch explicitly rather than relying on a retired default.
+        self.result.inputs.ox_preburner_temp_limit_status = "provisional"
+        self.result.inputs.fuel_preburner_temp_limit_status = "provisional"
         row = self.window._make_kpi_row(self.result)
         for title in ("富氧预燃室温度", "富燃预燃室温度"):
             label = next(label for label in row.findChildren(QLabel) if label.text() == title)
@@ -141,7 +145,11 @@ class AssessmentUiTests(unittest.TestCase):
             self.assertNotEqual(card.objectName(), "KpiCard_ok")
             self.assertTrue(any("暂定上限" in hint.text() for hint in card.findChildren(QLabel)))
         self.window._populate_overview(self.result)
+        # Replacing the overview schedules its previous cards for deletion.
+        # Do not inspect a stale unset-limit table from an earlier test.
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         table = self.window.findChild(QTableWidget, "EngineeringChecks")
+        self.assertIsNotNone(table)
         for index in range(table.rowCount()):
             if table.item(index, 0).text() in ("富氧预燃室出口温度", "富燃预燃室出口温度"):
                 self.assertEqual(table.item(index, 3).text(), "依据待核实")
@@ -166,7 +174,7 @@ class AssessmentUiTests(unittest.TestCase):
         window.input_edits["pc"].setText("31.5")
         destination = Path(self.directory.name) / "result.json"
         warnings_seen = []
-        with patch("workbench.QFileDialog.getSaveFileName", return_value=(str(destination), "JSON (*.json)")), \
+        with patch('lre_workbench.desktop.workbench.QFileDialog.getSaveFileName', return_value=(str(destination), "JSON (*.json)")), \
              patch.object(QMessageBox, "warning", side_effect=lambda parent, title, text: warnings_seen.append(text)):
             window.export_json()
         self.assertEqual(warnings_seen, [])
@@ -207,7 +215,7 @@ class AssessmentUiTests(unittest.TestCase):
         report = deepcopy(self.window._runtime_report)
         report["ready"] = False
         report["functional_checks"]["cantera_mechanism"].update(ready=False, error="test mechanism unavailable")
-        with patch("workbench.environment_report", return_value=report):
+        with patch('lre_workbench.desktop.workbench.environment_report', return_value=report):
             probe_window = WorkbenchWindow(recovery_directory=Path(self.directory.name) / "probe-recovery")
         try:
             self.assertIn("环境不完整", probe_window.environment_label.text())

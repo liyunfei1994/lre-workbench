@@ -4,8 +4,8 @@ import json
 import math
 import unittest
 
-from ignition import IgnitionModel, default_settings, gas_mass_flux, validate_settings
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.operations.ignition import IgnitionModel, default_settings, gas_mass_flux, validate_settings
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 
 
 def closed(**changes):

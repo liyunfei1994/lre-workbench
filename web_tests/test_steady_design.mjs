@@ -14,10 +14,41 @@ test("overall evidence separates equation closure from hardware and preserves so
 test("unsupported or missing framework is not fabricated",()=>{
   for(const r of [null,{}, {schema_version:1,status:"not_applicable"}])assert.equal(renderSteadyDesignSummary(r)+renderSteadyDesignBasis(r),"");
 });
+test("FFSC scope explains target closure without inferring a historical mode or success",()=>{
+  for(const status of ["review_required","blocked"]){
+    const r={...fixture(),scope:"lox_methane_ffsc_steady_design",status},before=structuredClone(r);
+    const html=renderSteadyDesignSummary(r);
+    assert.match(html,/推力达到输入目标属于约束闭合/);
+    assert.match(html,/仍需结合专业设计校核/);
+    assert.doesNotMatch(html,/已满足目标推力|指定预燃室温度|指定预燃室氧燃质量比/);
+    assert.deepEqual(r,before);
+  }
+  for(const scope of [undefined,"gg_steady_design","<script>"]){
+    assert.doesNotMatch(renderSteadyDesignSummary({...fixture(),scope}),/sd-design-scope/);
+  }
+});
 test("source strings are escaped and actions restricted to existing tabs",()=>{
   const r=fixture();r.gates[0].label='<img src=x onerror="bad()">';r.gates[0].target='" onclick="bad()';
   const html=renderSteadyDesignSummary(r);
   assert.doesNotMatch(html,/<img| onclick=/);assert.match(html,/&lt;img/);
+});
+test("gate-specific range labels preserve status styling and legacy fallbacks",()=>{
+  const r=fixture();
+  r.gates=[
+    {id:"range",label:"流体物性声明范围",status:"pass",status_label:"数据温区内",target:"models"},
+    {id:"wall_thermal_range",label:"壁面材料热物性数据范围",status:"fail",status_label:"超出数据温区",target:"cooling"},
+    {id:"legacy",label:"历史门卡",status:"review",status_label:"  "},
+  ];
+  const before=structuredClone(r),html=renderSteadyDesignSummary(r);
+  assert.match(html,/sd-state sd-pass">数据温区内/);
+  assert.match(html,/sd-state sd-fail">超出数据温区/);
+  assert.match(html,/sd-state sd-review">待确认/);
+  assert.deepEqual(r,before);
+});
+test("gate-specific status text is escaped rather than inserted as markup",()=>{
+  const r=fixture();r.gates[0].status_label='<img src=x onerror="bad()">';
+  const html=renderSteadyDesignSummary(r);
+  assert.match(html,/&lt;img/);assert.doesNotMatch(html,/<img| onerror="bad/);
 });
 test("legacy enthalpy percentages are suppressed and path evidence absence is visible",()=>{
   const s={stations:[{label:"test",eos_comparisons:[{backend:"PR",status:"computed",paired_ideal_baseline:{enthalpy_j_kg:-100},candidate:{enthalpy_j_kg:-90},differences:{enthalpy_j_kg:{difference:10,relative_difference:.1}},frozen_expansion:{status:"computed",isentropic_drop_j_kg:2000}}]}]};

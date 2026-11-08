@@ -1,6 +1,6 @@
 # 点火与启动建压研究：方程、接口及适用范围
 
-日期：2026-10-22。实现入口为 `src/ignition.py` 的 `IgnitionModel`，平台适配层为 `webapp/ignition.py`。本说明与[文献证据](IGNITION_STARTUP_EVIDENCE.md)配套；具体测试结果单独记录。文献方法、数值实现验证与实机验证是不同证据等级。
+日期：2026-10-22。实现入口为 `src/lre_workbench/operations/ignition.py` 的 `IgnitionModel`，平台适配层为 `webapp/ignition.py`。本说明与[文献证据](IGNITION_STARTUP_EVIDENCE.md)配套；具体测试结果单独记录。文献方法、数值实现验证与实机验证是不同证据等级。
 
 ## 1. 当前实际计算对象
 

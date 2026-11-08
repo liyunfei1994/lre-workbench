@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 from web_tests.test_throttle_cooling_contract import physical_source_fixture
 from webapp.throttle import source_baseline
-from wall_materials import get_wall_dataset, GRCOP84_DATASET_ID, CUZR_DATASET_ID
-from wall_thermal import audit_cell, material_summary
+from lre_workbench.materials.wall import get_wall_dataset, GRCOP84_DATASET_ID, CUZR_DATASET_ID
+from lre_workbench.components.cooling.wall_thermal import audit_cell, material_summary
 
 
 class WallThrottleBindingTests(unittest.TestCase):
@@ -33,13 +33,32 @@ class WallThrottleBindingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "材料.*历史记录.*重新计算"):
                     source_baseline(source)
 
+    def test_new_assignment_identity_pair_is_checked_without_upgrading_history(self):
+        source = physical_source_fixture()
+        assignment = source["result"]["calculation"]["components"]["cooling_channel"]["profile"]["material_assignment"]
+        legacy = deepcopy(source)
+        source_baseline(source)
+        self.assertEqual(source, legacy)
+        assignment.update(default_material_id="grcop84", zone_material_ids=[])
+        before = deepcopy(source)
+        self.assertEqual(source_baseline(source)[1]["cooling_hardware"]["wall_material_binding"]["assignment"], assignment)
+        self.assertEqual(source, before)
+        for field, value in (("default_material_id", "grcop42"), ("zone_material_ids", [{}])):
+            changed = deepcopy(source)
+            changed["result"]["calculation"]["components"]["cooling_channel"]["profile"]["material_assignment"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "材料.*重新计算"):
+                source_baseline(changed)
+        assignment.pop("zone_material_ids")
+        with self.assertRaisesRegex(ValueError, "材料.*重新计算"):
+            source_baseline(source)
+
     def test_changed_live_dataset_is_not_silently_used(self):
         source = physical_source_fixture()
         original = get_wall_dataset(GRCOP84_DATASET_ID)
         changed_curve = replace(original.conductivity_property,
                                 coefficients=(7000., -3466., 599.5, -34.18))
         changed = replace(original, conductivity_property=changed_curve)
-        with patch("wall_materials._DATASETS", {GRCOP84_DATASET_ID: changed}):
+        with patch.dict('lre_workbench.materials.wall._DATASETS', {GRCOP84_DATASET_ID: changed}):
             with self.assertRaisesRegex(ValueError, "材料.*哈希.*重新计算"):
                 source_baseline(source)
 

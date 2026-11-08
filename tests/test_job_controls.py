@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt
-from workbench import WorkbenchWindow
-from ui_chamber_design import _PreviewWorker
-from scan_parameters import validate_thermo_scan
+from lre_workbench.desktop.workbench import WorkbenchWindow
+from lre_workbench.desktop.chamber_design import _PreviewWorker
+from lre_workbench.analysis.scan_parameters import validate_thermo_scan
 
 
 class JobControlTests(unittest.TestCase):
@@ -51,7 +51,7 @@ class JobControlTests(unittest.TestCase):
             w._thermo_of_n.setText(count)
             w._thermo_of_min.setText(of_min)
             w._thermo_eps.setText(eps)
-            with patch("gui_pyside6.ThermoWorker") as worker, patch.object(QMessageBox, "warning") as warning:
+            with patch('lre_workbench.desktop.legacy_window.ThermoWorker') as worker, patch.object(QMessageBox, "warning") as warning:
                 w.run_thermo_compare()
             self.assertFalse(w._busy)
             worker.assert_not_called()

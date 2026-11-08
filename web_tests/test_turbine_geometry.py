@@ -135,8 +135,8 @@ class TurbineGeometryTests(unittest.TestCase):
         result["turbine_geometry"] = turbine_geometry_view(result, "old-record")
         expected = deepcopy(result["turbine_geometry"]["turbines"]["ox"])
         result["calculation"]["inputs"]["ox_turbine_inlet_flow_coefficient"] = 5
-        result["calculation"]["components"] = {"gg_turbine": {"outputs": {}}}
-        result["submitted_inputs"] = {"cycle_type": "gg"}
+        result["calculation"]["components"] = {}
+        result["submitted_inputs"] = {"cycle_type": "ffsc"}
         t = ox(result)
         expected["source"]["record_id"] = "record-a"
         self.assertEqual(t, expected)
@@ -253,77 +253,27 @@ class TurbineGeometryTests(unittest.TestCase):
                 json.dumps(view, allow_nan=False)
 
 
-class GasGeneratorTurbineGeometryTests(unittest.TestCase):
-    def single(self):
-        result = fixture()
-        calc = result["calculation"]
-        calc["inputs"].update(cycle_type="gg", gg_layout="single_shaft", propellant_pair="lox_rp1")
-        output = calc["components"]["fuel_preburner_turbine"]
-        calc["components"] = {"gg_turbine": output}
-        # Single-shaft source uses fuel-side geometry assumptions, no ox defaults.
-        for key in ASSUMPTION_KEYS:
-            del calc["inputs"]["ox_turbine_" + key]
-        calc["inputs"]["n_fuel_rpm"] = 99999
-        calc["inputs"]["n_lox_rpm"] = 20000
-        return result
-
-    def test_single_gg_has_one_shared_turbine_using_saved_shaft_speed(self):
-        result = self.single()
-        view = turbine_geometry_view(result)
-        self.assertEqual(set(view["turbines"]), {"shared"})
-        t = view["turbines"]["shared"]
-        self.assertTrue(t["available"], t)
-        self.assertEqual(t["source"]["assumption_prefix"], "fuel")
-        self.assertEqual(t["design_point"]["shaft_speed_rpm"], 20000)
-        self.assertEqual(t["design_point"]["mass_flow_kg_s"], 20)
-        self.assertNotIn("富氧", t["label"])
-        result["turbine_geometry"] = view
-        self.assertEqual(set(turbine_geometry_view(result)["turbines"]), {"shared"})
-
-    def test_gg_parallel_turbines_use_their_own_flows_not_generator_total(self):
-        result = fixture()
-        calc = result["calculation"]
-        calc["inputs"].update(cycle_type="gg", gg_layout="dual_shaft")
-        left = deepcopy(calc["components"]["ox_preburner_turbine"])
-        right = deepcopy(calc["components"]["fuel_preburner_turbine"])
-        left["outputs"]["mass_flow_kgs"] = 8
-        left["outputs"]["turbine_power_W"] *= 8 / 20
-        right["outputs"]["mass_flow_kgs"] = 12
-        right["outputs"]["turbine_power_W"] *= 12 / 20
-        calc["components"] = {"gg_turbine_ox": left, "gg_turbine_fuel": right,
-                              "gas_generator": {"outputs": {"mass_flow_kgs": 20}}}
-        turbines = turbine_geometry_view(result)["turbines"]
-        self.assertEqual(set(turbines), {"ox", "fuel"})
-        for side, expected in (("ox", 8), ("fuel", 12)):
-            self.assertTrue(turbines[side]["available"], turbines[side])
-            self.assertEqual(turbines[side]["design_point"]["mass_flow_kg_s"], expected)
-            self.assertNotIn("富氧", turbines[side]["label"])
-        self.assertAlmostEqual(turbines["ox"]["dimensions"]["inlet_area_m2"] / turbines["fuel"]["dimensions"]["inlet_area_m2"], 8 / 12)
-
-    def test_ambiguous_shared_and_independent_components_are_not_duplicated(self):
-        result = self.single()
-        result["calculation"]["components"]["gg_turbine_ox"] = deepcopy(result["calculation"]["components"]["gg_turbine"])
-        turbines = turbine_geometry_view(result)["turbines"]
-        self.assertTrue(all(not t["available"] for t in turbines.values()))
-
-    def test_mixed_gg_and_ffsc_components_and_snapshots_are_rejected(self):
-        result = fixture()
-        result["calculation"]["components"]["gg_turbine_ox"] = deepcopy(result["calculation"]["components"]["ox_preburner_turbine"])
-        self.assertTrue(all(not t["available"] for t in turbine_geometry_view(result)["turbines"].values()))
+class UnsupportedTurbineGeometryTests(unittest.TestCase):
+    def test_removed_cycle_and_saved_shared_machine_are_rejected(self):
+        for layout in ("single_shaft", "dual_shaft"):
+            result = fixture()
+            result["calculation"]["inputs"].update(cycle_type="gg", gg_layout=layout)
+            before = deepcopy(result)
+            self.assertTrue(all(not t["available"] for t in turbine_geometry_view(result)["turbines"].values()))
+            self.assertEqual(result, before)
         result = fixture()
         result["turbine_geometry"] = turbine_geometry_view(result)
-        t = result["turbine_geometry"]["turbines"]["ox"]
-        t["source"]["component_key"] = "gg_turbine_ox"
-        t["geometry_sha256"] = _digest(t)
+        machine = result["turbine_geometry"]["turbines"].pop("ox")
+        machine["source"]["component_key"] = "gg_turbine"
+        result["turbine_geometry"]["turbines"] = {"shared": machine}
         self.assertTrue(all(not t["available"] for t in turbine_geometry_view(result)["turbines"].values()))
 
-    def test_empty_gg_records_keep_requested_topology_and_labels(self):
-        for layout, expected in (("single_shaft", {"shared"}), ("dual_shaft", {"ox", "fuel"})):
-            result = {"calculation": {"inputs": {"cycle_type": "gg", "gg_layout": layout}}}
-            turbines = turbine_geometry_view(result)["turbines"]
-            self.assertEqual(set(turbines), expected)
-            self.assertTrue(all(not t["available"] for t in turbines.values()))
-            self.assertTrue(all("富氧" not in t["label"] for t in turbines.values()))
+    def test_mixed_legacy_components_are_rejected_without_cycle_identity(self):
+        result = fixture()
+        result["calculation"]["components"]["gg_turbine"] = {"outputs": {}}
+        result["calculation"]["inputs"].pop("cycle_type")
+        self.assertTrue(all(not t["available"] for t in turbine_geometry_view(result)["turbines"].values()))
+
 
 
 if __name__ == "__main__":

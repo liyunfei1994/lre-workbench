@@ -145,11 +145,11 @@
 
 ## 后续复查发现的待改进项
 
-- 扫描记录只保存数值收敛和性能，未携带逐点工程校核及警告；数值收敛的欠压 / 超温点仍可作为候选应用，需复算后看总体性能校核。相关入口：`src/sweep.py::_extract_record`、`src/workbench.py::_on_of_sweep_apply`。
-- GG 材料树仍沿用 FFSC 富氧 / 富燃涡轮分组，动叶审计没有完整映射 `gg_turbine`、`gg_turbine_ox/fuel`。应按单轴 / 双轴实际部件展示。相关入口：`src/gui_pyside6.py::_populate_materials_tab`、`_material_audit_for_current_results`。
-- 两个窗口加载同一方案时，后保存的窗口可能无提示覆盖先保存的修改；草稿锁隔离不能防止方案文件冲突。保存前应检查文件指纹，并使用会话唯一临时文件。相关入口：`src/workbench.py::save_case`。
-- 节流点数没有上限，逐点刷新会重建全部表格 / 图；冷却通道断点表未随计算忙态锁定。应增加点数预检、合并刷新及该表的输入锁定。相关入口：`src/core.py`、`src/workbench.py::_on_throttle_record`、`src/ui_chamber_design.py::chan_table`。
-- 快捷入口使用安装标记判断是否直接启动；后来损坏的科学环境会在主窗提示不完整，但不会自动修复。后续应根据完整 / basic 模式提供明确的修复或经验计算选择。相关入口：`start_windows.vbs`、`src/workbench.py`。
+- 扫描记录只保存数值收敛和性能，未携带逐点工程校核及警告；数值收敛的欠压 / 超温点仍可作为候选应用，需复算后看总体性能校核。相关入口：`src/lre_workbench/analysis/sweep.py::_extract_record`、`src/lre_workbench/desktop/workbench.py::_on_of_sweep_apply`。
+- GG 材料树仍沿用 FFSC 富氧 / 富燃涡轮分组，动叶审计没有完整映射 `gg_turbine`、`gg_turbine_ox/fuel`。应按单轴 / 双轴实际部件展示。相关入口：`src/lre_workbench/desktop/legacy_window.py::_populate_materials_tab`、`_material_audit_for_current_results`。
+- 两个窗口加载同一方案时，后保存的窗口可能无提示覆盖先保存的修改；草稿锁隔离不能防止方案文件冲突。保存前应检查文件指纹，并使用会话唯一临时文件。相关入口：`src/lre_workbench/desktop/workbench.py::save_case`。
+- 节流点数没有上限，逐点刷新会重建全部表格 / 图；冷却通道断点表未随计算忙态锁定。应增加点数预检、合并刷新及该表的输入锁定。相关入口：`src/lre_workbench/domain/models.py`、`src/lre_workbench/desktop/workbench.py::_on_throttle_record`、`src/lre_workbench/desktop/chamber_design.py::chan_table`。
+- 快捷入口使用安装标记判断是否直接启动；后来损坏的科学环境会在主窗提示不完整，但不会自动修复。后续应根据完整 / basic 模式提供明确的修复或经验计算选择。相关入口：`start_windows.vbs`、`src/lre_workbench/desktop/workbench.py`。
 
 ## 计算范围与验证限制
 

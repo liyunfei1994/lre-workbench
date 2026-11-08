@@ -6,11 +6,11 @@ from unittest.mock import patch
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import thermo
-import pump
-import cooling
-from core import ValidationError
-from propellants import get_propellant, propellant_models, require_liquid_fuel_state
+import lre_workbench.properties.thermochemistry as thermo
+import lre_workbench.components.pumps.model as pump
+import lre_workbench.components.cooling.model as cooling
+from lre_workbench.domain.models import ValidationError
+from lre_workbench.properties.propellants import get_propellant, propellant_models, require_liquid_fuel_state
 
 
 @unittest.skipUnless(thermo.CANTERA_AVAILABLE and thermo.COOLPROP_AVAILABLE, "Cantera and CoolProp required")

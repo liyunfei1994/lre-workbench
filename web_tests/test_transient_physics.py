@@ -9,12 +9,12 @@ from unittest.mock import patch
 import numpy as np
 
 from webapp.transient import transient_setup, normalize_request, calculate_transient
-from transient import HotStateModel, gas_flux
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.operations.transient import HotStateModel, gas_flux
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 from web_tests.convergence_fixture import converged_evidence
 
 
-def source_fixture(cycle='gg',dual=False):
+def source_fixture(cycle='ffsc',dual=True):
     inp=dict(cycle_type=cycle,gg_layout='dual_shaft' if dual else 'single_shaft',
              propellant_pair='lox_methane',ambient_pressure=100000.0,
              expansion_ratio=20.0,gg_exhaust_expansion_ratio=4.0,chamber_l_star_m=1.0,pc=8e6)
@@ -65,7 +65,7 @@ def source_fixture(cycle='gg',dual=False):
 
 class TransientPhysicsTests(unittest.TestCase):
     def test_all_topologies_start_at_a_true_fixed_point(self):
-        for cycle,dual,shafts in [('gg',False,1),('gg',True,2),('ffsc',True,2)]:
+        for cycle,dual,shafts in [('ffsc',True,2)]:
             with self.subTest(cycle=cycle,dual=dual):
                 source=source_fixture(cycle,dual);setup=transient_setup(source)
                 self.assertTrue(setup['ready'],setup['issues'])
@@ -81,7 +81,7 @@ class TransientPhysicsTests(unittest.TestCase):
                     self.assertTrue(all(abs(x['shaft_ox_rpm']-x['shaft_fuel_rpm'])<1e-8 for x in rows))
 
     def test_mass_energy_and_shaft_inventories_close_after_real_disturbance(self):
-        source=source_fixture('gg',True);before=deepcopy(source)
+        source=source_fixture('ffsc',True);before=deepcopy(source)
         with patch('webapp.transient.science_environment',return_value={'test':True}):
             result=calculate_transient(dict(source_job_id='synthetic',duration_s=.5,command_time_s=.1,
                 command_ramp_s=.02,sample_count=101,fuel_area_ratio=.97,ox_area_ratio=.95),source)
@@ -102,7 +102,7 @@ class TransientPhysicsTests(unittest.TestCase):
     def test_thermal_volume_and_rotor_inertia_change_their_physical_derivatives(self):
         source=source_fixture();p=transient_setup(source)['defaults']
         model=HotStateModel(source['result']['calculation'],p)
-        y=model.initial.copy();y[2*model.nv]=1.02  # extra rotor kinetic energy
+        y=model.initial.copy();y[2*model.nv]=1.02;y[1]=1.01  # rotor energy and chamber thermal perturbation
         base=model.rhs(.5,y)
         heavier=HotStateModel(source['result']['calculation'],p|{'inertia_ox_kg_m2':2*p['inertia_ox_kg_m2']})
         d=heavier.rhs(.5,y)
@@ -133,7 +133,7 @@ class TransientPhysicsTests(unittest.TestCase):
             self.assertAlmostEqual(data['pump_pressure'][side]-pump['pin'],predicted,places=3)
 
     def test_instantaneous_energy_balance_from_independent_boundary_terms(self):
-        source=source_fixture('gg',True);p=transient_setup(source)['defaults']
+        source=source_fixture('ffsc',True);p=transient_setup(source)['defaults']
         model=HotStateModel(source['result']['calculation'],p)
         y=model.initial.copy();y[1]*=1.01;y[2*model.nv]*=1.03
         derivative,data=model.evaluate(.5,y)
@@ -146,6 +146,14 @@ class TransientPhysicsTests(unittest.TestCase):
             boundary+=q*model.liquid_cp[side]*b['T0']
         for i,v in enumerate(model.volumes):
             if v['heat_side']!='total': boundary+=v['heat0']*feeds[i][v['heat_side']]/v['heat_m0']
+            else:
+                gas_in=0.
+                for turbine in model.turbines:
+                    if turbine['down']!=i: continue
+                    up=data['gas'][turbine['up']];down=data['gas'][i]
+                    gas=model.volumes[turbine['up']]
+                    gas_in+=turbine['C']*gas_flux(up['p'],up['T'],down['p']*turbine['back_ratio'],gas['gamma'],gas['R'])
+                boundary+=v['heat0']*gas_in/v['heat_m0']
         for n in model.nozzles:
             v=model.volumes[n['cv']];g=data['gas'][n['cv']]
             q=n['C']*gas_flux(g['p'],g['T'],model.ambient,v['gamma'],v['R'])
@@ -194,7 +202,7 @@ class TransientPhysicsTests(unittest.TestCase):
         broken['result']['calculation']['summary']['crossflow_fuel_to_oxpb_margin_MPa']=-1
         self.assertFalse(transient_setup(broken)['ready'])
         broken=deepcopy(source)
-        broken['result']['calculation']['states']['gg_outlet']['pressure']=20e6
+        broken['result']['calculation']['states']['ox_preburner_outlet']['pressure']=30e6
         self.assertFalse(transient_setup(broken)['ready'])
         for bad in [{'fuel_area_ratio':.5},{'sample_count':22.5},{'rtol':float('nan')},
                     {'duration_s':.1},{'inertia_ox_kg_m2':0},{'sample_count':True},{'fake_tau':1}]:

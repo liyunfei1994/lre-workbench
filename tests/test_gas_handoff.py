@@ -9,13 +9,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from core import FlowState
-from chamber import MainChamber
-from preburner import Preburner
-from turbine import Turbine
-from gas_handoff import capture_gas_handoff, load_verified_gas_model
-from thermo import validate_gas_streams, chamber_equilibrium
-from thermo_data import methane_dataset_scope
+from lre_workbench.domain.models import FlowState
+from lre_workbench.components.chambers.model import MainChamber
+from lre_workbench.components.preburners.model import Preburner
+from lre_workbench.components.turbines.model import Turbine
+from lre_workbench.integrations.gas_handoff import capture_gas_handoff, load_verified_gas_model
+from lre_workbench.properties.thermochemistry import validate_gas_streams, chamber_equilibrium
+from lre_workbench.properties.datasets import methane_dataset_scope
 
 
 def fixture():

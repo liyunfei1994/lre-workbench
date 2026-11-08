@@ -15,6 +15,14 @@ def _positive(value, name):
     return float(value)
 
 
+def _mapping(value, name):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{name}格式无效。")
+    return value
+
+
 def _coordinates(nodes):
     if not isinstance(nodes, list) or len(nodes) < 4:
         raise ValueError("记录未保存完整内轮廓坐标。")
@@ -37,34 +45,187 @@ def nozzle_geometry_view(result, record_id=""):
     Reconstructed budget-mode contours use frozen input/size data and are labelled.
     Invalid or partial saved geometry is never repaired by the latest defaults.
     """
-    empty = {"available": False, "reason": "选择已完成的设计点记录后查看喷管几何。"}
+    empty = {"available": False, "export_allowed": False,
+             "reason": "选择已完成的设计点记录后查看喷管几何。"}
     if not isinstance(result, dict):
         return empty
     try:
-        if isinstance(result.get("nozzle_geometry"), dict):
+        from webapp.design_scope import require_supported_source
+        require_supported_source({"result": result})
+        if "nozzle_geometry" in result:
+            if not isinstance(result["nozzle_geometry"], dict):
+                raise ValueError("保存的几何快照格式无效，不能从其他数据补图。")
             saved = deepcopy(result["nozzle_geometry"])
             if not isinstance(saved.get("source"), dict):
                 raise ValueError("几何快照缺少有效的数据来源。")
             saved["source"]["record_id"] = record_id
-            return saved
-        return _build(result, record_id)
+            if not saved.get("available"):
+                return saved | {"export_allowed": False}
+            _validate_snapshot(saved)
+            return _attach_consistency(saved, result)
+        return _attach_consistency(_build(result, record_id), result)
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
-        return {"available": False, "reason": str(exc),
+        return {"available": False, "export_allowed": False, "reason": str(exc),
+                "consistency": {"status": "fail", "checks": [], "messages": [str(exc)]},
                 "source": {"record_id": record_id, "label": "本次计算记录"}}
 
 
-def _build(result, record_id):
-    from geometry.nozzle import full_hot_gas_geometry, top_bell_angles
-    from chamber_contour import convergent_geometry
+def _validate_snapshot(view):
+    """Validate frozen coordinates and annotations without regenerating them."""
+    contour, dimensions = view.get("contour"), view.get("dimensions")
+    if not isinstance(contour, dict) or not isinstance(dimensions, dict):
+        raise ValueError("几何快照缺少完整坐标或尺寸。")
+    if not isinstance(view.get("method"), dict):
+        raise ValueError("几何快照缺少有效的构造方法记录。")
+    xs, rs = contour.get("x_m"), contour.get("r_m")
+    if not isinstance(xs, list) or not isinstance(rs, list) or len(xs) != len(rs):
+        raise ValueError("几何快照坐标不完整。")
+    if contour.get("coordinate_origin") != "injector_face":
+        raise ValueError("几何快照坐标原点无效，不能猜测坐标系。")
+    _coordinates([{"x_m": x, "r_m": r} for x, r in zip(xs, rs)])
+    required = ("throat_diameter_m", "chamber_diameter_m", "exit_diameter_m",
+                "chamber_length_m", "throat_x_m", "total_length_m",
+                "convergent_length_m", "nozzle_length_m", "expansion_ratio")
+    for key in required:
+        _positive(dimensions.get(key), key)
+    rt, rc = dimensions["throat_diameter_m"] / 2, dimensions["chamber_diameter_m"] / 2
+    lc, xt = dimensions["chamber_length_m"], dimensions["throat_x_m"]
+    if not (0 < lc < xt < xs[-1]):
+        raise ValueError("几何快照的燃烧室、喉部和出口位置不一致。")
+    comparisons = ((xs[-1], dimensions["total_length_m"]),
+                   (2 * rs[-1], dimensions["exit_diameter_m"]),
+                   (min(rs), rt), (xt - lc, dimensions["convergent_length_m"]),
+                   (xs[-1] - xt, dimensions["nozzle_length_m"]),
+                   ((rs[-1] / rt) ** 2, dimensions["expansion_ratio"]))
+    if any(not math.isclose(a, b, rel_tol=1e-8, abs_tol=1e-10) for a, b in comparisons):
+        raise ValueError("几何快照的坐标与尺寸不一致。")
+    ci, ti = (min(range(len(xs)), key=lambda i: abs(xs[i] - x)) for x in (lc, xt))
+    if (not math.isclose(xs[ci], lc, abs_tol=1e-9) or not math.isclose(xs[ti], xt, abs_tol=1e-9)
+            or not math.isclose(rs[ti], rt, rel_tol=1e-8, abs_tol=1e-10)
+            or any(not math.isclose(r, rc, rel_tol=1e-8, abs_tol=1e-10) for r in rs[:ci + 1])
+            or any(rs[i + 1] > rs[i] + 1e-10 for i in range(ti))
+            or any(rs[i + 1] < rs[i] - 1e-10 for i in range(ti, len(rs) - 1))):
+        raise ValueError("几何快照的分段位置或半径不一致，或型面出现反折。")
+    cooling = _mapping(view.get("cooling"), "冷却覆盖")
+    start, end = cooling.get("start_x_m"), cooling.get("end_x_m")
+    if (start is not None or end is not None) and not (
+            _finite(start) and _finite(end) and 0 <= start < end <= xs[-1] + 1e-9):
+        raise ValueError("几何快照的冷却覆盖范围与完整轮廓不一致。")
+    digest = hashlib.sha256(json.dumps(contour, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if view.get("contour_sha256") and digest != view["contour_sha256"]:
+        raise ValueError("几何快照坐标校验值不一致，不能导出未经确认的型面。")
 
-    calculation = result.get("calculation") or {}
-    inputs = calculation.get("inputs") or result.get("submitted_inputs") or {}
-    components = calculation.get("components") or {}
-    profile = (components.get("cooling_channel") or {}).get("profile")
+
+def _attach_consistency(view, result):
+    """Compare saved evidence; this audit never changes the chosen contour."""
+    calculation = _mapping(result.get("calculation"), "计算记录")
+    components = _mapping(calculation.get("components"), "部件记录")
+    inputs = _mapping(calculation.get("inputs") or result.get("submitted_inputs"), "设计输入")
+    dimensions, contour = view["dimensions"], view["contour"]
+    checks = []
+
+    def compare(key, label, actual, expected, source_path, unit="", tolerance=2e-8):
+        if actual is None or expected is None:
+            status = "partial"
+        elif _finite(actual) and _finite(expected):
+            status = "pass" if math.isclose(actual, expected, rel_tol=tolerance, abs_tol=1e-12) else "fail"
+        else:
+            status = "pass" if actual == expected else "fail"
+        checks.append({"id": key, "label": label, "status": status,
+                       "geometry_value": actual, "record_value": expected,
+                       "source_path": source_path, "unit": unit, "relative_tolerance": tolerance})
+
+    def output(component, field):
+        entry = _mapping(components.get(component), "部件")
+        return _mapping(entry.get("outputs"), "部件输出").get(field)
+
+    area = math.pi * (dimensions["throat_diameter_m"] / 2) ** 2
+    for key, label, actual, component, field, unit in (
+        ("nozzle_area", "型面喉面积 / 循环喷管喉面积", area, "nozzle", "At_m2", "m²"),
+        ("nozzle_ratio", "型面面积比 / 循环喷管面积比", dimensions["expansion_ratio"], "nozzle", "expansion_ratio", ""),
+        ("chamber_diameter", "燃烧室内径 / 总体尺寸", dimensions["chamber_diameter_m"], "main_chamber", "cc_diameter_m", "m"),
+        ("chamber_length", "直筒段长度 / 总体尺寸", dimensions["chamber_length_m"], "main_chamber", "cc_length_m", "m"),
+    ):
+        compare(key, label, actual, output(component, field), f"calculation.components.{component}.outputs.{field}", unit)
+    cooling = _mapping(components.get("cooling_channel"), "冷却部件")
+    profile = _mapping(cooling.get("profile"), "冷却剖面")
+    profile_geometry = profile.get("geometry") if isinstance(profile, dict) else None
+    if isinstance(profile_geometry, dict):
+        if "A_throat_m2" in (cooling.get("outputs") or {}):
+            compare("cooling_area", "型面喉面积 / 冷却计算喉面积", area, output("cooling_channel", "A_throat_m2"),
+                    "calculation.components.cooling_channel.outputs.A_throat_m2", "m²")
+        nodes = profile_geometry.get("full_nodes")
+        try:
+            xs, rs = _coordinates(nodes)
+            matches = xs == contour["x_m"] and rs == contour["r_m"]
+        except (ValueError, TypeError):
+            matches = False
+        compare("saved_profile", "显示型面 / 保存的完整冷却型面", True, matches,
+                "calculation.components.cooling_channel.profile.geometry.full_nodes")
+        for field, saved_key, label in (
+            ("bell_fraction", "bell_fraction", "钟形长度比"),
+            ("initial_angle_deg", "initial_expansion_angle_deg", "膨胀起始角"),
+            ("exit_angle_deg", "exit_angle_deg", "出口角"),
+        ):
+            if saved_key in profile_geometry:
+                compare("profile_" + field, "型面标注 / 冷却几何：" + label,
+                        dimensions.get(field), profile_geometry[saved_key],
+                        "calculation.components.cooling_channel.profile.geometry." + saved_key)
+    elif view["source"].get("kind") == "saved_full_contour":
+        compare("saved_profile", "显示型面 / 保存的完整冷却型面", True, None,
+                "calculation.components.cooling_channel.profile.geometry.full_nodes")
+
+    derived = {"expansion_ratio": dimensions["expansion_ratio"],
+               "chamber_contraction_ratio": (dimensions["chamber_diameter_m"] / dimensions["throat_diameter_m"]) ** 2,
+               "nozzle_bell_fraction": dimensions.get("bell_fraction"),
+               "nozzle_contour_method": view.get("method", {}).get("id")}
+    beta = dimensions.get("convergent_half_angle_deg")
+    if beta is None and isinstance(profile_geometry, dict):
+        beta = profile_geometry.get("conv_half_angle_deg")
+    derived["chamber_conv_half_angle_deg"] = beta
+    if _finite(beta) and 0 < beta < 90:
+        from lre_workbench.components.chambers.contour import convergent_geometry
+        rc, rt = dimensions["chamber_diameter_m"] / 2, dimensions["throat_diameter_m"] / 2
+        volume = math.pi * rc * rc * dimensions["chamber_length_m"] + convergent_geometry(rc, rt, beta)["V_conv_m3"]
+        derived["chamber_l_star_m"] = volume / area
+    else:
+        derived["chamber_l_star_m"] = None
+    if derived["nozzle_contour_method"] == "parabolic_bell_explicit_v1":
+        derived.update(nozzle_initial_angle_deg=dimensions.get("initial_angle_deg"),
+                       nozzle_exit_angle_deg=dimensions.get("exit_angle_deg"))
+    labels = {"expansion_ratio": "喷管面积比", "chamber_contraction_ratio": "燃烧室收缩比",
+              "nozzle_bell_fraction": "钟形长度比", "nozzle_contour_method": "型面构造方法",
+              "nozzle_initial_angle_deg": "膨胀起始角", "nozzle_exit_angle_deg": "出口角",
+              "chamber_conv_half_angle_deg": "收缩半角", "chamber_l_star_m": "特征长度 L*"}
+    for key, value in derived.items():
+        unit = "°" if key.endswith("_deg") else "m" if key == "chamber_l_star_m" else ""
+        compare("input_" + key, labels[key] + " / 本记录设计输入", value, inputs.get(key), "calculation.inputs." + key, unit)
+    digest = hashlib.sha256(json.dumps(contour, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    compare("contour_hash", "保存坐标校验值", digest, view.get("contour_sha256"), "nozzle_geometry.contour_sha256")
+    status = "fail" if any(row["status"] == "fail" for row in checks) else (
+        "partial" if any(row["status"] == "partial" for row in checks) else "pass")
+    messages = (["保存型面与本条计算记录存在矛盾；保留原坐标供核查，暂停坐标导出。"] if status == "fail" else
+                ["部分历史证据未记录；已验证保存坐标，但不能据此宣称与全部循环尺寸完全一致。"] if status == "partial" else
+                ["型面与本记录的循环尺寸及设计输入在数值容差内一致。"])
+    view["consistency"] = {"status": status, "checks": checks, "messages": messages,
+                           "scope": "同一保存计算记录的几何数据一致性；不是气动优化或制造验证"}
+    view["export_allowed"] = status != "fail"
+    return view
+
+
+def _build(result, record_id):
+    from lre_workbench.components.nozzles.geometry import full_hot_gas_geometry, top_bell_angles
+    from lre_workbench.components.chambers.contour import convergent_geometry
+
+    calculation = _mapping(result.get("calculation"), "计算记录")
+    inputs = _mapping(calculation.get("inputs") or result.get("submitted_inputs"), "设计输入")
+    components = _mapping(calculation.get("components"), "部件记录")
+    cooling = _mapping(components.get("cooling_channel"), "冷却部件")
+    profile = _mapping(cooling.get("profile"), "冷却剖面")
     saved_geometry = profile.get("geometry") if isinstance(profile, dict) else None
     notes = ["显示燃气侧内轮廓的轴对称几何；三维曲面不含壁厚、冷却槽或结构外壳。",
              "几何有效不等于推力最优，尚未包含二维流动损失、分离或结构验证。"]
-    if saved_geometry is not None:
+    if isinstance(profile, dict) and "geometry" in profile:
         if not isinstance(saved_geometry, dict):
             raise ValueError("保存的冷却几何格式无效，不能改用当前参数补图。")
         g = saved_geometry
@@ -86,7 +247,8 @@ def _build(result, record_id):
         bf = _positive(g.get("bell_fraction"), "喷管长度比")
         method_id = g.get("nozzle_contour_method", "legacy_log_v1")
     else:
-        nozzle = (components.get("nozzle") or {}).get("outputs") or {}
+        nozzle_component = _mapping(components.get("nozzle"), "喷管部件")
+        nozzle = _mapping(nozzle_component.get("outputs"), "喷管输出")
         area = _positive(nozzle.get("At_m2"), "本次计算的喉部面积")
         eps = _positive(nozzle.get("expansion_ratio", inputs.get("expansion_ratio")), "喷管面积比")
         contraction = _positive(inputs.get("chamber_contraction_ratio"), "燃烧室收缩比")
@@ -147,6 +309,7 @@ def _build(result, record_id):
             "dimensions": {"throat_diameter_m": 2 * rt, "exit_diameter_m": 2 * rs[-1],
                 "chamber_diameter_m": 2 * rc, "chamber_length_m": Lc,
                 "convergent_length_m": xt - Lc, "nozzle_length_m": xs[-1] - xt,
+                "convergent_half_angle_deg": g.get("conv_half_angle_deg"),
                 "total_length_m": xs[-1], "throat_x_m": xt,
                 "initial_angle_deg": tn, "exit_angle_deg": te,
                 "throat_upstream_radius_m": g.get("throat_upstream_radius_m"),

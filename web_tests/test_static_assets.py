@@ -33,6 +33,8 @@ class StaticAssetTests(unittest.TestCase):
     def test_entry_page_and_all_transitive_modules_are_served_with_correct_mime(self):
         entry = self.client.get("/")
         self.assertEqual(entry.status_code, 200)
+        directives = dict(part.strip().split(" ", 1) for part in entry.headers["content-security-policy"].split(";") if part.strip())
+        self.assertEqual(directives["style-src"], "'self'")
         refs = References()
         refs.feed(entry.text)
         pending, visited = refs.assets[:], set()
@@ -55,6 +57,12 @@ class StaticAssetTests(unittest.TestCase):
                 self.assertIn("text/css", response.headers["content-type"], path)
         self.assertTrue({"/static/bootstrap.js", "/static/app.js", "/static/results.js",
                          "/static/convergence.js", "/static/convergence.css",
+                         "/static/partitioned-workspace.css",
+                         "/static/preburner-design.js",
+                         "/static/pressure-design.js", "/static/pressure-design.css",
+                         "/static/design-review-migration.js",
+                         "/static/cooling-channel-inputs.js", "/static/cooling-channel-inputs.css",
+                         "/static/cooling-input-summary.js",
                          "/static/cooling.js", "/static/cooling.css"} <= visited)
 
     def test_unknown_files_and_traversal_remain_unavailable(self):

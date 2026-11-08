@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
-import {inspectPumpGeometry,buildPumpSvg,buildPumpCsv,buildPumpPointTxt,buildPumpDxf,buildPumpMesh,buildPumpObj,buildPumpJson,pumpExportFilename,renderPumpGeometry,mountPumpGeometry} from "../webapp/static/pump-geometry.js";
+import {inspectPumpGeometry,buildPumpSvg,buildPumpCsv,buildPumpPointTxt,buildPumpDxf,buildPumpMesh,buildPumpObj,buildPumpJson,buildPumpHandoffCsv,pumpExportFilename,renderPumpGeometry,mountPumpGeometry} from "../webapp/static/pump-geometry.js";
 
 const pump=()=>({available:true,label:"液氧泵",source:{kind:"saved_geometry",label:"本记录的概念定尺寸",record_id:"record-123"},design_point:{mass_flow_kg_s:500,density_in_kg_m3:1100,volume_flow_m3_s:500/1100,pressure_in_pa:1e6,pressure_out_pa:70e6,pressure_rise_pa:69e6,shaft_speed_rpm:20000,stages:2,total_head_m:6400,stage_head_m:3200,specific_speed_nq:35,tip_speed_m_s:250},assumptions:{head_coefficient_psi:.6,inlet_flow_coefficient:.15,outlet_flow_coefficient:.1,eye_hub_ratio:.4,axial_length_ratio:.3,blockage_factor:1,leakage_flow_m3_s:0},dimensions:{impeller_diameter_m:.24,eye_shroud_diameter_m:.12,eye_hub_diameter_m:.048,outlet_width_m:.008,axial_length_m:.072,inlet_area_m2:.0095,outlet_area_m2:.006,inlet_meridional_velocity_m_s:47.8,outlet_meridional_velocity_m_s:75.8},meridional:{hub:[[0,.024],[.04,.045],[.072,.12]],shroud:[[0,.06],[.025,.08],[.064,.12]],unit:"m",rotation_axis:"z",coordinate_origin:"impeller_eye_inlet"},checks:[{id:"continuity",label:"入口质量守恒",status:"pass"},{id:"cavitation",label:"汽蚀性能",status:"not_evaluated",note:"需要诱导轮和汽蚀设计。"}],notes:["等扬程代表级，非水力最优解。"],geometry_sha256:"a".repeat(64)});
 const model=()=>({schema_version:1,source:{record_id:"record-123"},pumps:{ox:pump(),fuel:{...pump(),label:"甲烷泵"}}});
+const handoff=()=>({status:"partial",summary:"系统点已保存，部件设计待补全。",groups:[{id:"design",title:"设计点",fields:[{id:"q",label:"入口体积流量 Q",value:.45454545454545,unit:"m³/s",state:"recorded",source:"保存的主泵结果",target:"Global setup / Flow rate",note:"入口状态"},{id:"head",label:"参考总扬程",value:6400,unit:"m",state:"derived",source:"Δp / (ρg)",target:"Head 的参考",note:"未计速度头"}]}],components:[{id:"inducer",label:"诱导轮",state:"missing",note:"由 NPSHa 与 NPSHr 及裕度要求确定。",fields:[{id:"inducer_blades",label:"诱导轮叶片数",value:null,unit:"片",state:"missing",source:"未求解",target:"Blade setup / Number of blades",note:"不能由流量与扬程唯一确定"}]}],stage_allocation:[{stage:1,reference_head_m:3200,inlet_state_note:"取本记录的入口状态"},{stage:2,reference_head_m:3200,inlet_state_note:"逐级入口状态待设计"}],missing:["叶片数与角度待设计"]});
+
+test("a missing historical volume flow never becomes a zero flow in the summary",()=>{
+  const m=model();
+  m.pumps.ox={available:false,design_point:{volume_flow_m3_s:null}};
+  const html=renderPumpGeometry(m);
+  assert.match(html,/入口体积流量 Q<\/span><strong>未记录/);
+  assert.doesNotMatch(html,/入口体积流量 Q<\/span><strong>0\s/);
+});
 
 test("historical missing assumptions never fabricate coordinates or exporters",()=>{
   for(const p of [null,{}, {available:false,reason:"旧记录缺少几何假设",dimensions:pump().dimensions,design_point:pump().design_point}]){
@@ -78,4 +87,55 @@ test("component switch preserves pump-local view and cleanup removes listeners, 
 });
 test("remount disposes prior listener state and missing containers are safe",()=>{
   const dom=fakeDom();mountPumpGeometry(dom.root,model());const cleanup=mountPumpGeometry(dom.root,model());assert.equal(dom.root.events.get("click").size,1);assert.ok(dom.observers.slice(0,2).every(o=>o.disconnected));cleanup();assert.equal(typeof mountPumpGeometry(null,model()),"function");mountPumpGeometry(null,model())();
+});
+
+test("handoff UI puts duty and geometry first, separates missing blade design, and retains record data",()=>{
+  const m=model();m.design_handoff={schema_version:1,pumps:{ox:handoff(),fuel:handoff()},references:[{title:"Global setup",url:"https://manual.cfturbo.com/en/global_setup.html"}],workflow:[{title:"设计点",note:"录入流量、扬程、转速。",url:"https://manual.cfturbo.com/en/global_setup.html"}]};
+  const before=JSON.stringify(m),html=renderPumpGeometry(m);
+  for(const label of ["泵设计与建模交接","CFturbo 参数 CSV","诱导轮叶片数","待补充","派生值","记录值","代表级扬程分配","逐级入口状态待设计","CFturbo 对应项 / 使用说明","官方方法说明"])assert.ok(html.includes(label),label);
+  assert.ok(html.indexOf('pg-metrics')<html.indexOf('pg-workspace'));assert.ok(html.indexOf('pg-workspace')<html.indexOf('pg-section-tabs'));
+  assert.match(html,/data-pg-section="components" hidden/);assert.match(html,/data-pg-section="method" hidden/);
+  assert.equal(JSON.stringify(m),before);
+  const data=JSON.parse(buildPumpJson(m.pumps.ox,m.source,m.design_handoff.pumps.ox));assert.deepEqual(data.design_handoff,handoff());assert.deepEqual(data.pump,m.pumps.ox);
+});
+
+test("handoff CSV includes full precision, missing values, units, provenance and safe spreadsheet cells",()=>{
+  const h=handoff();h.groups[0].fields.push({id:"hostile",label:'=HYPERLINK("x")',value:' \t@SUM(1)',unit:"",state:"recorded",source:"line 1\nline 2",target:"review",note:'contains "quotes", comma'});
+  const csv=buildPumpHandoffCsv(h,{record_id:"+record"});
+  assert.ok(csv.startsWith('"record_id","group","parameter_id","parameter","value","unit","status","source","cfturbo_target","note"\r\n'));
+  assert.ok(csv.includes('0.45454545454545,"m³/s","recorded"'));assert.ok(csv.includes('"诱导轮叶片数","","片","missing"'));
+  assert.ok(csv.includes('"\'+record"'));assert.ok(csv.includes('"\'=HYPERLINK(""x"")"'));assert.ok(csv.includes('"\' \t@SUM(1)"'));assert.ok(csv.includes('"line 1\nline 2"'));assert.ok(csv.includes('"contains ""quotes"", comma"'));
+  assert.equal(pumpExportFilename(model(),"fuel","handoff-csv"),"pump-fuel-record-123-cfturbo-parameters.csv");
+  const before=JSON.stringify(h);buildPumpHandoffCsv(h);assert.equal(JSON.stringify(h),before);
+});
+
+test("conflicting or unavailable handoff blocks parameter CSV and JSON while valid raw geometry stays inspectable",()=>{
+  for(const value of [null,{}, {...handoff(),status:"conflict"},{...handoff(),status:"unavailable"}])assert.equal(buildPumpHandoffCsv(value),"");
+  for(const status of ["conflict","unavailable"]){
+    const m=model(),h={...handoff(),status};m.design_handoff={pumps:{ox:h}};
+    assert.equal(buildPumpJson(m.pumps.ox,m.source,h),"");
+    const html=renderPumpGeometry(m).split('data-pg-pump="fuel"')[0];
+    if(status==="conflict")assert.match(html,/数据冲突 · 暂停交接/);
+    for(const ext of ["json","handoff-csv"])assert.ok(html.includes(`data-pg-export="${ext}" disabled`),ext);
+    assert.ok(html.includes('data-pg-export="csv">'));assert.notEqual(buildPumpCsv(m.pumps.ox),"");
+  }
+});
+
+test("handoff is inspectable and section navigation works when no geometry was saved",()=>{
+  const m=model();m.pumps.ox.available=false;m.design_handoff={pumps:{ox:handoff()}};
+  const html=renderPumpGeometry(m).split('data-pg-pump="fuel"')[0];assert.match(html,/CFturbo 参数 CSV/);assert.match(html,/Global setup \/ Flow rate/);assert.doesNotMatch(html,/<svg|<canvas/);
+  const dom=fakeDom(),panel=dom.panels[0],Element=dom.root.constructor,tabs=[new Element({pgTab:"parameters"}),new Element({pgTab:"components"})],sections=[new Element({pgSection:"parameters"}),new Element({pgSection:"components"})];
+  panel.groups['[data-pg-tab]']=tabs;panel.groups['[data-pg-section]']=sections;
+  const cleanup=mountPumpGeometry(dom.root,m);panel.fire("click",{target:tabs[1]});assert.equal(sections[0].hidden,true);assert.equal(sections[1].hidden,false);assert.equal(tabs[1].attrs['aria-pressed'],"true");cleanup();assert.equal(panel.events.get('click').size,0);
+});
+
+test("handoff fields are escaped and references only allow official CFturbo HTTPS destinations",()=>{
+  const h=handoff();h.groups[0].fields[0]={id:'"><img>',label:"<script>",value:"<iframe>",state:'missing" onclick="bad()',source:"<svg onload=bad()>",unit:"<b>",target:"<u>",note:"<object>"};h.components[0].label="<img>";
+  const m=model();m.design_handoff={pumps:{ox:h},workflow:[{title:"<script>",note:"<img>",url:"https://manual.cfturbo.com@evil.test/"}],references:[{title:"bad",url:"javascript:bad()"},{title:"bad",url:"https://evil.test/"},{title:"bad",url:"http://manual.cfturbo.com/"},{title:"good",url:"https://manual.cfturbo.com/en/global_setup.html"}]};
+  const html=renderPumpGeometry(m);assert.doesNotMatch(html,/<script|<img|<iframe|onclick=|<svg onload|https:\/\/evil|href="http:|javascript:/);assert.match(html,/&lt;script&gt;/);assert.match(html,/href="https:\/\/manual.cfturbo.com\/en\/global_setup.html"/);
+});
+
+test("pump SVG does not rely on CSP-blocked inline styles",()=>{
+  const svg=buildPumpSvg(pump());assert.doesNotMatch(svg,/<style\b|\sstyle\s*=/);assert.match(svg,/font-family=/);
+  const groups=[...svg.matchAll(/<g class="pg-dimension"([^>]*)>(.*?)<\/g>/g)];assert.equal(groups.length,5);for(const [,attrs] of groups){assert.match(attrs,/fill="none"/);assert.match(attrs,/stroke="#697b90"/);}
 });

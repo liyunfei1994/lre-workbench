@@ -85,7 +85,7 @@ export function renderThermoStations(result, selection={}){
   if(!points.length){
     body=message("本记录没有工况点，无法展示截面状态与组成。");
   }else{
-    const controls=`<div class="validation-form-grid"><label>工况点<select data-thermo-point>${points.map((item,i)=>`<option value="${i}"${i===index?" selected":""}>${i+1} · O/F ${number(item?.of)} · Ae/At ${number(item?.eps)}</option>`).join("")}</select></label><label>截面<select data-thermo-station>${Object.entries(sections).map(([key,label])=>`<option value="${key}"${key===section?" selected":""}>${label}</option>`).join("")}</select></label></div>`;
+    const controls=`<div class="validation-form-grid"><label>工况点<select data-thermo-point>${points.map((item,i)=>`<option value="${i}"${i===index?" selected":""}>${i+1} · 氧燃质量比 ${number(item?.of)} · Ae/At ${number(item?.eps)}</option>`).join("")}</select></label><label>截面<select data-thermo-station>${Object.entries(sections).map(([key,label])=>`<option value="${key}"${key===section?" selected":""}>${label}</option>`).join("")}</select></label></div>`;
     if(!Object.keys(cantera).length && !Object.keys(cea).length){
       body=controls+message("本工况未保存可用的该截面状态。旧记录如仅有性能指标，需重新运行校核才能查看；失败后端不会用推算值补齐。");
     }else{

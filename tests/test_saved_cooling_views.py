@@ -9,10 +9,10 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import EngineInputs
-import chamber_design as cd
-import thermal_structural as ts
-from material_spec import compare_chamber_liner_materials
+from lre_workbench.domain.models import EngineInputs
+import lre_workbench.components.chambers.design as cd
+import lre_workbench.analysis.thermal_structural as ts
+from lre_workbench.materials.specification import compare_chamber_liner_materials
 
 
 def profile_fixture():

@@ -35,7 +35,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.admin_id = response.json()["id"]
 
-    def project(self, preset="tq12a_gg"):
+    def project(self, preset="raptor3_ffsc"):
         values = next(p["inputs"] for p in presets() if p["key"] == preset)
         response = self.admin.post("/api/projects", json={"name":"共同项目", "inputs":values})
         self.assertEqual(response.status_code, 200, response.text)
@@ -119,13 +119,43 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.admin.get("/static/missing.js").status_code, 404)
 
     def test_invalid_inputs_rejected_and_queue_bounded(self):
-        for inputs in ({"pc":-1},{"thrust":True},{"unknown_field":1},{"gg_layout":"other"},
+        for inputs in ({"pc":-1},{"thrust":True},{"unknown_field":1},{"cycle_type":"gg"},
                        {"cycle_type":"other"},{"of_ratio":"3.4"}):
             self.assertEqual(self.admin.post("/api/projects",json={"name":"invalid","inputs":inputs}).status_code,422)
         p = self.project()
         for _ in range(3):
             self.assertEqual(self.admin.post(f"/api/projects/{p['id']}/jobs",json={"revision":1}).status_code,200)
         self.assertEqual(self.admin.post(f"/api/projects/{p['id']}/jobs",json={"revision":1}).status_code,429)
+
+    def test_design_readiness_reports_incomplete_and_invalid_inputs_without_saving(self):
+        project = self.project("raptor3_ffsc")
+        project_url = f"/api/projects/{project['id']}"
+        url = project_url + "/design-readiness"
+        with client(self.app) as guest:
+            self.assertEqual(guest.post(url, json={"inputs": project["inputs"]}).status_code, 401)
+        self.assertIs(self.admin.get("/api/info").json()["design_readiness"], True)
+
+        for edits, expected_fields in (
+                ({"ambient_pressure": 0}, []),
+                ({"thrust": None}, ["thrust"]),
+                ({"pc": -1}, ["pc"]),
+                ({"inlet_pressure": project["inputs"]["tank_pressure_pa"]}, ["inlet_pressure", "tank_pressure_pa"])):
+            with self.subTest(edits=edits):
+                response = self.admin.post(url, json={"inputs": project["inputs"] | edits})
+                self.assertEqual(response.status_code, 200, response.text)
+                check = response.json()
+                self.assertIs(check["valid"], not expected_fields)
+                self.assertEqual([key for issue in check["issues"] for key in issue["fields"]], expected_fields)
+
+        incomplete = dict(project["inputs"])
+        del incomplete["pc"]
+        response = self.admin.post(url, json={"inputs": incomplete})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["valid"])
+        self.assertEqual(response.json()["issues"][0]["fields"], ["pc"])
+        self.assertEqual(self.admin.get(project_url).json(), project)
+        self.assertEqual(len(self.admin.get(project_url + "/revisions").json()), 1)
+        self.assertEqual(self.admin.get("/api/jobs").json(), [])
 
     def test_login_rate_limit_and_missing_origin(self):
         guest = client(self.app)
@@ -151,8 +181,8 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(set(fields), set(schema["defaults"]))
         self.assertEqual(fields["pc"]["unit"], "MPa")
         self.assertEqual(fields["pc"]["factor"], 1e-6)
-        self.assertIn("gg", schema["overview_groups"])
-        self.assertEqual(schema["component_labels"]["gas_generator"], "燃气发生器（富燃）")
+        self.assertNotIn("gg", schema["overview_groups"])
+        self.assertNotIn("gas_generator", schema["component_labels"])
 
     def test_queue_lock_and_recovery(self):
         p = self.project()
@@ -204,7 +234,7 @@ class WorkspaceTests(unittest.TestCase):
         queue = JobQueue(self.app.state.store,timeout=180)
         queue.start()
         try:
-            for key in ("tq12a_gg","raptor3_ffsc","merlin1d_gg"):
+            for key in ("raptor3_ffsc",):
                 with self.subTest(preset=key):
                     p = self.project(key)
                     job = member.post(f"/api/projects/{p['id']}/jobs",json={"revision":1}).json()
@@ -219,8 +249,11 @@ class WorkspaceTests(unittest.TestCase):
                     self.assertEqual((physics["chemistry"], physics["properties"]), ("Cantera", "CoolProp"))
                     self.assertEqual(physics["propellant_pair"], p["inputs"]["propellant_pair"])
                     self.assertEqual(result["propellant_model"]["id"], p["inputs"]["propellant_pair"])
-                    self.assertEqual(physics["fuel_species"], "c12h26" if key == "merlin1d_gg" else "CH4")
-                    expected_data = "nDodecane_Reitz.yaml" if key == "merlin1d_gg" else p["inputs"].get("methane_thermo_dataset", "gri30") + ".yaml"
+                    self.assertEqual(result["propellant_model"]["supported_cycles"], ["ffsc"])
+                    self.assertEqual(result["analysis_task"]["schema_version"], 3)
+                    self.assertEqual(set(result["calculation"]["inputs"]), set(p["inputs"]))
+                    self.assertEqual(physics["fuel_species"], "CH4")
+                    expected_data = p["inputs"].get("methane_thermo_dataset", "gri30") + ".yaml"
                     self.assertEqual(physics["mechanism"], expected_data)
                     self.assertGreater(result["calculation"]["summary"]["Isp_s"],0)
                     self.assertEqual(result["submitted_inputs"],p["inputs"])

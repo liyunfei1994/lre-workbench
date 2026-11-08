@@ -8,24 +8,64 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from core import EngineInputs, ValidationError, preburner_temperature_constraint
-from cycle import FFSCCycleModel
-from engineering_assessment import assess_engineering
+from lre_workbench.domain.models import EngineInputs, ValidationError, preburner_temperature_constraint
+from lre_workbench.systems.ffsc import FFSCCycleModel
+from lre_workbench.analysis.assessment import assess_engineering
+from lre_workbench.application.presets import preset_input_values
 from tests.test_environment_assessment import example_result
 from webapp.solver import input_values
 
 
 class PreburnerConstraintTests(unittest.TestCase):
+    def test_new_custom_inputs_do_not_enable_example_temperature_limits(self):
+        inputs = EngineInputs(ox_preburner_temp_target=1000, fuel_preburner_temp_target=1100)
+        values, _ = input_values({})
+        for side in ("ox", "fuel"):
+            self.assertEqual(getattr(inputs, f"{side}_preburner_temp_limit_status"), "unset")
+            self.assertIsNone(preburner_temperature_constraint(inputs, side)["limit_K"])
+            self.assertEqual(values[f"{side}_preburner_temp_limit_status"], "unset")
+
+    def test_engineering_example_explicitly_enables_only_provisional_limits(self):
+        values = preset_input_values("raptor3_ffsc")
+        for side, limit in (("ox", 800), ("fuel", 900)):
+            self.assertEqual(values[f"{side}_preburner_temp_limit_status"], "provisional")
+            self.assertEqual(values[f"{side}_preburner_temp_limit"], limit)
+            self.assertEqual(values[f"{side}_preburner_temp_limit_basis"], "")
+
     def test_old_numeric_limits_remain_provisional_without_rewriting_source(self):
         legacy = {"ox_preburner_temp_limit": 820.0, "fuel_preburner_temp_limit": 940.0}
         before = dict(legacy)
         values, _ = input_values(legacy, saved_snapshot=True)
         self.assertEqual(legacy, before)
+        loaded = EngineInputs.from_dict(legacy)
         for side, limit in (("ox", 820), ("fuel", 940)):
             self.assertEqual(values[f"{side}_preburner_temp_limit"], limit)
             self.assertEqual(values[f"{side}_preburner_temp_limit_status"], "provisional")
             self.assertEqual(values[f"{side}_preburner_temp_limit_basis"], "")
             self.assertEqual(preburner_temperature_constraint(legacy, side)["status"], "provisional")
+            self.assertEqual(preburner_temperature_constraint(loaded, side)["limit_K"], limit)
+            self.assertEqual(getattr(loaded, f"{side}_preburner_temp_limit_status"), "provisional")
+
+    def test_saved_explicit_unset_is_not_reactivated_on_load(self):
+        saved = asdict(EngineInputs(ox_preburner_temp_target=1000, fuel_preburner_temp_target=1100))
+        before = dict(saved)
+        loaded = EngineInputs.from_dict(saved)
+        values, _ = input_values(saved, saved_snapshot=True)
+        self.assertEqual(asdict(loaded), saved)
+        # The FFSC web contract intentionally omits these inactive desktop/GG
+        # fields. Every remaining saved value must survive byte-for-value;
+        # filtering inactive fields must not reactivate an unset constraint.
+        retired = {"gg_exhaust_expansion_ratio", "gg_fraction_guess", "gg_injector_dp_ratio",
+                   "gg_layout", "gg_mech_efficiency", "gg_mr_target", "gg_temp_limit",
+                   "gg_temp_target", "gg_turbine_backpressure_pa", "use_target_gg_temp",
+                   "injector_dp_ratio_ox", "injector_dp_ratio_fuel"}
+        self.assertEqual(set(saved)-set(values), retired)
+        self.assertEqual(values, {key:value for key,value in saved.items() if key not in retired})
+        self.assertEqual(saved, before)
+        for side in ("ox", "fuel"):
+            self.assertEqual(values[f"{side}_preburner_temp_limit_status"], "unset")
+            self.assertIsNone(preburner_temperature_constraint(values, side)["limit_K"])
+            self.assertIsNone(preburner_temperature_constraint(loaded, side)["limit_K"])
 
     def test_unset_preserves_old_value_without_blocking_temperature_target(self):
         inputs = EngineInputs(ox_preburner_temp_limit_status="unset",
@@ -44,7 +84,7 @@ class PreburnerConstraintTests(unittest.TestCase):
                              ox_preburner_temp_limit_basis="本方案试验条件下的上限")
 
     def test_documented_requires_nonempty_basis_but_does_not_claim_certification(self):
-        with self.assertRaisesRegex(ValidationError, "已有依据状态必须填写"):
+        with self.assertRaisesRegex(ValidationError, "依据已登记状态必须填写"):
             EngineInputs(ox_preburner_temp_limit_status="documented",
                          ox_preburner_temp_limit_basis=" \n ")
         inputs = EngineInputs(ox_preburner_temp_limit_status="documented",
@@ -55,14 +95,18 @@ class PreburnerConstraintTests(unittest.TestCase):
     def test_active_limits_and_targets_are_finite_positive_not_material_allowables(self):
         for value in (0, -1, float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(ValidationError):
-                EngineInputs(ox_preburner_temp_limit=value)
+                EngineInputs(ox_preburner_temp_limit=value, ox_preburner_temp_limit_status="provisional")
         # Old 1200/1500 K input caps were not evidence of material allowables.
         inputs = EngineInputs(ox_preburner_temp_limit=1800, fuel_preburner_temp_limit=1800,
+                              ox_preburner_temp_limit_status="provisional",
+                              fuel_preburner_temp_limit_status="provisional",
                               ox_preburner_temp_target=1250, fuel_preburner_temp_target=1550)
         self.assertEqual(inputs.ox_preburner_temp_target, 1250)
 
     def test_only_temperature_mode_applies_target_limit_conflict(self):
         mixture = EngineInputs(use_target_preburner_temp=0, use_target_preburner_mr=1,
+                               ox_preburner_temp_limit_status="provisional",
+                               fuel_preburner_temp_limit_status="provisional",
                                ox_preburner_temp_target=1000, fuel_preburner_temp_target=1100)
         self.assertFalse(FFSCCycleModel(mixture)._temp_target_mode())
         with self.assertRaisesRegex(ValidationError, "目标温度不能超过"):
@@ -94,7 +138,7 @@ class PreburnerConstraintTests(unittest.TestCase):
                 self.assertFalse(any("preburner_mr_target" in str(item.message) for item in caught))
 
     def test_active_preburner_mixture_ratios_are_checked_in_their_actual_role(self):
-        for temperature_mode, role in ((1, "O/F 初值"), (0, "指定 O/F")):
+        for temperature_mode, role in ((1, "氧燃质量比 初值"), (0, "指定 氧燃质量比")):
             for key, value in (("ox_preburner_mr_target", 0),
                                ("fuel_preburner_mr_target", 10),
                                ("fuel_preburner_mr_target", float("nan"))):
@@ -144,8 +188,8 @@ class PreburnerConstraintTests(unittest.TestCase):
     def test_provisional_constraints_prevent_overall_system_pass(self):
         result = example_result()
         result.steady_closure = {"schema_version": 1}
-        with patch("steady_network.audit_network", return_value={"status": "pass", "pressure_tolerance_Pa": 1}), \
-             patch("steady_closure.audit_energy", return_value={"status": "pass"}):
+        with patch('lre_workbench.systems.steady_network.audit_network', return_value={"status": "pass", "pressure_tolerance_Pa": 1}), \
+             patch('lre_workbench.systems.steady_closure.audit_energy', return_value={"status": "pass"}):
             assessment = assess_engineering(result, scope="system")
         self.assertEqual(assessment["status"], "review")
         self.assertEqual(assessment["review_count"], 2)
@@ -153,13 +197,13 @@ class PreburnerConstraintTests(unittest.TestCase):
         self.assertEqual(assessment["unknown_count"], 0)
 
     def test_real_cycle_does_not_send_unset_limits_to_turbines(self):
-        from turbine import Turbine
+        from lre_workbench.components.turbines.model import Turbine
         inputs = EngineInputs(cooling_bartz_mode=0, cooling_heat_load=90e6,
             use_target_preburner_temp=0, ox_preburner_mr_target=59.81689453125,
             fuel_preburner_mr_target=0.1599658203125,
             ox_preburner_temp_limit_status="unset", fuel_preburner_temp_limit_status="unset",
             ox_preburner_temp_limit=1, fuel_preburner_temp_limit=1)
-        with patch("cycle.Turbine", wraps=Turbine) as turbine:
+        with patch('lre_workbench.systems.ffsc.Turbine', wraps=Turbine) as turbine:
             result = FFSCCycleModel(inputs)._evaluate_once(766, 1.54, 1.79)
         self.assertEqual(turbine.call_count, 2)
         self.assertTrue(all(call.kwargs["t_in_limit_K"] is None for call in turbine.call_args_list))

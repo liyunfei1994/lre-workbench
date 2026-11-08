@@ -16,15 +16,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
-from core import EngineInputs
-from convergence import numerical_convergence
-from cycle import FFSCCycleModel
-from engine_presets import preset_input_values
-from gui_pyside6 import WorkerSignals
-from scan_parameters import build_scan_points, verify_scan_replay
-from sweep import sweep_ox_preburner_mr
-from workbench import WorkbenchWindow
-from workbench_fonts import configure_fonts
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.solvers.convergence import numerical_convergence
+from lre_workbench.systems.ffsc import FFSCCycleModel
+from lre_workbench.application.presets import preset_input_values
+from lre_workbench.desktop.legacy_window import WorkerSignals
+from lre_workbench.analysis.scan_parameters import build_scan_points, verify_scan_replay
+from lre_workbench.analysis.sweep import sweep_ox_preburner_mr
+from lre_workbench.desktop.workbench import WorkbenchWindow
+from lre_workbench.desktop.fonts import configure_fonts
 
 
 class ScanGridTests(unittest.TestCase):
@@ -157,7 +157,7 @@ class ScanUiTests(unittest.TestCase):
                 w.of_sweep_start.setText("60")
                 w.of_sweep_end.setText("110")
                 w.of_sweep_step.setText(step)
-                with patch("workbench.legacy.OFSweepWorker") as worker_class:
+                with patch('lre_workbench.desktop.workbench.legacy.OFSweepWorker') as worker_class:
                     with patch.object(w.thread_pool, "start") as start:
                         with patch.object(QMessageBox, "warning") as warn:
                             w._on_run_of_sweep_clicked()
@@ -171,7 +171,7 @@ class ScanUiTests(unittest.TestCase):
         w.of_sweep_start.setText("60")
         w.of_sweep_end.setText("62")
         w.of_sweep_step.setText("1")
-        with patch("workbench.legacy.OFSweepWorker", side_effect=FakeSweepWorker):
+        with patch('lre_workbench.desktop.workbench.legacy.OFSweepWorker', side_effect=FakeSweepWorker):
             with patch.object(w.thread_pool, "start") as start:
                 w._on_run_of_sweep_clicked()
         worker = w._active_worker
@@ -240,7 +240,7 @@ class ScanUiTests(unittest.TestCase):
         self.assertFalse(verify_scan_replay(wrong_record, replay)["consistent"])
         # A later, unrelated solve must not export the old candidate's check.
         w._submitted_signature = ("another design point",)
-        with patch("workbench.legacy.MainWindow._on_solve_finished"):
+        with patch('lre_workbench.desktop.workbench.legacy.MainWindow._on_solve_finished'):
             w._on_solve_finished(replay)
         self.assertIsNone(w._last_scan_replay_check)
 

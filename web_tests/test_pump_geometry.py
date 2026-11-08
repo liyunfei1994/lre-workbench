@@ -7,7 +7,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from geometry.pumps import estimate_pump
+from lre_workbench.components.pumps.geometry import estimate_pump
 from webapp.pump_geometry import G, pump_geometry_view
 
 

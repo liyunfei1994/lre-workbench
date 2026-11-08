@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from core import CycleResults, EngineInputs
-from cycle import FFSCCycleModel
-from convergence import numerical_convergence
+from lre_workbench.domain.models import CycleResults, EngineInputs
+from lre_workbench.systems.ffsc import FFSCCycleModel
+from lre_workbench.solvers.convergence import numerical_convergence
 
 
 def result_for(model, **summary):
@@ -48,19 +48,19 @@ class PreburnerInversionTests(unittest.TestCase):
         self.model = FFSCCycleModel(EngineInputs())
 
     def test_midpoint_hit_returns_the_evaluated_midpoint(self):
-        with patch("thermo.combustion_equilibrium", side_effect=lambda **kw:
+        with patch('lre_workbench.properties.thermochemistry.combustion_equilibrium', side_effect=lambda **kw:
                    SimpleNamespace(temperature=2000 - 10 * kw["mdot_ox"])):
             # The original bug returned 123.75 after a successful 87.5 trial.
             mr = self.model._mr_for_target_temp("ox", 1125, 350, 90, 60e6)
         self.assertEqual(mr, 87.5)
 
     def test_exact_endpoint_is_returned(self):
-        with patch("thermo.combustion_equilibrium", side_effect=lambda **kw:
+        with patch('lre_workbench.properties.thermochemistry.combustion_equilibrium', side_effect=lambda **kw:
                    SimpleNamespace(temperature=2000 - 10 * kw["mdot_ox"])):
             self.assertEqual(self.model._mr_for_target_temp("ox", 1850, 350, 90, 60e6), 15)
 
     def test_nonfinite_temperature_or_target_is_rejected(self):
-        with patch("thermo.combustion_equilibrium", return_value=SimpleNamespace(temperature=math.nan)):
+        with patch('lre_workbench.properties.thermochemistry.combustion_equilibrium', return_value=SimpleNamespace(temperature=math.nan)):
             with self.assertRaises(ValueError):
                 self.model._mr_for_target_temp("ox", 750, 350, 90, 60e6)
         with self.assertRaises(ValueError):
@@ -130,13 +130,15 @@ class NestedConvergenceTests(unittest.TestCase):
 
     def test_current_quasi1d_feedback_replaces_only_redundant_picard_solves(self):
         from dataclasses import asdict
-        from regen_coupling import close_regen_cycle
+        from lre_workbench.systems.regenerative import close_regen_cycle
         from tests.test_regen_coupling import CouplingTests
         fixture = CouplingTests()
         initial = (self.model.inputs.chamber_temp_guess, self.model.inputs.chamber_gamma,
                    self.model.inputs.molar_mass)
         self.model.inputs.use_target_preburner_temp = 0
-        warm = dict(x=[100., 2., 2.], chamber_temp_guess=initial[0],
+        from lre_workbench.solvers.state import ffsc_design_vector_schema
+        warm = dict(vector_schema=ffsc_design_vector_schema(target_mixture_ratio=self.model._target_mr_mode()),
+                    x=[100., 2., 2.], chamber_temp_guess=initial[0],
                     chamber_gamma=initial[1], molar_mass=initial[2])
         def solve(**kwargs):
             vector, result = inner_result(self.model, tc=3800., gamma=1.25, mw=23.)
@@ -145,7 +147,7 @@ class NestedConvergenceTests(unittest.TestCase):
             result.components = closed.components
             result._current_regen_thermal_evidence = closed._current_regen_thermal_evidence
             return vector, result
-        with patch("pump.fluid_density", return_value=400.), patch.object(
+        with patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.), patch.object(
                 self.model, "solve_cycle", side_effect=solve) as solver:
             result = self.model._evaluate_design_core(warm_state=warm)
         self.assertEqual(solver.call_count, 1)

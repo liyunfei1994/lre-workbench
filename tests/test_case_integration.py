@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QMessageBox
-from workbench import WorkbenchWindow
+from lre_workbench.desktop.workbench import WorkbenchWindow
 
 
 class CaseIntegrationTests(unittest.TestCase):
@@ -55,11 +55,34 @@ class CaseIntegrationTests(unittest.TestCase):
         self.assertEqual(window.input_edits["pc"].text(), "32.5")
         self.assertEqual(window._case_recovery_store.read()["raw_inputs"]["pc"], "32.5")
 
+    def test_old_case_without_liner_identity_does_not_inherit_new_material(self):
+        window = self.window()
+        self.assertEqual(window._read_inputs().chamber_inner_wall_material, "grcop42")
+        path = self.directory / "legacy-liner.json"
+        path.write_text(json.dumps({"format":"ffsc.workbench.case", "schema_version":1,
+                                    "inputs":{"pc":32e6}}), encoding="utf-8")
+        window.load_case_path(path)
+        self.assertEqual(window.input_edits["chamber_inner_wall_material"].currentData(), "grcop84")
+        self.assertEqual(window._read_inputs().wall_thermal_dataset_id, "grcop84_ellis2000_extruded_high_fe_v1")
+
+    def test_old_recovery_without_liner_identity_restores_84_without_mutating_snapshot(self):
+        window = self.window()
+        snapshot = window._case_recovery_snapshot()
+        for container in (snapshot, snapshot["saved_inputs"]):
+            for group in ("raw_inputs", "extra_inputs"):
+                container[group].pop("chamber_inner_wall_material", None)
+                container[group].pop("wall_thermal_dataset_id", None)
+        original = deepcopy(snapshot)
+        window._restore_case_snapshot(snapshot)
+        self.assertEqual(snapshot, original)
+        self.assertEqual(window.input_edits["chamber_inner_wall_material"].currentData(), "grcop84")
+        self.assertEqual(window._read_inputs().wall_thermal_dataset_id, "grcop84_ellis2000_extruded_high_fe_v1")
+
     def test_close_save_cancelled_filename_does_not_close_or_erase_draft(self):
         window = self.window()
         window.input_edits["pc"].setText("32.5")
         with patch.object(window, "_ask_case_abandon", return_value=QMessageBox.Save), \
-                patch("workbench.QFileDialog.getSaveFileName", return_value=("", "")):
+                patch('lre_workbench.desktop.workbench.QFileDialog.getSaveFileName', return_value=("", "")):
             self.assertFalse(window.close())
         self.assertTrue(window.isVisible())
         self.assertTrue(window._has_unsaved_changes())
@@ -70,8 +93,8 @@ class CaseIntegrationTests(unittest.TestCase):
         window = self.window()
         window.input_edits["pc"].setText("-")
         with patch.object(window, "_ask_case_abandon", return_value=QMessageBox.Save), \
-                patch("workbench.QMessageBox.warning") as warning, \
-                patch("workbench.QFileDialog.getSaveFileName", side_effect=AssertionError("Invalid inputs cannot be saved")):
+                patch('lre_workbench.desktop.workbench.QMessageBox.warning') as warning, \
+                patch('lre_workbench.desktop.workbench.QFileDialog.getSaveFileName', side_effect=AssertionError("Invalid inputs cannot be saved")):
             self.assertFalse(window.close())
         warning.assert_called_once()
         self.assertEqual(warning.call_args.args[1], "保存失败")
@@ -85,7 +108,7 @@ class CaseIntegrationTests(unittest.TestCase):
         path = self.directory / "已保存方案.json"
         recovery_path = window._case_recovery_store.path
         with patch.object(window, "_ask_case_abandon", return_value=QMessageBox.Save), \
-                patch("workbench.QFileDialog.getSaveFileName", return_value=(str(path), "JSON (*.json)")):
+                patch('lre_workbench.desktop.workbench.QFileDialog.getSaveFileName', return_value=(str(path), "JSON (*.json)")):
             self.assertTrue(window.close())
         self.assertFalse(window.isVisible())
         self.assertFalse(window._case_safety_ready)
@@ -112,7 +135,7 @@ class CaseIntegrationTests(unittest.TestCase):
         before = window._case_edit_state()
         baseline = deepcopy(window._case_baseline)
         with patch.object(window, "_ask_case_abandon", return_value=QMessageBox.Cancel) as prompt, \
-                patch("workbench.QFileDialog.getOpenFileName", side_effect=AssertionError("Cancelled open must not pick a file")):
+                patch('lre_workbench.desktop.workbench.QFileDialog.getOpenFileName', side_effect=AssertionError("Cancelled open must not pick a file")):
             window.open_case()
             self.assertEqual(window._case_edit_state(), before)
             window.reset_defaults()
@@ -138,7 +161,7 @@ class CaseIntegrationTests(unittest.TestCase):
         window._thermo_T_ox.setText("91")
         analysis = window._case_analysis_inputs()
         path = self.directory / "分析参数方案.json"
-        with patch("workbench.QFileDialog.getSaveFileName", return_value=(str(path), "JSON (*.json)")):
+        with patch('lre_workbench.desktop.workbench.QFileDialog.getSaveFileName', return_value=(str(path), "JSON (*.json)")):
             self.assertTrue(window.save_case())
         self.assertFalse(window._has_unsaved_changes())
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -214,6 +237,18 @@ class CaseIntegrationTests(unittest.TestCase):
         self.assertFalse(previous.path.exists())
         self.assertTrue(recovered._case_recovery_store.path.exists())
         self.assertIn("有限", recovered.of_sweep_preview.text())
+
+    def test_new_and_reset_drafts_persist_explicit_unset_temperature_constraints(self):
+        window = self.window()
+        for side in ("ox", "fuel"):
+            key = f"{side}_preburner_temp_limit_status"
+            self.assertEqual(window._case_edit_state()["extra_inputs"][key], "unset")
+            window._extra_inputs[key] = "provisional"
+        with patch.object(window, "_ask_case_abandon", return_value=QMessageBox.Discard):
+            window.reset_defaults()
+        for side in ("ox", "fuel"):
+            key = f"{side}_preburner_temp_limit_status"
+            self.assertEqual(window._case_edit_state()["extra_inputs"][key], "unset")
 
 
 if __name__ == "__main__":

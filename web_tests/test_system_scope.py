@@ -9,16 +9,17 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from core import ComponentResult, CycleResults, EngineInputs
-from cycle import FFSCCycleModel
-from engineering_assessment import assess_engineering
-from gg_cycle import GGCycleModel
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs
+from lre_workbench.systems.ffsc import FFSCCycleModel
+from lre_workbench.analysis.assessment import assess_engineering
 from webapp.solver import calculate, system_calculation_scope
 from web_tests.convergence_fixture import converged_evidence
 
 
 def example_result():
-    inputs = EngineInputs(turb_ox_rotor_material="sx500")
+    inputs = EngineInputs(turb_ox_rotor_material="sx500",
+                          ox_preburner_temp_limit_status="provisional",
+                          fuel_preburner_temp_limit_status="provisional")
     summary = {
         "solver_residual_norm": 1e-5, "solver_iterations": 8,
         "crossflow_fuel_to_oxpb_margin_MPa": 0.4,
@@ -90,7 +91,7 @@ class SystemAssessmentTests(unittest.TestCase):
 
 class SystemExecutionTests(unittest.TestCase):
     def test_legacy_postprocessing_flag_keeps_core_path_and_inputs(self):
-        for model_class in (FFSCCycleModel, GGCycleModel):
+        for model_class in (FFSCCycleModel,):
             for temperature_target in (True, False):
                 with self.subTest(model=model_class.__name__, temperature_target=temperature_target):
                     result = example_result()
@@ -137,13 +138,14 @@ class SystemExecutionTests(unittest.TestCase):
         submitted = asdict(result.inputs)
         model = Mock()
         model.evaluate.return_value = result
-        with patch("gg_cycle.make_cycle_model", return_value=model) as factory, \
+        with patch('lre_workbench.systems.ffsc.FFSCCycleModel', return_value=model) as factory, \
              patch("webapp.solver.science_environment", return_value={"fingerprint": "test"}):
             record = calculate(submitted)
         self.assertEqual(asdict(factory.call_args.args[0]), submitted)
         model.evaluate.assert_called_once_with(progress_callback=None, include_cooling_marching=False)
-        self.assertEqual(record["submitted_inputs"], submitted)
-        self.assertEqual(record["calculation"]["inputs"], submitted)
+        from webapp.solver import input_values
+        self.assertEqual(record["submitted_inputs"], input_values(submitted)[0])
+        self.assertEqual(record["calculation"]["inputs"], input_values(submitted)[0])
         self.assertEqual(submitted["cooling_marching_enable"], 1.0)
         self.assertEqual(record["calculation_scope"]["id"], "engine_system")
         self.assertEqual(record["calculation_scope"]["version"], 4)

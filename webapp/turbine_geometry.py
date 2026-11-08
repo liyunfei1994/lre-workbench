@@ -5,6 +5,7 @@ convention. An explicitly saved assumption treats its node p/T as static for
 annulus sizing only. This module neither redesigns the turbine nor solves blades.
 """
 from copy import deepcopy
+from webapp.design_scope import require_supported_source
 import hashlib
 import json
 import math
@@ -192,20 +193,9 @@ def _specs(result):
     inputs = calculation.get("inputs") or result.get("submitted_inputs") or {}
     if not isinstance(components, dict) or not isinstance(inputs, dict):
         raise ValueError("计算记录缺少有效的部件或保存参数。")
-    if "gg_turbine" in components:
-        if any(key in components for key in ("gg_turbine_ox", "gg_turbine_fuel", "ox_preburner_turbine", "fuel_preburner_turbine")):
-            raise ValueError("记录同时含共享与独立涡轮，不能确定轴系拓扑。")
-        return [("shared", "gg_turbine", "fuel", "燃气发生器共轴涡轮")], components, inputs
-    if any(key in components for key in ("gg_turbine_ox", "gg_turbine_fuel")):
-        if any(key in components for key in ("ox_preburner_turbine", "fuel_preburner_turbine")):
-            raise ValueError("记录同时含 GG 与分级燃烧涡轮，不能确定循环拓扑。")
-        return [("ox", "gg_turbine_ox", "ox", "氧泵轴涡轮（GG 燃气）"),
-                ("fuel", "gg_turbine_fuel", "fuel", "燃料泵轴涡轮（GG 燃气）")], components, inputs
-    if inputs.get("cycle_type") == "gg" and inputs.get("gg_layout") == "single_shaft":
-        return [("shared", "gg_turbine", "fuel", "燃气发生器共轴涡轮")], components, inputs
-    if inputs.get("cycle_type") == "gg" and inputs.get("gg_layout") == "dual_shaft":
-        return [("ox", "gg_turbine_ox", "ox", "氧泵轴涡轮（GG 燃气）"),
-                ("fuel", "gg_turbine_fuel", "fuel", "燃料泵轴涡轮（GG 燃气）")], components, inputs
+    require_supported_source({"result": result})
+    if any(key.startswith("gg_") or key == "gas_generator" for key in components):
+        raise ValueError("该记录不属于 FFSC 双轴循环，不能生成涡轮几何。")
     return [("ox", "ox_preburner_turbine", "ox", "富氧涡轮"),
             ("fuel", "fuel_preburner_turbine", "fuel", "富燃涡轮")], components, inputs
 
@@ -247,9 +237,9 @@ def _build_turbine(component, inputs, key, prefix, label, record_id):
                      assumptions=assumptions, dimensions=dimensions, meridional=meridional, rows=rows, checks=checks,
                      notes=["这是轴流式恒平均半径流道的概念包络；轮毂/机匣曲线是流体边界，非实体厚度、盘轴结构或真实叶片。",
                             "入口和出口分别按理想气体、冻结入口混合物分子量与保存状态计算密度；不假定两端同密度。",
-                            "按每台涡轮保存的质量流量建图；GG 双轴采用各自分流，GG 单轴只显示一台共享涡轮。",
+                            "按富氧、富燃两台涡轮各自保存的质量流量建图。",
                             "轴向弦长比和所有相邻叶排间隙比是布局假设。中间截面不提供未经计算的压力、温度或马赫数。",
-                            "平均直径和推荐级数来自系统估算。叶排数量不代表已完成的级负荷、速度复合/压力复合型式或效率设计。",
+                            "平均直径来自系统初估；候选级数来自用户初选或整机速比区间经验估算。叶排数量不代表已完成的级负荷、速度复合/压力复合型式或效率设计。",
                             "平均圆周速度 U 不等于外缘速度；环道外缘速度上界按进出口最大机匣半径乘角速度计算，不据此声称真实叶尖强度合格。",
                             "CFturbo 需要明确入口总压/总温及总总/总静压比；请先完成状态定义和气动详细设计。可将 z,r 轮廓用作 CAD 布局起点。"],
                      references=deepcopy(SOURCES))
@@ -286,12 +276,11 @@ def _saved_turbine(turbine, side, record_id):
     value = deepcopy(turbine)
     if type(value.get("available")) is not bool:
         raise ValueError("保存的涡轮几何状态无效。")
-    valid_sources = {"ox": {( "ox_preburner_turbine", "ox"), ("gg_turbine_ox", "ox")},
-                     "fuel": {("fuel_preburner_turbine", "fuel"), ("gg_turbine_fuel", "fuel")},
-                     "shared": {("gg_turbine", "fuel")}}
+    valid_sources = {"ox": {("ox_preburner_turbine", "ox")},
+                     "fuel": {("fuel_preburner_turbine", "fuel")}}
     source = value["source"]
     if (source.get("component_key"), source.get("assumption_prefix")) not in valid_sources[side]:
-        raise ValueError("保存的涡轮来源与轴系位置不一致。")
+        raise ValueError("保存的涡轮部件来源与轴系位置不一致。")
     source["record_id"] = record_id
     if not value["available"]:
         # Reject non-finite corrupt snapshots, including unavailable historical ones.
@@ -314,24 +303,19 @@ def turbine_geometry_view(result, record_id=""):
     sides = ["ox", "fuel"]
     saved = result.get("turbine_geometry") if isinstance(result, dict) else None
     try:
+        require_supported_source({"result": result})
         if saved is not None:
             if not isinstance(saved, dict) or saved.get("schema_version") != 1 or not isinstance(saved.get("turbines"), dict):
                 raise ValueError("保存的涡轮几何快照版本或结构无效。")
             sides = list(saved["turbines"])
-            if set(sides) not in ({"ox", "fuel"}, {"shared"}):
+            if set(sides) != {"ox", "fuel"}:
                 sides = ["ox", "fuel"]
                 raise ValueError("保存的涡轮几何轴系拓扑无效。")
-            if set(sides) == {"ox", "fuel"}:
-                components = [(saved["turbines"][side].get("source") or {}).get("component_key", "")
-                              for side in ("ox", "fuel") if isinstance(saved["turbines"][side], dict)]
-                if (any(key.startswith("gg_turbine_") for key in components)
-                        and any(key in ("ox_preburner_turbine", "fuel_preburner_turbine") for key in components)):
-                    raise ValueError("保存的涡轮几何混合了不同循环的部件来源。")
             for side in sides:
                 try:
                     response["turbines"][side] = _saved_turbine(saved["turbines"][side], side, record_id)
                 except ERRORS as exc:
-                    response["turbines"][side] = {"available": False, "label": "共享涡轮" if side == "shared" else ("氧泵轴涡轮" if side == "ox" else "燃料泵轴涡轮"),
+                    response["turbines"][side] = {"available": False, "label": "氧泵轴涡轮" if side == "ox" else "燃料泵轴涡轮",
                                                   "source": deepcopy(source), "reason": str(exc), "design_point": {}, "dimensions": {}}
         elif isinstance(result, dict):
             specs, components, inputs = _specs(result)
@@ -341,6 +325,6 @@ def turbine_geometry_view(result, record_id=""):
             raise ValueError("选择已完成的设计点记录后查看涡轮几何。")
     except ERRORS as exc:
         for side in sides:
-            response["turbines"][side] = {"available": False, "label": "共享涡轮" if side == "shared" else ("氧泵轴涡轮" if side == "ox" else "燃料泵轴涡轮"),
+            response["turbines"][side] = {"available": False, "label": "氧泵轴涡轮" if side == "ox" else "燃料泵轴涡轮",
                                           "source": deepcopy(source), "reason": str(exc), "design_point": {}, "dimensions": {}}
     return response

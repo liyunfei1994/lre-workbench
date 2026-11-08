@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import {renderTurbineDesign,mountTurbineDesign,buildTurbineDesignJson,buildTurbineDesignCsv,buildTurbineDesignMarkdown,turbineDesignExportFilename} from "../webapp/static/turbine-design.js";
+import {renderPreliminaryForm,readPreliminaryScenario,renderVelocityTriangles,renderPreliminaryResult,buildPreliminaryCsv,mountPreliminaryWorkspace} from "../webapp/static/turbine-preliminary.js";
 
 const field=(key,label,value,unit="—",status="saved",note="")=>({key,label,value,unit,status,source:`保存结果 · ${key}`,note});
 function machine(side="ox") {
@@ -16,11 +17,11 @@ const model=()=>({schema_version:1,source:{record_id:"record-a",kind:"saved_reco
 
 test("global setup preserves missing state definitions and node values without inventing total conditions",()=>{
   const html=renderTurbineDesign(model());
-  assert.match(html,/涡轮总体设计/);assert.match(html,/CFturbo 设计任务书/);assert.match(html,/Global setup 待补充/);assert.doesNotMatch(html,/Global setup 数据齐备/);
+  assert.match(html,/涡轮设计条件/);assert.match(html,/循环需求与部件初选/);assert.match(html,/CFturbo 设计任务书/);assert.match(html,/Global setup 待补充/);assert.doesNotMatch(html,/Global setup 数据齐备/);
   const totalRow=html.match(/<tr data-td-field="total_pressure_in_pa">.*?<\/tr>/)[0];assert.match(totalRow,/>—<\/td>/);assert.match(totalRow,/td-status-missing/);assert.doesNotMatch(totalRow,/4,000,000/);
   const nodeRow=html.match(/<tr data-td-field="node_pressure_in_pa">.*?<\/tr>/)[0];assert.match(nodeRow,/4,000,000/);assert.match(nodeRow,/未声明总态/);
   assert.match(html,/保存的系统节点值与状态约定/);assert.match(html,/系统出口节点压力/);assert.match(html,/系统出口节点温度/);assert.match(html,/不把 p、T 自动标为总压或总温/);
-  assert.match(html,/涡轮功率（传动损失前）/);assert.match(html,/等熵效率/);assert.match(html,/附加效率/);assert.match(html,/与等熵效率分开定义/);assert.doesNotMatch(html,/<input|<select|<canvas|<svg/);
+  assert.match(html,/涡轮功率（传动损失前）/);assert.match(html,/等熵效率/);assert.match(html,/附加效率/);assert.match(html,/与等熵效率分开定义/);assert.doesNotMatch(html,/<canvas|<svg/);assert.match(html,/data-td-scenario-form/);
 });
 
 test("saved gas composition and temperature table retain actual fractions, zero values and provenance",()=>{
@@ -44,10 +45,10 @@ test("extreme values use compact scientific notation while sorted trace UI prese
 });
 
 test("old records and invalid scalar values remain visibly missing without placeholder gas or sampled properties",()=>{
-  const m={source:{record_id:"old"},turbines:{shared:{available:false,label:"GG 共轴涡轮",status:"incomplete",global_fields:[field("rpm","转速",NaN,"rpm","saved"),field("pin","入口压力",null,"Pa","saved")],gas:{status:"missing"}}}};
-  const html=renderTurbineDesign(m);assert.match(html,/data-td-side="shared" aria-pressed="true"/);assert.doesNotMatch(html,/data-td-machine="shared" hidden/);assert.match(html,/未保存入口组分/);assert.match(html,/没有保存可用的温区物性采样/);assert.doesNotMatch(html,/NaN|undefined|gri30|1700|<canvas/);
+  const m={source:{record_id:"old"},turbines:{fuel:{available:false,label:"富燃涡轮",status:"incomplete",global_fields:[field("rpm","转速",NaN,"rpm","saved"),field("pin","入口压力",null,"Pa","saved")],gas:{status:"missing"}}}};
+  const html=renderTurbineDesign(m);assert.match(html,/data-td-side="fuel" aria-pressed="true"/);assert.doesNotMatch(html,/data-td-machine="fuel" hidden/);assert.match(html,/未保存入口组分/);assert.match(html,/没有保存可用的温区物性采样/);assert.doesNotMatch(html,/NaN|undefined|gri30|1700|<canvas/);
   for(const key of ["rpm","pin"])assert.match(html.match(new RegExp(`<tr data-td-field="${key}">.*?</tr>`))[0],/td-status-missing/);assert.match(renderTurbineDesign(null),/没有保存可用的涡轮部件/);
-  const json=JSON.parse(buildTurbineDesignJson(m,"shared"));assert.equal(json.turbine.global_fields[1].value,null);assert.equal(json.turbine.available,false);
+  const json=JSON.parse(buildTurbineDesignJson(m,"fuel"));assert.equal(json.turbine.global_fields[1].value,null);assert.equal(json.turbine.available,false);
 });
 
 test("saved extrapolated samples are distinctly marked and their range flags survive text exports",()=>{
@@ -61,9 +62,14 @@ test("conflicts override a stale readiness flag and open the audit without maski
   const html=renderTurbineDesign(m);assert.match(html,/存在待解决冲突/);assert.match(html,/td-readiness is-conflict/);assert.match(html,/td-audit" open/);assert.match(html,/轴转速来源不一致/);assert.match(html,/采用假设/);assert.doesNotMatch(html,/Global setup 数据齐备/);
 });
 
-test("machine selection contains only actual branches and correct initially selected panel",()=>{
-  const html=renderTurbineDesign(model());assert.match(html,/data-td-side="ox" aria-pressed="true"/);assert.match(html,/data-td-machine="fuel" hidden/);assert.doesNotMatch(html,/data-td-side="shared"/);
-  const shared=renderTurbineDesign({turbines:{shared:machine()}});assert.match(shared,/data-td-side="shared" aria-pressed="true"/);assert.doesNotMatch(shared,/data-td-side="ox"|data-td-machine="shared" hidden/);
+test("machine selection offers only FFSC branches and excludes legacy shared turbines",()=>{
+  const html=renderTurbineDesign(model());
+  assert.match(html,/data-td-side="ox" aria-pressed="true"/);
+  assert.match(html,/data-td-machine="fuel" hidden/);
+  assert.doesNotMatch(html,/data-td-side="shared"/);
+  const legacy=renderTurbineDesign({turbines:{shared:machine()}});
+  assert.doesNotMatch(legacy,/data-td-side=/);
+  assert.match(legacy,/没有保存可用的涡轮部件/);
 });
 
 test("optional meanline results show saved Euler kinematics separately from the main design taskbook",()=>{
@@ -77,7 +83,7 @@ test("JSON and text exports retain selected record data, raw precision, missing 
   const csv=buildTurbineDesignCsv(m,"fuel"),markdown=buildTurbineDesignMarkdown(m,"fuel");assert.match(csv,/section,key,label,value,unit,status,source,note,turbine_key,record_id/);assert.match(csv,/0.000024123456789/);assert.match(csv,/"total_pressure_in_pa","CFturbo 入口总压","","Pa","missing"/);assert.match(csv,/"fuel","record-a"/);
   for(const content of ["global_setup","power_matching","gas.composition","gas.model","gas.property_table","stage_handoff","missing_requirements","reference","design_sha256"])assert.ok(csv.includes(content),content);
   for(const content of ["# 富燃涡轮","Global setup","入口组分质量分数","温区物性采样","功率匹配与效率口径","一维设计约束","CFturbo 入口总压","0.000024123456789","record-a"])assert.ok(markdown.includes(content),content);
-  assert.equal(buildTurbineDesignJson(m,"unknown"),"");assert.equal(buildTurbineDesignCsv(m,"unknown"),"");assert.equal(buildTurbineDesignMarkdown(null,"shared"),"");
+  assert.equal(buildTurbineDesignJson(m,"unknown"),"");assert.equal(buildTurbineDesignCsv(m,"unknown"),"");assert.equal(buildTurbineDesignMarkdown(null,"fuel"),"");
 });
 
 test("HTML and Markdown escape saved text, reject active links, and CSV neutralizes formulas without changing numeric signs",()=>{
@@ -86,7 +92,7 @@ test("HTML and Markdown escape saved text, reject active links, and CSV neutrali
 });
 
 test("filenames isolate turbine and saved record and remove traversal characters",()=>{
-  const m=model();assert.equal(turbineDesignExportFilename(m,"shared","md"),"turbine-design-shared-record-a.md");assert.equal(turbineDesignExportFilename(m,"fuel","csv"),"turbine-design-fuel-record-a.csv");m.source.record_id='../../<bad>"\\';assert.doesNotMatch(turbineDesignExportFilename(m,"ox","json"),/[<>"/\\]/);
+  const m=model();assert.equal(turbineDesignExportFilename(m,"fuel","md"),"turbine-design-fuel-record-a.md");assert.equal(turbineDesignExportFilename(m,"fuel","csv"),"turbine-design-fuel-record-a.csv");m.source.record_id='../../<bad>"\\';assert.doesNotMatch(turbineDesignExportFilename(m,"ox","json"),/[<>"/\\]/);
 });
 
 function fakeDom(sides=["ox","fuel"]) {
@@ -112,8 +118,8 @@ test("JSON CSV Markdown buttons download the selected machine with correct MIME,
   assert.equal(dom.downloads.length,3);assert.deepEqual(dom.revoked,[]);cleanup();assert.ok(dom.timers.every(timer=>timer.delay===1000));dom.timers.forEach(timer=>timer.fn());assert.deepEqual(dom.revoked,dom.downloads.map(download=>download.url));
 });
 
-test("remount replaces old event state, supports a single GG turbine and tolerates missing containers",()=>{
-  const dom=fakeDom(["shared"]),m={source:{record_id:"gg-record"},turbines:{shared:machine()}},calls=[];mountTurbineDesign(dom.root,m,{onInspectComponent:()=>calls.push("old")});const cleanup=mountTurbineDesign(dom.root,m,{onInspectComponent:()=>calls.push("new")});assert.equal(dom.root.events.get("click").size,1);dom.root.fire("click",{target:dom.inspect[0]});assert.deepEqual(calls,["new"]);dom.root.fire("click",{target:dom.button("json",0)});assert.equal(dom.downloads[0].name,"turbine-design-shared-gg-record.json");cleanup();assert.equal(typeof mountTurbineDesign(null,m),"function");
+test("remount replaces old event state, supports a single FFSC turbine and tolerates missing containers",()=>{
+  const dom=fakeDom(["fuel"]),m={source:{record_id:"ffsc-record"},turbines:{fuel:machine()}},calls=[];mountTurbineDesign(dom.root,m,{onInspectComponent:()=>calls.push("old")});const cleanup=mountTurbineDesign(dom.root,m,{onInspectComponent:()=>calls.push("new")});assert.equal(dom.root.events.get("click").size,1);dom.root.fire("click",{target:dom.inspect[0]});assert.deepEqual(calls,["new"]);dom.root.fire("click",{target:dom.button("json",0)});assert.equal(dom.downloads[0].name,"turbine-design-fuel-ffsc-record.json");cleanup();assert.equal(typeof mountTurbineDesign(null,m),"function");
 });
 
 test("component-page navigation selects the exact saved machine before inspecting or downloading",()=>{
@@ -121,4 +127,63 @@ test("component-page navigation selects the exact saved machine before inspectin
   assert.equal(dom.panels[0].hidden,true);assert.equal(dom.panels[1].hidden,false);assert.equal(dom.tabs[0].attrs["aria-pressed"],"false");assert.equal(dom.tabs[1].attrs["aria-pressed"],"true");
   dom.root.fire("click",{target:dom.inspect[1]});assert.deepEqual(calls,[["fuel_preburner_turbine","fuel"]]);dom.root.fire("click",{target:dom.button("json",1)});assert.equal(dom.downloads[0].name,"turbine-design-fuel-record-a.json");cleanup();
   const fallback=mountTurbineDesign(dom.root,m,{initialComponent:"removed_component"});assert.equal(dom.panels[0].hidden,false);assert.equal(dom.panels[1].hidden,true);fallback();
+});
+
+const scenarioValues=()=>({stages:"2",mean_diameter_m:"150",flow_coefficient:"0.6",reaction:"0",inlet_swirl_m_s:"0",work_split:"equal",work_fractions:"",stator_axial_chord_m:"15",rotor_axial_chord_m:"",stator_zweifel:"0.9",rotor_zweifel:""});
+function preliminaryResult(record="record-a") {
+  return {status:"preliminary",source:{record_id:record,turbine_key:"ox"},scenario:{mean_diameter_m:.15},summary:{stages:2,total_work_j_kg:150000,total_power_w:3e6,total_torque_nm:1432,u_m_s:300},stages:[{stage:1,work_fraction:.5,work_j_kg:75000,power_w:1.5e6,torque_nm:716,loading_coefficient:.8333333333333333,u_m_s:300,ca_m_s:180,cu0_m_s:0,cu1_m_s:275,cu2_m_s:25,wu1_m_s:-25,wu2_m_s:-275,alpha0_deg:0,alpha1_deg:56.8,alpha2_deg:7.9,beta1_deg:-7.9,beta2_deg:-56.8,reaction_target:.5,reaction_stage:null,stator:{status:"candidate",blade_count_candidate:31,pitch_m:.015201254775434483,axial_solidity:.98676,zweifel_candidate:.903,note:"整数候选，需校核"},rotor:{status:"missing",blade_count_candidate:null,note:"缺少轴向弦长"}}],checks:[{id:"euler",label:"Euler 闭合",status:"pass",note:"仅代数"}],limitations:["没有静态密度与叶型"],calculation_sha256:"d".repeat(64)};
+}
+
+test("scenario form uses explicit saved seeds and does not invent absent dimensions",()=>{
+  const workspace={seeds:{mean_diameter_m:{value:.150075011,source:"保存中径",status:"saved",note:"初选值"},inlet_swirl_m_s:{value:0,status:"assumed",source:"零旋流起始方案",note:"起始假设"}}},before=JSON.stringify(workspace);
+  const html=renderPreliminaryForm(machine(),workspace,"ox");assert.match(html,/value="150.075011"/);assert.match(html,/name="inlet_swirl_m_s"[^>]*value="0"/);assert.match(html,/name="rotor_axial_chord_m"[^>]*value=""/);assert.match(html,/起始假设/);assert.match(html,/不回写历史记录/);assert.equal(JSON.stringify(workspace),before);
+  const m=model();m.workspace={turbines:{ox:workspace},parameter_map:[{parameter:"流量",cfturbo:"Mass flow",source:"保存流量",note:"燃气流量"}]};const rendered=renderTurbineDesign(m);assert.match(rendered,/role="tablist"/);assert.match(rendered,/data-td-panel="gas" hidden/);assert.match(rendered,/CFturbo 参数对应/);assert.match(rendered,/Mass flow/);assert.match(rendered,/td-field-source/);
+});
+
+test("scenario parser converts millimetres once and preserves zero reaction and swirl",()=>{
+  const input=scenarioValues(),s=readPreliminaryScenario(input);assert.equal(s.mean_diameter_m,.15);assert.equal(s.stator_axial_chord_m,.015);assert.equal(s.rotor_axial_chord_m,null);assert.equal(s.inlet_swirl_m_s,0);assert.equal(s.reaction,0);assert.deepEqual(s.work_fractions,[]);assert.equal(input.mean_diameter_m,"150");
+  assert.throws(()=>readPreliminaryScenario({...input,inlet_swirl_m_s:""}),/请填写/);assert.throws(()=>readPreliminaryScenario({...input,mean_diameter_m:"Infinity"}),/有限/);assert.throws(()=>readPreliminaryScenario({...input,work_split:"custom",work_fractions:"[.5,.5]"}),/JSON/);assert.deepEqual(readPreliminaryScenario({...input,work_split:"custom",work_fractions:"[0.4,0.6]"}).work_fractions,[.4,.6]);
+});
+
+test("velocity triangles use finite vectors and explicit SVG presentation attributes",()=>{
+  const r=preliminaryResult(),svg=renderVelocityTriangles(r.stages[0]);assert.match(svg,/c = U \+ w/);assert.match(svg,/动叶入口/);assert.match(svg,/动叶出口/);assert.match(svg,/stroke-width=/);assert.doesNotMatch(svg,/<style|style=|NaN|Infinity|<script/);assert.match(renderVelocityTriangles({...r.stages[0],ca_m_s:null}),/没有可绘制/);
+  const html=renderPreliminaryResult(r);assert.match(html,/整数候选/);assert.match(html,/缺少轴向弦长/);assert.match(html,/级反动度/);assert.match(html,/>—<\/td>/);assert.doesNotMatch(html,/几何已验证|性能通过/);const bad=renderPreliminaryResult({status:"unavailable",errors:['<img onerror="x">']});assert.doesNotMatch(bad,/<img/);assert.match(bad,/&lt;img/);
+});
+
+test("scenario CSV retains missing blades, numerical precision and the source separately from saved exports",()=>{
+  const result=preliminaryResult(),before=JSON.stringify(result);result.scenario.label="=WEBSERVICE(1)";const csv=buildPreliminaryCsv(result);assert.match(csv,/0.015201254775434483/);assert.match(csv,/"rotor","1","blade_count_candidate","整数叶片数候选","","片","missing"/);assert.match(csv,/'=WEBSERVICE/);assert.match(csv,/"record-a"/);assert.match(csv,/没有静态密度与叶型/);delete result.scenario.label;assert.equal(JSON.stringify(result),before);assert.equal(buildPreliminaryCsv({status:"unavailable"}),"");
+});
+
+test("scenario exchange includes the method, source references and static enthalpy accounting",()=>{
+  const r=preliminaryResult();r.method="euler_zweifel_v1";r.scenario.inlet_swirl_m_s=0;r.stages[0].rotor_static_drop_j_kg=37500;r.stages[0].stator_static_drop_j_kg=25000;r.stages[0].stage_static_drop_j_kg=62500;r.references=[{title:"NASA 叶栅方法",url:"https://ntrs.nasa.gov/citations/19740024806"}];
+  const csv=buildPreliminaryCsv(r),html=renderPreliminaryResult(r);for(const key of ["rotor_static_drop_j_kg","stator_static_drop_j_kg","stage_static_drop_j_kg","euler_zweifel_v1","https://ntrs.nasa.gov/citations/19740024806"])assert.ok(csv.includes(key),key);assert.match(csv,/"mean_diameter_m","mean_diameter_m","0.15","m"/);assert.match(csv,/"inlet_swirl_m_s","inlet_swirl_m_s","0","m\/s"/);assert.match(html,/href="https:\/\/ntrs.nasa.gov/);assert.match(html,/气动力矩/);assert.doesNotMatch(html,/轴扭矩/);
+});
+
+test("all rotor-stator harmonic pairs and scenario identity survive export with Chinese result states",()=>{
+  const r=preliminaryResult(),pairs=[];r.scenario_sha256="e".repeat(64);
+  for(let s=1;s<=3;s++)for(let t=1;t<=3;t++){const m=Math.abs(s*22-t*23);pairs.push({stator_order:s,rotor_order:t,stator_periodicity:s*22,rotor_periodicity:t*23,m,status:m<2?"warning":m===2?"review":"unverified"});}
+  r.stages[0].interaction={method:"harmonic_1_3",status:"warning",stator_blade_count:22,rotor_blade_count:23,pairs,note:"m=1；调整叶数、弦长或系数后进行模态校核。"};r.checks=[...r.checks,...["assumed","missing","review","unverified"].map(status=>({label:"状态检查",status}))];
+  const html=renderPreliminaryResult(r),csv=buildPreliminaryCsv(r);assert.match(html,/9 项/);assert.match(html,/m=1/);assert.match(html,/初选假设/);assert.match(html,/待补充/);assert.match(html,/尚未验证/);assert.doesNotMatch(html,/>assumed<|>missing<|>review<|>unverified</);assert.equal((csv.match(/"interaction.pair"/g)||[]).length,54);assert.match(csv,/"9.m","组合 9 · m","3"/);assert.match(csv,new RegExp("e".repeat(64)));assert.match(csv,/harmonic_1_3/);
+});
+
+function preliminaryDom() {
+  class E {constructor(){this.listeners={};this.innerHTML="";this.textContent="";this.disabled=false;this.hidden=false;}addEventListener(k,f){(this.listeners[k]??=[]).push(f);}removeEventListener(k,f){this.listeners[k]=(this.listeners[k]||[]).filter(x=>x!==f);}async fire(k,event={}){return Promise.all((this.listeners[k]||[]).map(f=>f(event)));}}
+  const root=new E(),form=new E(),output=new E(),state=new E(),button=new E(),fractions=new E(),inputs=Object.entries(scenarioValues()).map(([name,value])=>({name,value})),downloads=[];
+  const map={"[data-td-scenario-form]":form,"[data-td-preliminary-result]":output,"[data-td-calculation-state]":state,"[data-td-calculate]":button,"[data-td-work-fractions]":fractions};root.querySelector=s=>map[s];root.contains=()=>true;form.querySelector=s=>map[s];form.querySelectorAll=()=>inputs;
+  let blob;root.ownerDocument={defaultView:{Blob,URL:{createObjectURL(b){blob=b;return "blob:test";},revokeObjectURL(){}},setTimeout(){}},body:{append(){}},createElement(){return {click(){downloads.push({name:this.download,blob});},remove(){}};}};
+  return {root,form,output,state,button,inputs,downloads,submit:()=>form.fire("submit",{preventDefault(){}}),edit:async(name,value)=>{inputs.find(x=>x.name===name).value=value;await form.fire("input");},export:ext=>root.fire("click",{target:{closest:()=>({dataset:{tdScenarioExport:ext}})}})};
+}
+
+test("editing while a request is pending invalidates the late result and blocks stale exports",async()=>{
+  const dom=preliminaryDom();let resolve,request;const stop=mountPreliminaryWorkspace(dom.root,{turbineKey:"ox",recordId:"record-a",onCalculate:payload=>{request=payload;return new Promise(r=>resolve=r);}});
+  const pending=dom.submit();assert.equal(dom.button.disabled,true);assert.equal(request.turbineKey,"ox");assert.equal(request.scenario.mean_diameter_m,.15);await dom.edit("stages","3");resolve(preliminaryResult());await pending;assert.match(dom.output.innerHTML,/旧方案已失效/);assert.doesNotMatch(dom.output.innerHTML,/td-triangle/);await dom.export("json");assert.equal(dom.downloads.length,0);stop();
+});
+
+test("a valid scenario downloads independently and changing any input invalidates it",async()=>{
+  const dom=preliminaryDom(),stop=mountPreliminaryWorkspace(dom.root,{turbineKey:"ox",recordId:"record-a",onCalculate:async()=>preliminaryResult()});await dom.submit();assert.match(dom.output.innerHTML,/td-triangle/);await dom.export("json");assert.equal(dom.downloads[0].name,"turbine-preliminary-ox-record-a.json");assert.equal(JSON.parse(await dom.downloads[0].blob.text()).source.record_id,"record-a");await dom.export("csv");assert.match(await dom.downloads[1].blob.text(),/0.015201254775434483/);await dom.edit("reaction","0.3");await dom.export("csv");assert.equal(dom.downloads.length,2);stop();
+});
+
+test("wrong-record, wrong-turbine and disposed responses cannot populate the workspace",async()=>{
+  for(const result of [preliminaryResult("other"),{...preliminaryResult(),source:{record_id:"record-a",turbine_key:"fuel"}}]){const dom=preliminaryDom(),stop=mountPreliminaryWorkspace(dom.root,{turbineKey:"ox",recordId:"record-a",onCalculate:async()=>result});await dom.submit();assert.match(dom.output.innerHTML,/不属于当前/);assert.doesNotMatch(dom.output.innerHTML,/td-triangle/);stop();}
+  const dom=preliminaryDom();let resolve;const stop=mountPreliminaryWorkspace(dom.root,{turbineKey:"ox",recordId:"record-a",onCalculate:()=>new Promise(r=>resolve=r)}),pending=dom.submit();stop();resolve(preliminaryResult());await pending;assert.equal(dom.output.innerHTML,"");assert.equal(dom.form.listeners.submit.length,0);
 });

@@ -5,8 +5,8 @@ import unittest
 from webapp.solver import EngineInputs, input_values, science_environment
 from webapp.validation import normalize_request
 from webapp.ui_schema import design_ui_schema
-from engine_presets import preset_input_values
-from thermo_data import methane_dataset_catalog
+from lre_workbench.application.presets import preset_input_values
+from lre_workbench.properties.datasets import methane_dataset_catalog
 
 
 class DatasetContractTests(unittest.TestCase):

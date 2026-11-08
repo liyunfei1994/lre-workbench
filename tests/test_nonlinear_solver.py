@@ -8,8 +8,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from nonlinear_solver import solve_nonlinear
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.solvers.nonlinear import solve_nonlinear
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 
 
 def solve(fun, x0=(1,), lower=(-10,), upper=(10,), **kw):

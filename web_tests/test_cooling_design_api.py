@@ -46,7 +46,7 @@ class CoolingDesignAPITests(unittest.TestCase):
                 patch.object(worker.faulthandler, "dump_traceback_later"), \
                 patch.object(worker.faulthandler, "cancel_dump_traceback_later"), \
                 patch.object(worker, "science_environment", return_value={}), \
-                patch.object(worker, "calculate", side_effect=AssertionError("must dispatch cooling study")):
+                patch.object(worker, "calculate_design_job", side_effect=AssertionError("must dispatch cooling study")):
             return worker.main()
 
     def test_saved_source_revision_and_distinct_history_survive_newer_project(self):

@@ -20,7 +20,7 @@ class MeanlineTests(unittest.TestCase):
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-        from core import EngineInputs, ValidationError
+        from lre_workbench.domain.models import EngineInputs, ValidationError
         for side in ("ox", "fuel"):
             for bad in (True, float("nan"), float("inf"), -1, 0):
                 with self.subTest(side=side, value=bad), self.assertRaises(ValidationError):

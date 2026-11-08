@@ -6,6 +6,7 @@ import math
 
 from webapp.solver import science_environment, plain
 from webapp.validation import fingerprint
+from webapp.design_scope import require_supported_source
 
 
 LIMITATIONS = [
@@ -90,6 +91,7 @@ def _properties(fluid, temperature, pressure):
 
 
 def _calculation(source):
+    require_supported_source(source)
     if source.get('status')!='succeeded':
         raise ValueError('请选择已完成的稳态设计记录，以取得泵与工质标度。')
     c=(source.get('result') or {}).get('calculation') or {}
@@ -100,9 +102,9 @@ def _calculation(source):
 
 def _circuits(source):
     c=_calculation(source); inp=c['inputs']; circuits=[]
-    if inp.get('propellant_pair') not in ('lox_methane','lox_kerosene'):
-        raise ValueError('本研究台仅支持液氧/甲烷或液氧/正十二烷代理工质。')
-    fuel='n-Dodecane' if inp['propellant_pair']=='lox_kerosene' else 'Methane'
+    if inp.get('propellant_pair') != 'lox_methane':
+        raise ValueError('本研究台仅支持液氧/甲烷 FFSC 设计记录。')
+    fuel='Methane'
     for side,fluid,label,tempkey in [('ox','Oxygen','液氧供给','ox_inlet_temp'),('fuel',fuel,'燃料供给','fuel_inlet_temp')]:
         out=(c['components'].get(side+'_pump') or {}).get('outputs') or {}
         def required(key):
@@ -141,7 +143,7 @@ def feed_setup(source):
     defaults=dict(duration_s=2.0,sample_count=301,command_time_s=.2,command_ramp_s=.5,rtol=1e-6,circuits=[])
     try:
         circuits=_circuits(source); defaults['circuits']=circuits
-        from feed_network import FeedNetworkModel
+        from lre_workbench.operations.feed_network import FeedNetworkModel
         FeedNetworkModel(defaults)
     except (ValueError,TypeError,KeyError,OverflowError) as exc:
         issues.append(str(exc))
@@ -217,15 +219,15 @@ def normalize_request(value,source):
             if mapping['points']: raise ValueError('解析演示特性不接受混入的表格点；请选择 Suter 表模式。')
         base['pump_map']=mapping; chosen.append(base)
     normalized['circuits']=chosen
-    from feed_network import FeedNetworkModel
+    from lre_workbench.operations.feed_network import FeedNetworkModel
     FeedNetworkModel(normalized)  # all map, pressure and actuator checks also apply to direct API callers
     json.dumps(normalized,allow_nan=False)
     return normalized
 
 
 def calculate_feed_network(request,source,progress=None):
-    from feed_network import FeedNetworkModel
-    from version import APP_VERSION
+    from lre_workbench.operations.feed_network import FeedNetworkModel
+    from lre_workbench.version import APP_VERSION
     request=normalize_request(request,source); model=FeedNetworkModel(request)
     result=dict(schema_version=1,application_version=APP_VERSION,analysis_type='feed_network_dynamic',
         source=dict(job_id=source['id'],project_id=source['project_id'],revision=source['revision'],

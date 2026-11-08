@@ -38,9 +38,13 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-science.txt
+            requirements-web-test.txt
             constraints.txt
       - name: Install using the same bootstrap as the desktop
         run: python scripts/bootstrap.py --setup
+      - name: Install the web API test dependencies
+        run: |
+          .\.venv\Scripts\python.exe -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-web-test.txt -c constraints.txt
       - name: Check dependency consistency
         run: .\.venv\Scripts\python.exe -m pip check
       - name: Verify Windows installer and shortcut
@@ -50,6 +54,10 @@ jobs:
           .\.venv\Scripts\python.exe -m unittest discover -s tests -p test_windows_taskbar.py -k test_shortcut_properties_recognized_by_windows_shell -v
       - name: Run regression tests
         run: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+      - name: Run web API and data contract tests
+        run: .\.venv\Scripts\python.exe -m unittest discover -s web_tests -p "test_*.py" -v
+      - name: Run browser module tests
+        run: node --test web_tests/*.mjs
       - name: Capture environment
         if: always()
         run: .\.venv\Scripts\python.exe scripts/bootstrap.py --diagnose

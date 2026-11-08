@@ -3,7 +3,7 @@ import test from 'node:test';
 import {buildTransientRequest,transientPanels,renderTransientResult,buildTransientCsv,buildTransientSvg,mountTransient,renderTransientReadiness,transientRunBlockReason} from '../webapp/static/transient.js';
 const source={id:'design-1',project_id:'p1',status:'succeeded',revision:1,created:1};
 const setup={ready:true,defaults:{duration_s:1,sample_count:201,fuel_area_ratio:.95,ox_area_ratio:.95},parameters:[{key:'fuel_area_ratio',label:'燃料阀面积',min:.9,max:1.1}]};
-const row=t=>({time_s:t,pc_Pa:8e6-t*1e5,thrust_N:300000-t*2000,shaft_ox_rpm:20000,shaft_fuel_rpm:20000,mdot_ox_kg_s:80,mdot_fuel_kg_s:20,chamber_temperature_K:3300,gg_pressure_Pa:9e6,gg_temperature_K:850,fuel_area_ratio:t?.95:1,ox_area_ratio:t?.95:1});
+const row=t=>({time_s:t,pc_Pa:8e6-t*1e5,thrust_N:300000-t*2000,shaft_ox_rpm:20000,shaft_fuel_rpm:20000,mdot_ox_kg_s:80,mdot_fuel_kg_s:20,chamber_temperature_K:3300,ox_preburner_pressure_Pa:9e6,ox_preburner_temperature_K:850,fuel_area_ratio:t?.95:1,ox_area_ratio:t?.95:1});
 const result=()=>({source:{job_id:'design-1'},samples:[row(0),row(.5),row(1)],audits:{status:'pass',mass_relative_error:1e-10},metrics:{last_time_s:1,interpretation:'末点值不等于已达到新稳态'},model_description:{title:'热态模型',equations:['dm/dt = in - out'],experiment_validated:false},limitations:['不适用于冷态启动'],complete:true,termination_reason:'completed'});
 const record=()=>({id:'tr-1',project_id:'p1',revision:1,created:1,status:'succeeded',request:{source_job_id:'design-1'},result:result()});
 test('requests use immutable source and explicit model settings; unreadiness cannot submit',()=>{
@@ -11,9 +11,19 @@ test('requests use immutable source and explicit model settings; unreadiness can
  for(const value of ['',NaN,Infinity,.8,1.2])assert.throws(()=>buildTransientRequest(source,setup,{fuel_area_ratio:value}));
  assert.throws(()=>buildTransientRequest(source,{...setup,ready:false},{}),/准备度/);assert.throws(()=>buildTransientRequest({...source,status:'running'},setup,{}),/已完成/);
 });
+
+test('conflicting saved identities cannot start a transient task',()=>{
+ for(const location of ['inputs','submitted_inputs','calculation']){
+  const legacy={...source,inputs:{cycle_type:'ffsc'},result:{submitted_inputs:{cycle_type:'ffsc'},calculation:{inputs:{cycle_type:'ffsc'}}}};
+  if(location==='inputs')legacy.inputs.cycle_type='gg';
+  else if(location==='submitted_inputs')legacy.result.submitted_inputs.cycle_type='gg';
+  else legacy.result.calculation.inputs.cycle_type='gg';
+  assert.throws(()=>buildTransientRequest(legacy,setup,{}),/全流量补燃循环/);
+ }
+});
 test('charts use physical time, six panels and only existing gas branches',()=>{
  const r=result();const panels=transientPanels(r);assert.equal(panels.length,6);assert.equal(panels[0].series.length,2);
- const html=renderTransientResult(record(),1);assert.equal((html.match(/class="tr-chart"/g)||[]).length,6);assert.match(html,/采样时刻：0.5 s/);assert.match(html,/时间 \/ s/);assert.doesNotMatch(html,/NaN|Infinity|富氧预燃室/);
+ const html=renderTransientResult(record(),1);assert.equal((html.match(/class="tr-chart"/g)||[]).length,6);assert.match(html,/采样时刻：0.5 s/);assert.match(html,/时间 \/ s/);assert.doesNotMatch(html,/NaN|Infinity|燃气发生器/);
 });
 test('missing values break chart curves instead of inventing interpolated states',()=>{
  const rec=record();rec.result.samples[1].pc_Pa=null;const html=renderTransientResult(rec);const path=html.match(/data-series="pc_Pa"[^>]*d="([^"]+)"/)[1];assert.equal((path.match(/M/g)||[]).length,2);assert.doesNotMatch(path,/L/);

@@ -9,9 +9,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import CycleResults, EngineInputs, ValidationError
-from thermo import GasState
-from turbine import Turbine
+from lre_workbench.domain.models import CycleResults, EngineInputs, ValidationError
+from lre_workbench.properties.thermochemistry import GasState
+from lre_workbench.components.turbines.model import Turbine
 from webapp.solver import calculate
 from webapp.turbine_geometry import ASSUMPTION_KEYS, turbine_geometry_view
 from webapp.ui_schema import design_ui_schema
@@ -35,15 +35,13 @@ def component_result(cycle="ffsc", layout="single_shaft"):
 
 class TurbineIntegrationTests(unittest.TestCase):
     def test_real_turbine_outputs_and_solver_snapshot_for_every_layout(self):
-        for cycle, layout, expected in (("ffsc", "single_shaft", {"ox", "fuel"}),
-                                         ("gg", "single_shaft", {"shared"}),
-                                         ("gg", "dual_shaft", {"ox", "fuel"})):
+        for cycle, layout, expected in (("ffsc", "single_shaft", {"ox", "fuel"}),):
             with self.subTest(cycle=cycle, layout=layout):
                 result = component_result(cycle, layout)
                 before = asdict(result)
-                with patch("gg_cycle.make_cycle_model", return_value=Mock(evaluate=Mock(return_value=result))), \
+                with patch('lre_workbench.systems.ffsc.FFSCCycleModel', return_value=Mock(evaluate=Mock(return_value=result))), \
                      patch("webapp.solver.science_environment", return_value={}), \
-                     patch("engineering_assessment.assess_engineering", return_value={}):
+                     patch('lre_workbench.analysis.assessment.assess_engineering', return_value={}):
                     saved = calculate(asdict(result.inputs))
                 self.assertEqual(asdict(result), before)
                 view = saved["turbine_geometry"]
@@ -73,7 +71,7 @@ class TurbineIntegrationTests(unittest.TestCase):
                 with self.subTest(side=side, stages=bad), self.assertRaises(ValidationError):
                     EngineInputs(**{f"turb_{side}_n_stages_user": bad})
 
-    def test_geometry_has_one_editor_owner_and_gg_single_hides_unused_ox_inputs(self):
+    def test_geometry_has_one_editor_owner_for_both_ffsc_shafts(self):
         schema = design_ui_schema()
         group = next(g for g in schema["system_groups"] if g["id"] == "turbines")
         keys = [f["key"] for g in schema["system_groups"] for f in g["fields"]]
@@ -82,11 +80,10 @@ class TurbineIntegrationTests(unittest.TestCase):
                 key = f"{side}_turbine_{suffix}"
                 self.assertEqual(keys.count(key), 1)
                 field = next(f for f in group["fields"] if f["key"] == key)
-                self.assertEqual(field["role"], "component_sizing")
+                self.assertEqual(field["role"], "model_assumption" if suffix == "geometry_state_basis" else "component_sizing")
                 if side == "ox":
                     self.assertEqual(field["visibility"]["any"], [
-                        {"key": "cycle_type", "op": "eq", "value": "ffsc"},
-                        {"key": "gg_layout", "op": "eq", "value": "dual_shaft"}])
+                        {"key": "cycle_type", "op": "eq", "value": "ffsc"}])
                 if suffix == "geometry_state_basis":
                     self.assertEqual(field["choices"][0]["value"], "system_pt_as_static")
 

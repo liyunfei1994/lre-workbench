@@ -19,10 +19,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QWidget
-from cfd_exchange import load_cfd_job
-from cfd_panel import CfdPanel, DEFAULT_SETTINGS, _same_fallback_inputs
-from core import EngineInputs
-from cycle import FFSCCycleModel
+from lre_workbench.integrations.cfd_exchange import load_cfd_job
+from lre_workbench.desktop.cfd.panel import CfdPanel, DEFAULT_SETTINGS, _same_fallback_inputs
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.solvers.convergence import numerical_convergence
+from lre_workbench.systems.ffsc import FFSCCycleModel
 
 
 class PanelMain(QWidget):
@@ -51,8 +52,19 @@ class CfdPanelTests(unittest.TestCase):
             # Retain a legacy input for backward compatibility. It does not
             # disable the unified cooling model used by these real results.
             cls.native = FFSCCycleModel(EngineInputs(cooling_marching_enable=0.0)).evaluate()
-        if cls.native.summary.get("solver_warning") or cls.native.summary.get("solver_residual_norm", 1.0) >= 1e-3:
-            raise AssertionError("Actual native fixture did not converge")
+        # The inner residual is now normalized by absolute physical tolerances
+        # (N and W), not the former numerical-relative residual. Require the
+        # complete contract, including every enabled layer and physical check.
+        evidence = numerical_convergence(cls.native)
+        if evidence["status"] != "pass" or not evidence["complete_evidence"]:
+            raise AssertionError(f"Actual native fixture did not converge: {evidence}")
+        for name, layer in evidence["layers"].items():
+            if layer.get("enabled") is not True:
+                continue
+            if layer.get("status") != "pass" or layer["residual"] > layer["tolerance"]:
+                raise AssertionError(f"Actual native fixture layer failed: {name}: {layer}")
+            if any(check["residual"] > check["tolerance"] for check in layer.get("checks", [])):
+                raise AssertionError(f"Actual native fixture physical check failed: {name}: {layer}")
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -120,7 +132,7 @@ class CfdPanelTests(unittest.TestCase):
     def test_export_requires_current_numerically_converged_source(self):
         self.panel.route_combo.setCurrentIndex(self.panel.route_combo.findData("external"))
         self.assertTrue(self.panel.export_button.isEnabled())
-        from engineering_assessment import assess_engineering
+        from lre_workbench.analysis.assessment import assess_engineering
         self.assertIn(assess_engineering(self.main.last_results)["label"], self.panel.source_status.text())
         self.main.inputs.pc *= 1.01
         self.panel.refresh_source()

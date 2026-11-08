@@ -6,8 +6,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import ComponentResult, FlowState
-from steady_closure import audit_energy, regenerative_heat_assumption
+from lre_workbench.domain.models import ComponentResult, FlowState
+from lre_workbench.systems.steady_closure import audit_energy, regenerative_heat_assumption
 
 
 def balanced_loop():

@@ -6,6 +6,19 @@ import {mergeInputDefaults, savedInputDocument, methaneThermoSummary, upgradeMet
 const base = {cycle_type:"ffsc",propellant_pair:"lox_methane",use_target_preburner_temp:1,
   use_target_preburner_mr:1,pb_mr:60,pb_temperature:750,split:.06,cooling_bartz_mode:1,
   cooling_dp_auto:0,cooling_dp:5e6,rotor_rpm:26500};
+
+test("fixed architecture is displayed as a value rather than an editable selector",()=>{
+  const groups=[{id:"architecture",fields:[{key:"cycle_type",label:"循环方式",read_only:true,
+    choices:[{value:"ffsc",label:"全流量补燃循环（FFSC）"}]}]}];
+  const before={...base};
+  const html=renderParameterGroups(groups,base);
+  assert.match(html,/<output class="parameter-fixed-value"[^>]*>全流量补燃循环（FFSC）<\/output>/);
+  assert.doesNotMatch(html,/<select|<input|data-input=/);
+  assert.deepEqual(base,before);
+  const legacy=renderParameterGroups(groups,{...base,cycle_type:"gg"});
+  assert.match(legacy,/>gg<\/output>/);
+  assert.doesNotMatch(legacy,/全流量补燃循环/);
+});
 const mode = {key:"preburner_design_mode",label:"预燃室设计目标",virtual:true,role:"design_input",
   choices:[{value:"temperature",label:"指定预燃室温度"},{value:"mixture_ratio",label:"指定预燃室混合比"}]};
 const fields = [mode,
@@ -19,6 +32,38 @@ const fields = [mode,
   {key:"coolant_cp",label:"旧固定比热",default:2400,hidden:true},
 ];
 const groups=[{id:"pb",title:"预燃室",cycles:["ffsc"],fields}];
+
+test("new custom constraints stay unset while saved legacy snapshots retain their original active limits",()=>{
+  const defaults={ox_preburner_temp_limit_status:"unset",fuel_preburner_temp_limit_status:"unset",ox_preburner_temp_limit:800};
+  assert.equal(mergeInputDefaults(defaults,{}).ox_preburner_temp_limit_status,"unset");
+  const old={ox_preburner_temp_limit:812};
+  const restored=mergeInputDefaults(defaults,old,true);
+  assert.equal(restored.ox_preburner_temp_limit_status,"provisional");
+  assert.equal(restored.fuel_preburner_temp_limit_status,"provisional");
+  assert.equal(restored.ox_preburner_temp_limit,812);
+  assert.deepEqual(old,{ox_preburner_temp_limit:812});
+  for(const status of ["unset","documented","provisional"])
+    assert.equal(mergeInputDefaults(defaults,{...old,ox_preburner_temp_limit_status:status},true).ox_preburner_temp_limit_status,status);
+});
+
+test("optional constraints retain values through folding and separate interfaces from editable conditions",()=>{
+  const field={key:"ox_preburner_temp_limit_basis",label:"约束来源与适用工况",default:"",multiline:true,help:"来源说明"};
+  const group={id:"preburner_design",title:"预燃室热力设计",compact:true,section_notes:true,fields:[field],sections:[
+    {id:"interfaces",title:"系统接口",context:"preburner-interfaces"},
+    {id:"results",title:"匹配结果",context:"preburner-results"},
+    {id:"limits",title:"设计约束（可选）",collapsed:true,keys:[field.key],field_groups:[{title:"富氧预燃室",keys:[field.key]}]},
+  ]};
+  const inputs=Object.freeze({[field.key]:"已保存依据 <试验>"});
+  const html=renderParameterGroups([group],inputs);
+  assert.match(html,/data-preburner-interfaces/);assert.match(html,/data-preburner-results/);
+  assert.match(html,/<details[^>]*data-parameter-fold="preburner_design:limits"[^>]*>/);
+  assert.doesNotMatch(html,/<details[^>]*data-parameter-fold="preburner_design:limits"[^>]* open/);
+  assert.match(html,/<textarea rows="2"[^>]*>已保存依据 &lt;试验&gt;<\/textarea>/);
+  assert.equal(html.split(`data-input="${field.key}"`).length,2);
+  assert.equal(html.split(`id="parameter-help-${field.key}"`).length,2);
+  const expanded=renderParameterGroups([group],inputs,new Set(["preburner_design:limits"]));
+  assert.match(expanded,/<details[^>]*data-parameter-fold="preburner_design:limits"[^>]* open/);
+});
 
 test("numerical initialization is visible without nested folding and retains compact accessible explanations",()=>{
   const inputs=Object.freeze({...base,chamber_temp_guess:3200,chamber_gamma:1.12,molar_mass:18});
@@ -43,11 +88,18 @@ test("cooling model is read-only for routine designs and budget conversion is ex
   const group=[{id:"cooling",title:"再生冷却模型",fields:[{key:"cooling_bartz_mode",label:"当前冷却模型",read_only:true}]}];
   const modern=Object.freeze({...base,propellant_pair:"lox_methane"});
   const html=renderParameterGroups(group,modern);
-  assert.match(html,/统一准一维冷却/);
+  for(const method of ["Bartz", "灰体辐射", "导热率积分", "肋片效率", "Dittus–Boelter", "CoolProp", "Darcy", "一维动量与能量"])
+    assert.ok(html.includes(method),method);
+  assert.match(html,/循环求解过程中反复更新/);
+  assert.match(html,/计算结果 → 再生冷却/);
+  assert.match(html,/class="cooling-methods-field"/);
+  for(const id of ["chamber_contour","chamber_channels","wall_thermal"])
+    assert.match(html,new RegExp(`data-readiness-group="${id}"`));
   assert.doesNotMatch(html,/data-input="cooling_bartz_mode"|<select|data-upgrade-cooling/);
   const old=Object.freeze({...modern,cooling_bartz_mode:0,cooling_heat_load:17e6,cooling_dp_pa:2e6});
   const legacy=renderParameterGroups(group,old);
   assert.match(legacy,/历史兼容/);assert.match(legacy,/data-upgrade-cooling/);
+  assert.doesNotMatch(legacy,/class="cooling-methods"|Dittus–Boelter|循环计算中的冷却反馈/);
   const upgraded=upgradeCoolingModelDraft(old);
   assert.deepEqual(upgraded,{...old,cooling_bartz_mode:1});
   assert.equal(old.cooling_bartz_mode,0);
@@ -56,6 +108,14 @@ test("cooling model is read-only for routine designs and budget conversion is ex
   assert.equal(upgradeCoolingModelDraft(kerosene),kerosene);
   assert.doesNotMatch(renderParameterGroups(group,kerosene),/data-upgrade-cooling/);
   assert.match(renderParameterGroups(group,kerosene),/尚未接入/);
+  for(const invalid of [null,undefined,NaN,-1]){
+    const view=renderParameterGroups(group,{...modern,cooling_bartz_mode:invalid});
+    assert.match(view,/冷却模型标识缺失或无效/);
+    assert.doesNotMatch(view,/Dittus–Boelter/);
+  }
+  const ffsc=renderParameterGroups(group,{...modern,cycle_type:"ffsc"});
+  assert.match(ffsc,/全部燃料先流经再生冷却通道/);
+  assert.doesNotMatch(renderParameterGroups(group,{...modern,cycle_type:"gg"}),/两个预燃室|全部燃料先流经/);
 });
 
 test("read-only thermochemistry describes the actual loss and cooling models",()=>{
@@ -65,14 +125,14 @@ test("read-only thermochemistry describes the actual loss and cooling models",()
     file_description:"Joseph Shepherd NASA TM-4513"}];
   const modern={...base,methane_thermo_dataset:"gri30_highT",combustion_loss_model:"adiabatic"};
   const view=methaneThermoSummary(modern,catalog);
-  assert.match(view.summary,/焓约束化学平衡/);assert.match(view.summary,/冻结组成 · 沿程冷却/);
+  assert.match(view.summary,/化学平衡（给定压力与焓）/);assert.match(view.summary,/冻结组成 · 沿程冷却/);
   assert.match(view.summary,/理想气体混合物/);assert.match(view.details,/300–5000 K/);
   assert.match(view.details,/HEOS/);assert.match(view.details,/REFPROP 对照/);
   assert.doesNotMatch(view.summary,/<select|data-input/);assert.equal(view.historical,false);
   const budget=methaneThermoSummary({...modern,cooling_bartz_mode:0},catalog);
-  assert.match(budget.summary,/扣除给定冷却吸热/);assert.match(budget.summary,/绝热膨胀/);
+  assert.match(budget.summary,/计入给定冷却吸热/);assert.match(budget.summary,/绝热膨胀/);
   const old=methaneThermoSummary({...modern,methane_thermo_dataset:"gri30",combustion_loss_model:"legacy_temperature_rise"},catalog);
-  assert.match(old.summary,/焓平衡后温升折减/);assert.match(old.details,/不会自动改变该模型/);
+  assert.match(old.summary,/化学平衡后温升折减/);assert.match(old.details,/不会自动改变该模型/);
   assert.equal(old.historical,true);
   const unknown=methaneThermoSummary({...modern,methane_thermo_dataset:"<bad>"});
   assert.match(unknown.summary,/未识别：&lt;bad&gt;/);assert.doesNotMatch(unknown.details,/5000/);
@@ -165,8 +225,8 @@ test("layout dependencies include hidden-field controllers so changing modes ref
 
 test("reference evidence distinguishes official values from assumptions, converts display units and escapes links",()=>{
   const html=renderParameterEvidence([
-    {name:"thrust",value_si:2451662.5,classification:"published",source_url:"https://www.spacex.com/updates",source_date:"2026-05-12",checked_on:"2026-10-23",note:"250 tf"},
-    {name:"pc",value_si:33e6,classification:"engineering_assumption",source_url:"javascript:alert(1)",note:"<img src=x>"},
+    {name:"thrust",value_si:2451662.5,classification:"published",source_url:"https://www.spacex.com/updates",source_title:"厂商原始说明",source_locator:"推力指标段",scope:"仅支持所述推力",source_date:"2026-05-12",checked_on:"2026-10-23",note:"250 tf"},
+    {name:"pc",value_si:33e6,classification:"engineering_assumption",source_url:"javascript:alert(1)",reviewed_on:"2026-11-05",source_path:"src/engine_presets.py:42",note:"<img src=x>"},
     {name:"target_isp",value_si:327,classification:"numerical_initial_guess",note:"用于流量初值"},
   ],[{key:"thrust",label:"目标推力",factor:.001,unit:"kN"},{key:"pc",label:"室压",factor:1e-6,unit:"MPa"}]);
   assert.match(html,/2,451\.6625 kN/);
@@ -174,11 +234,63 @@ test("reference evidence distinguishes official values from assumptions, convert
   assert.match(html,/厂商公开值/);
   assert.match(html,/工程假设/);
   assert.match(html,/数值初值/);
-  assert.match(html,/发布 2026-05-12 · 核对 2026-10-23/);
+  assert.match(html,/发布 2026-05-12 · 资料核验 2026-10-23/);
+  assert.match(html,/>厂商原始说明<\/a>/);
+  assert.match(html,/来源定位：推力指标段/);assert.match(html,/支持范围：仅支持所述推力/);
+  assert.match(html,/项目设定 · 未登记外部数值依据/);assert.match(html,/数值初始化设置/);
+  assert.match(html,/说明更新 2026-11-05/);assert.doesNotMatch(html,/核对 2026-11-05/);
+  assert.match(html,/本地代码位置：<code>src\/engine_presets\.py:42<\/code>/);
+  assert.doesNotMatch(html,/href="[^"]*engine_presets|原始来源<\/a>/);
   assert.match(html,/href="https:\/\/www.spacex.com\/updates"/);
   assert.match(html,/&lt;img src=x&gt;/);
   assert.doesNotMatch(html,/javascript:|<img/);
   assert.equal(renderParameterEvidence(undefined),"");
+});
+
+test("historical source scope and display-only overrides cannot become manufacturer claims or alter stored inputs",()=>{
+  const evidence=[{name:"of_ratio",value_si:3.6,value_display:"3.60（2019 参考基准）",classification:"historical_reference",
+    source_title:"Sierra 原始报告",source_url:"https://www.faa.gov/report.pdf",source_locator:"第 1 页 §2",
+    scope:"2019 海平面基准；不能证明 Raptor 3 实机值",checked_on:"2026-11-05",group:"历史型号参考",
+    verification_note:"检索文本核验；原文直连超时"},
+    {name:"seed",value_si:999,value_display:0,classification:"numerical_initial_guess",reviewed_on:"2026-11-05"}];
+  const before=structuredClone(evidence),html=renderParameterEvidence(evidence,[{key:"of_ratio",label:"整机氧燃质量比",unit:"—"},{key:"seed",unit:"K"}]);
+  for(const text of ["历史型号参考 · 本示例采用","3.60（2019 参考基准）","第 1 页 §2","不能证明 Raptor 3 实机值","检索文本核验；原文直连超时","分组：历史型号参考"])
+    assert(html.includes(text),text);
+  assert.doesNotMatch(html,/厂商公开值|参考基准） —|>0 K</);
+  assert.match(html,/<td>0<\/td>/);assert.deepEqual(evidence,before);
+});
+
+test("new evidence metadata remains text and only valid credential-free HTTPS sources become links",()=>{
+  const attack='<img src=x onerror="bad()">',evidence=[{name:attack,value_si:1,value_display:attack,classification:"engineering_assumption",
+    source_url:"https://user:secret@example.com/report",source_title:attack,source_locator:attack,scope:attack,reviewed_on:attack,group:attack,verification_note:attack,source_path:attack},
+    {name:"bad_scheme",classification:"published",source_url:"javascript:alert(1)",source_title:"不可链接"},
+    {name:"broken_https",classification:"published",source_url:"https://",source_title:"来源不完整"}];
+  const html=renderParameterEvidence(evidence);
+  assert.match(html,/&lt;img/);assert.doesNotMatch(html,/<img|<script| onerror="bad|href=|secret|javascript:/);
+  assert.match(html,/项目设定 · 未登记外部数值依据/);
+});
+
+test("chamber model separates its equilibrium baseline from legacy correction without changing inputs",()=>{
+  const group={id:"chamber_chemistry",title:"主燃烧室热力学模型",advanced_title:"历史兼容设置",fields:[
+    {key:"combustion_loss_model",label:"主燃烧室经验温升修正",advanced:true,choices:[{value:"adiabatic",label:"不附加经验修正"},{value:"legacy_temperature_rise",label:"温升折减（历史兼容）"}]},
+    {key:"combustion_efficiency",label:"历史温升折减系数",advanced:true,default:1,visibility:{all:[{key:"combustion_loss_model",op:"eq",value:"legacy_temperature_rise"}]}}
+  ]};
+  const draw=inputs=>renderParameterGroups(parameterGroups([group],inputs),inputs);
+  const inputs={...base,combustion_loss_model:"adiabatic",combustion_efficiency:.98};
+  const before=structuredClone(inputs),html=draw(inputs),marker=html.indexOf('data-initials="chamber_chemistry-numerics"');
+  assert.ok(marker>0);
+  assert.match(html.slice(0,marker),/化学平衡（给定压力与焓）/);
+  assert.match(html,/两股涡轮排气/);
+  assert.doesNotMatch(html.slice(0,marker),/<select|data-input=/);
+  assert.match(html.slice(marker),/data-input="combustion_loss_model"/);
+  assert.doesNotMatch(html,/data-input="combustion_efficiency"/);
+  const legacy=draw({...inputs,combustion_loss_model:"legacy_temperature_rise"});
+  assert.match(legacy,/当前方案启用历史温升折减/);
+  assert.match(legacy,/data-input="combustion_efficiency" value="0.98"/);
+  assert.doesNotMatch(draw({...inputs,cycle_type:"gg"}),/两股涡轮排气/);
+  assert.match(draw({...inputs,combustion_loss_model:"invalid"}),/设置缺失或无效/);
+  assert.equal(parameterLayoutDependency("combustion_loss_model",[group]),true);
+  assert.deepEqual(inputs,before);
 });
 
 test("numerical resolution gets its own advanced control without being mislabeled as an initial guess",()=>{
@@ -271,7 +383,8 @@ test("legacy material import maps only evidenced curves and unsupported solids r
   const defaults={wall_thermal_dataset_id:"grcop84_ellis2000_extruded_high_fe_v1",chamber_inner_wall_material:"grcop84"};
   assert.equal(mergeInputDefaults(defaults,{},true).wall_thermal_dataset_id,defaults.wall_thermal_dataset_id);
   assert.equal(mergeInputDefaults(defaults,{chamber_inner_wall_material:"cuzr"},true).wall_thermal_dataset_id,"cuzr_qi2024_heat_treated_v1");
-  assert.equal(mergeInputDefaults(defaults,{chamber_inner_wall_material:"grcop42"},true).wall_thermal_dataset_id,"");
+  assert.equal(mergeInputDefaults(defaults,{chamber_inner_wall_material:"grcop42"},true).wall_thermal_dataset_id,"grcop42_chen2023_lpbf_v1");
+  assert.equal(mergeInputDefaults(defaults,{chamber_inner_wall_material:"cucrzr"},true).wall_thermal_dataset_id,"");
   const selected={chamber_inner_wall_material:"grcop42",wall_thermal_dataset_id:"cuzr_qi2024_heat_treated_v1"};
   assert.equal(mergeInputDefaults(defaults,selected,true).wall_thermal_dataset_id,selected.wall_thermal_dataset_id);
   const field={key:"wall_thermal_dataset_id",label:"数据集",default:defaults.wall_thermal_dataset_id,

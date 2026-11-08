@@ -29,12 +29,15 @@ def number(value, label, low=0, high=float("inf"), integer=False):
 
 
 def source_data(source):
-    from webapp.solver import input_values
+    from webapp.solver import input_values, ValidationError
     if source.get("status") != "succeeded" or source.get("kind", "design") != "design":
         raise ValueError("请选择已完成的稳态设计记录")
     result = source.get("result") or {}
     calc = result.get("calculation") or {}
-    values, _ = input_values(calc.get("inputs") or source["inputs"], saved_snapshot=True)
+    try:
+        values, _ = input_values(calc.get("inputs") or source["inputs"], saved_snapshot=True)
+    except ValidationError as exc:
+        raise ValueError(f"来源设计输入无效：{exc}") from exc
     component = (calc.get("components") or {}).get("cooling_channel") or {}
     profile = component.get("profile") or {}
     geom = profile.get("geometry") or {}
@@ -214,8 +217,8 @@ def _check_fixed_contour(original, candidate):
 
 
 def calculate_cooling_design(request, source, progress=None):
-    from cooling_marching import march_regen_circuit
-    from task_control import checkpoint
+    from lre_workbench.components.cooling.marching import march_regen_circuit
+    from lre_workbench.runtime.tasks import checkpoint
     from webapp.throttle import _wall_material_binding
     clean = normalize_request(request, source)
     values, calc, component, profile, geom, cells = source_data(source)
@@ -238,6 +241,9 @@ def calculate_cooling_design(request, source, progress=None):
         wall_manufacturing_state=values["wall_manufacturing_state"], wall_material_zones=values["wall_material_zones_json"],
         wall_conductivity=values["cooling_wall_conductivity"], htc_enhancement=values["cooling_htc_enhancement"],
         rel_roughness=values["cooling_channel_rel_roughness"], k_minor=values["cooling_channel_k_minor"],
+        channel_roughness_m=values.get("cooling_channel_roughness_m"),
+        k_minor_inlet=values.get("cooling_k_minor_inlet"), k_minor_outlet=values.get("cooling_k_minor_outlet"),
+        htc_enhancement_basis=values.get("cooling_htc_enhancement_basis", ""),
         gas_emissivity=values["cooling_gas_emissivity"],
         wall_temp_limit_K=limits["wall_temp_limit_K"] or values["cooling_wall_temp_limit_K"],
         wall_temp_limit_status=limits["wall_limit_status"], wall_temp_limit_basis=limits["wall_limit_basis"])

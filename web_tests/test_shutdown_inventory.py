@@ -7,7 +7,7 @@ import numpy as np
 from scipy.integrate import trapezoid
 from scipy.optimize import brentq
 
-from shutdown_inventory import ShutdownInventoryModel, default_settings, validate_settings
+from lre_workbench.operations.shutdown_inventory import ShutdownInventoryModel, default_settings, validate_settings
 
 
 class ShutdownInventoryTests(unittest.TestCase):

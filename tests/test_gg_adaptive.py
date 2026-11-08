@@ -4,20 +4,20 @@ import unittest
 from unittest.mock import patch
 
 from tests.test_gg_convergence import AnalyticGG
-from core import EngineInputs
-from convergence import numerical_convergence
-from task_control import TaskCancelled
-from nonlinear_solver import solve_nonlinear
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.solvers.convergence import numerical_convergence
+from lre_workbench.runtime.tasks import TaskCancelled
+from lre_workbench.solvers.nonlinear import solve_nonlinear
 
 
 class GGAdaptiveTests(unittest.TestCase):
     def test_work_budget_keeps_last_evaluated_state_for_both_backends(self):
-        for backend in ("newton", "trf"):
+        for backend in ("newton", "broyden", "trf"):
             model = AnalyticGG(EngineInputs(cycle_type="gg", use_target_gg_temp=0,
                                            nonlinear_solver=backend))
             with patch.object(model, "residual_vector", side_effect=lambda *x: (
                     [(x[0] - 90) * 1e5, 0], model._evaluate_once(*x))), \
-                    patch("gg_cycle.solve_nonlinear", side_effect=lambda *args, **kwargs:
+                    patch('lre_workbench.legacy.gg_cycle.solve_nonlinear', side_effect=lambda *args, **kwargs:
                           solve_nonlinear(*args, **kwargs, max_nfev=1)):
                 x, result = model.solve_cycle(x_init=[100, .03])
             self.assertEqual(x, [100, .03])
@@ -78,6 +78,10 @@ class GGAdaptiveTests(unittest.TestCase):
         self.assertTrue(result.convergence["warm_start"]["fallback"])
         self.assertEqual(numerical_convergence(result)["status"], "pass")
         self.assertEqual(result.summary["solver_function_evaluations"], len(model.evaluations) + 1)
+        failure_run = result.convergence["inner_runs"][0]
+        self.assertEqual(failure_run["diagnostics"]["model_evaluations"], 1)
+        self.assertIsNone(failure_run["diagnostics"]["jacobian"])
+        self.assertIn("warm thermodynamic state", failure_run["diagnostics"]["failures"][0]["error"])
         self.assertEqual(asdict(model.inputs), original)
         self.assertEqual(state["chamber_temp_guess"], 4000)
 
@@ -131,7 +135,7 @@ class GGAdaptiveTests(unittest.TestCase):
 
     def test_single_and_dual_backends_use_pump_demand_as_fixed_scale(self):
         for dual in (False, True):
-            for backend in ("newton", "trf"):
+            for backend in ("newton", "broyden", "trf"):
                 model = AnalyticGG(EngineInputs(cycle_type="gg", use_target_gg_temp=0,
                     nonlinear_solver=backend, gg_layout="dual_shaft" if dual else "single_shaft"))
                 def residual(*x):
@@ -143,6 +147,20 @@ class GGAdaptiveTests(unittest.TestCase):
                 run = result.convergence["inner_runs"][0]
                 self.assertEqual(run["residual_scales"][1:], [7e6, 5e6] if dual else [12e6])
                 self.assertEqual(run["nfev"], 1)
+                self.assertEqual(len(run["diagnostics"]["variables"]), 3 if dual else 2)
+                self.assertEqual(len(run["diagnostics"]["equations"]), 3 if dual else 2)
+                self.assertEqual(run["diagnostics"]["jacobian_rebuilds"], 0)
+                self.assertIsNone(run["diagnostics"]["jacobian"])
+
+    def test_outer_records_zero_model_calls_for_invalid_seed(self):
+        model = AnalyticGG()
+        original = model.solve_cycle
+        with patch.object(model, "solve_cycle", side_effect=lambda **kw:
+                          original(x_init=[float("nan"), .03])):
+            result = model._evaluate_design_core()
+        self.assertEqual(model.evaluations, [])
+        self.assertEqual(result.summary["solver_function_evaluations"], 0)
+        self.assertEqual(result.convergence["inner_runs"][0]["diagnostics"]["failures"][0]["stage"], "input_validation")
 
 
 if __name__ == "__main__":

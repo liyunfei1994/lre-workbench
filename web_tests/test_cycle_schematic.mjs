@@ -9,8 +9,8 @@ const sample=(kind='ffsc')=>{
   const nodes=Object.keys(layout.positions).map(id=>({id,title:id,type:id.includes('turbine')?'turbine':'pump',tone:'ox',states:[],componentId:id,metrics:[]}));
   return {kind,nodes,connections:Object.keys(layout.paths).map(key=>{const [source,target]=key.split('>');return {source,target,tone:'ox',label:key};}),shafts:layout.shafts,summary:[],notes:[],fuel:{name:'甲烷',pair:'液氧 / 甲烷'}};
 };
-test('every declared branch has visible endpoint objects in all three known layouts',()=>{
-  for(const kind of ['ffsc','gg-single','gg-dual']){
+test('every declared branch has visible endpoint objects in the FFSC layout',()=>{
+  for(const kind of ['ffsc']){
     const model=sample(kind),layout=cycleLayout(model),html=renderCycleWorkspace(model);
     for(const {source,target} of model.connections){assert(layout.positions[source]);assert(layout.positions[target]);assert(html.includes(`data-cy-from="${source}" data-cy-to="${target}"`));}
     assert(!/NaN|Infinity|undefined/.test(html));assert(!/\sstyle=/.test(html));
@@ -40,9 +40,9 @@ test('Laval nozzle really converges to a smooth minimum throat then follows a be
   assert(exit[0]/exit[1]<middle[0]/middle[1],'Bell wall turns back toward the axis near the exit, unlike a cone');
 });
 
-test('main chamber and nozzle share one smooth interface in FFSC and both GG layouts',()=>{
+test('main chamber and nozzle share one smooth interface in the FFSC layout',()=>{
   const profile=thrustChamberProfile();
-  for(const kind of ['ffsc','gg-single','gg-dual']){
+  for(const kind of ['ffsc']){
     const {positions}=cycleLayout(sample(kind)),chamber=positions.main_chamber,nozzle=positions.nozzle;
     assert.equal(chamber[0],nozzle[0]);
     assert.equal(chamber[1]+profile.chamber.bottom,nozzle[1]+profile.convergent[0][1]);
@@ -53,7 +53,7 @@ test('main chamber and nozzle share one smooth interface in FFSC and both GG lay
 
 test('rendered nozzle owns the complete contour while chamber and nozzle remain independent linked objects',()=>{
   const profile=thrustChamberProfile(),expected=[...profile.convergent,...profile.divergent.slice(1)];
-  for(const kind of ['ffsc','gg-single','gg-dual']){
+  for(const kind of ['ffsc']){
     const model=sample(kind),chamber=model.nodes.find(n=>n.id==='main_chamber'),nozzle=model.nodes.find(n=>n.id==='nozzle');
     chamber.type='chamber';nozzle.type='nozzle';
     chamber.states=[{id:'main_chamber',code:'C01',title:'主燃烧室',group:'chamber'}];
@@ -81,30 +81,7 @@ test('FFSC diagram separates crossed feeds, two turbines and mechanical shafts',
   assert.equal(layout.shafts.length,2);assert(layout.shafts.every(s=>s.source.endsWith('turbine') && s.target.endsWith('pump')));
   assert.match(html,/无圆点交叉不连接/);
 });
-test('GG layouts keep open exhaust separate from main chamber and dual branches parallel',()=>{
-  for(const kind of ['gg-single','gg-dual']){
-    const layout=cycleLayout(sample(kind));
-    assert(layout.paths['fuel_pump>gas_generator']);assert(!layout.paths['cooling_channel>gas_generator']);
-    assert(!Object.keys(layout.paths).some(k=>k.includes('turbine')&&k.endsWith('>main_chamber')));
-    if(kind==='gg-dual'){
-      assert(layout.paths['gas_generator>gg_turbine_ox']);assert(layout.paths['gas_generator>gg_turbine_fuel']);
-      assert(!layout.paths['gg_turbine_ox>gg_turbine_fuel']);
-    }
-  }
-});
 
-test('GG annotations clear the pump readouts, parallel split and single-shaft return pipe',()=>{
-  for(const kind of ['gg-single','gg-dual']){
-    const model=sample(kind),gas=model.nodes.find(n=>n.id==='gas_generator');
-    gas.type='preburner';gas.metrics=[{label:'出口压力',unit:'MPa',value:10.539},{label:'出口温度',unit:'K',value:852.697}];
-    const html=renderCycleWorkspace(model);
-    const object=html.split('data-cy-object="gas_generator"')[1].split('data-cy-object=')[0];
-    assert.match(object,/data-cy-annotation="pt"><text x="780" y="440"/);
-    assert.match(html,/class="cy-branch-label" data-cy-annotation="pt" x="405" y="310"/);
-    assert.match(html,/class="cy-branch-label" data-cy-annotation="pt" x="775" y="345"/);
-    assert.doesNotMatch(object,/data-cy-annotation="pt"><text x="560" y="477"/);
-  }
-});
 test('turbine diagram pairs outlet pressure with outlet temperature, preserves missing outlet',()=>{
   const model=sample(); const n=model.nodes.find(n=>n.id==='ox_preburner_turbine');
   n.metrics=[{label:'入口压力',value:61,unit:'MPa'},{label:'出口压力',value:41,unit:'MPa'},{label:'出口温度',value:690,unit:'K'}];
@@ -116,7 +93,7 @@ test('turbine diagram pairs outlet pressure with outlet temperature, preserves m
   assert.match(annotation(),/>— <tspan>MPa/);assert.doesNotMatch(annotation(),/>61 <tspan>MPa/);
 });
 test('record labels and component IDs are escaped; output never mutates the model',()=>{
-  const model=sample('gg-single'),attack='<img src=x onerror="bad()">';
+  const model=sample('ffsc'),attack='<img src=x onerror="bad()">';
   model.nodes[0].title=attack;model.nodes[0].componentId=attack;model.connections[0].label=attack;
   const before=JSON.stringify(model),html=renderCycleWorkspace(model);
   assert(!html.includes(attack));assert(html.includes('&lt;img'));assert.equal(JSON.stringify(model),before);
@@ -188,4 +165,12 @@ test('selection, display mode, history reset, flow navigation and keyboard stay 
   mountCycleWorkspace(f.host,'r2');assert.equal(f.host.dataset.cySelected,'pump');
   f.host.dataset.flowLocation='exhaust';f.host.dataset.flowLocationRecord='r2';mountCycleWorkspace(f.host,'r2');assert.equal(f.host.dataset.cySelected,'turbine');assert.equal(f.host.dataset.flowLocation,undefined);
   f.host.dataset.flowLocation='out';f.host.dataset.flowLocationRecord='old';mountCycleWorkspace(f.host,'r2');assert.equal(f.host.dataset.cySelected,'turbine');
+});
+
+test('retired cycle layouts never render as FFSC diagrams',()=>{
+  for(const kind of ['gg-single','gg-dual','unsupported']){
+    const model={kind,nodes:[{id:'gas_generator'}],connections:[]};
+    assert.deepEqual(cycleLayout(model).positions,{});
+    const html=renderCycleWorkspace(model);assert.match(html,/仅支持全流量补燃循环/);assert.doesNotMatch(html,/<svg/);
+  }
 });

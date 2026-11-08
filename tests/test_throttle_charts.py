@@ -17,9 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication
-from workbench import WorkbenchWindow
-from workbench_fonts import configure_fonts
-from gui_pyside6 import ThrottleWorker
+from lre_workbench.desktop.workbench import WorkbenchWindow
+from lre_workbench.desktop.fonts import configure_fonts
 
 
 def chart_record(ratio, *, converged=True):
@@ -134,43 +133,48 @@ class ThrottleChartTests(unittest.TestCase):
         self.assertTrue(any("燃气发生器" in label for label in labels))
         self.assertFalse(any("富氧" in label or "富燃" in label for label in labels))
 
-    def test_valid_scan_start_clears_previous_table_and_graphs_before_first_record(self):
+    def test_retired_scan_start_preserves_history_and_never_dispatches_worker(self):
         window = self.window
         window.last_throttle = self.sample()
         window._populate_throttle(window.last_throttle)
         self.assert_single_flow_curve(window.last_throttle)
         self.assertGreater(window.throttle_table.rowCount(), 0)
         previous_worker = getattr(window, "_active_worker", None)
+        previous = window.last_throttle
+        mass_axis = window._ax_mdot
+        mass_curve = mass_axis.lines[0]
+        before_rows = [[window.throttle_table.item(row, column).text()
+                        for column in range(window.throttle_table.columnCount())]
+                       for row in range(window.throttle_table.rowCount())]
         try:
-            # Keep real validation, state transitions, worker creation and
-            # signal wiring; replace only dispatch so no calculation starts.
-            with patch.object(window.thread_pool, "start") as dispatch:
+            # The desktop design-matching sweep is retired. Its information
+            # dialog is mocked, but dispatch and historical plot identities
+            # remain under observation so this cannot silently restart it.
+            with patch.object(window.thread_pool, "start") as dispatch, \
+                    patch('lre_workbench.desktop.legacy_window.QMessageBox.information') as information:
                 window.run_throttle()
-            self.assertTrue(window._busy)
-            worker = window._active_worker
-            self.assertIsInstance(worker, ThrottleWorker)
-            dispatch.assert_called_once_with(worker)
-            self.assertEqual(window.last_throttle, [])
-            self.assertEqual(window._partial_throttle, [])
-            self.assertEqual(window.throttle_table.rowCount(), 0)
+            dispatch.assert_not_called()
+            information.assert_called_once()
+            self.assertIn("已停用",information.call_args.args[1])
+            self.assertIn("工况与运行 → 发动机节流分析",information.call_args.args[2])
+            self.assertFalse(window._busy)
+            self.assertIs(getattr(window,"_active_worker",None),previous_worker)
+            self.assertIs(window.last_throttle,previous)
+            self.assertIs(window._ax_mdot,mass_axis)
+            self.assertIs(window._ax_mdot.lines[0],mass_curve)
             self.assertEqual(len(window.throttle_fig.axes), 5)
-            self.assertTrue(all(not axis.lines and not axis.collections for axis in window.throttle_fig.axes))
-            self.assertFalse(window._ax_mdot.get_visible())
-            # A first streamed record must populate only the new scan, through
-            # the real signal connection established by run_throttle.
-            first = chart_record(0.9)
-            worker.signals.record_ready.emit(first)
-            self.app.processEvents()
-            self.assertEqual(window.throttle_table.rowCount(), 1)
-            self.assertEqual(window.last_throttle, [first])
-            self.assert_single_flow_curve([first])
+            self.assert_single_flow_curve(previous)
+            after_rows = [[window.throttle_table.item(row, column).text()
+                           for column in range(window.throttle_table.columnCount())]
+                          for row in range(window.throttle_table.rowCount())]
+            self.assertEqual(after_rows,before_rows)
         finally:
             window._set_busy(False, "测试结束")
             window._task_kind = None
             window._active_worker = previous_worker
             self.app.processEvents()
 
-    def test_invalid_scan_input_keeps_previous_table_and_graphs(self):
+    def test_retired_scan_ignores_invalid_draft_and_keeps_history(self):
         window = self.window
         previous = self.sample()
         window.last_throttle = previous
@@ -185,10 +189,13 @@ class ThrottleChartTests(unittest.TestCase):
         try:
             window.input_edits["pc"].setText("nan")
             with patch.object(window.thread_pool, "start") as dispatch, \
-                    patch("gui_pyside6.QMessageBox.warning") as warning:
+                    patch('lre_workbench.desktop.legacy_window.QMessageBox.warning') as warning, \
+                    patch('lre_workbench.desktop.legacy_window.QMessageBox.information') as information:
                 window.run_throttle()
             dispatch.assert_not_called()
-            warning.assert_called_once()
+            warning.assert_not_called()
+            information.assert_called_once()
+            self.assertIn("已停用",information.call_args.args[1])
             self.assertFalse(window._busy)
             self.assertIs(getattr(window, "_active_worker", None), previous_worker)
             self.assertEqual(window.last_throttle, previous)

@@ -38,10 +38,14 @@ export function mountSteadyWorkspace(host, recordId = "") {
   if (host._steadyWorkspaceBound) return;
   host._steadyWorkspaceBound = true;
   host.addEventListener("click", event => {
-    const target = event.target?.closest?.("[data-steady-tab], [data-steady-open]");
+    const target = event.target?.closest?.("[data-steady-tab], [data-steady-open], [data-steady-target]");
     const root = host.querySelector(".steady-workspace");
     if (!target || !root || !root.contains(target)) return;
-    const jump = target.dataset.steadyOpen;
+    const jump = target.dataset.steadyOpen || target.dataset.steadyTarget;
+    // The partitioned design workspace owns convergence as a top-level page.
+    // Leave its legacy links for the outer handler rather than resetting the
+    // selected result tab. Standalone historical dialogs retain their own tab.
+    if (jump === "convergence" && !root.querySelector('[data-steady-tab="convergence"]')) return;
     activate(root, jump || target.dataset.steadyTab, !!jump);
     if (jump) root.querySelector("[role=tablist]")?.scrollIntoView?.({block:"nearest"});
   });

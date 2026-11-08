@@ -29,42 +29,8 @@ test("FFSC separates supply routes and both gas branches without invented nodes"
   assert.equal(node(model, "main_chamber").code, "C01");
 });
 
-test("GG exhaust stays distinct from the main combustion flow", () => {
-  const model = buildFlowModel({gg_outlet: sample(), gg_turbine_exhaust: sample(), main_chamber: sample()}, {
-    inputs: {cycle_type: "gg"}, componentIds: ["gas_generator", "gg_turbine", "gg_exhaust_nozzle", "main_chamber", "nozzle"],
-  });
-  assert.deepEqual(group(model, "gas").segments, [["gg_outlet", "gg_turbine_exhaust"]]);
-  assert.deepEqual(node(model, "gg_turbine_exhaust").componentIds, ["gg_turbine", "gg_exhaust_nozzle"]);
-  assert.ok(!node(model, "gg_turbine_exhaust").componentIds.includes("main_chamber"));
-  assert.match(group(model, "gas").caption, /不进入主燃烧室/);
-});
 
-test("dual-shaft GG exposes the solver aggregate limitation and does not synthesize branch states", () => {
-  const states = {gg_outlet: sample(), gg_turbine_exhaust: sample({temperature: 620, mass_flow: 5})};
-  const model = buildFlowModel(states, {componentIds: ["gas_generator", "gg_turbine_ox", "gg_turbine_fuel", "gg_exhaust_nozzle"]});
-  assert.equal(model.nodes.length, 2);
-  assert.equal(node(model, "gg_turbine_exhaust").temperature, 620);
-  assert.equal(node(model, "gg_turbine_exhaust").massFlow, 5);
-  assert.deepEqual(node(model, "gg_outlet").componentIds, ["gas_generator", "gg_turbine_ox", "gg_turbine_fuel"]);
-  assert.match(group(model, "gas").caption, /温度取液氧侧涡轮出口/);
-  assert.match(group(model, "gas").caption, /并非混合温度/);
-});
 
-test("new dual GG branch states remain separate gas routes with their own temperatures and component links",()=>{
-  const states={gg_outlet:sample({temperature:850,mass_flow:8}),gg_turbine_exhaust:sample({temperature:620,mass_flow:8}),gg_turbine_ox_exhaust:sample({temperature:620,mass_flow:5}),gg_turbine_fuel_exhaust:sample({temperature:640,mass_flow:3})};
-  const options={inputs:{cycle_type:"gg",gg_layout:"dual_shaft"},componentIds:["gas_generator","gg_turbine_ox","gg_turbine_fuel","gg_exhaust_nozzle"]};
-  const model=buildFlowModel(states,options);
-  assert.deepEqual(group(model,"gas").segments,[["gg_outlet","gg_turbine_ox_exhaust"],["gg_outlet","gg_turbine_fuel_exhaust"],["gg_turbine_exhaust"]]);
-  assert.equal(node(model,"gg_turbine_ox_exhaust").code,"G07");assert.equal(node(model,"gg_turbine_fuel_exhaust").code,"G08");
-  assert.equal(node(model,"gg_turbine_ox_exhaust").temperature,620);assert.equal(node(model,"gg_turbine_fuel_exhaust").temperature,640);
-  assert.equal(node(model,"gg_turbine_ox_exhaust").massFlow,5);assert.equal(node(model,"gg_turbine_fuel_exhaust").massFlow,3);
-  assert.deepEqual(node(model,"gg_turbine_ox_exhaust").componentIds,["gg_turbine_ox","gg_exhaust_nozzle"]);assert.deepEqual(node(model,"gg_turbine_fuel_exhaust").componentIds,["gg_turbine_fuel","gg_exhaust_nozzle"]);assert.deepEqual(node(model,"gg_turbine_exhaust").componentIds,["gg_exhaust_nozzle"]);
-  assert.equal(group(model,"other"),undefined);assert.match(group(model,"gas").caption,/两条独立出口分别展示/);assert.doesNotMatch(group(model,"gas").caption,/未提供两支路/);
-  delete states.gg_turbine_fuel_exhaust;
-  const partial=buildFlowModel(states,options);assert.equal(node(partial,"gg_turbine_fuel_exhaust"),undefined);assert.deepEqual(group(partial,"gas").segments,[["gg_outlet","gg_turbine_ox_exhaust"],["gg_turbine_exhaust"]]);assert.match(group(partial,"gas").caption,/另一支路出口未记录/);
-  delete states.gg_outlet;
-  assert.deepEqual(group(buildFlowModel(states,options),"gas").segments,[["gg_turbine_ox_exhaust"],["gg_turbine_exhaust"]]);
-});
 
 test("display units change only dimensional scalars, including negative enthalpy", () => {
   const model = buildFlowModel({lox_after_pump: sample({pressure: 69.892e6, enthalpy: -150049.1, density: 1272.97})});
@@ -92,13 +58,14 @@ test("a missing intermediate state breaks the displayed route without bridging",
   assert.deepEqual(model.nodes.map(item => item.code), ["O01", "O03", "O04"]);
 });
 
-test("kerosene names follow saved input while retaining exact surrogate species keys", () => {
-  const model = buildFlowModel({fuel_boost_out: sample({composition: {"c12h26": 1}}), gg_outlet: sample()}, {
-    inputs: {propellant_pair: "lox_kerosene", cycle_type: "gg"}, labels: {fuel_boost_out: "甲烷增压泵出口"},
+test("engine flow views reject retired propellants without rewriting species", () => {
+  const states={fuel_boost_out: sample({composition: {"c12h26": 1}})},before=structuredClone(states);
+  const model = buildFlowModel(states, {
+    inputs: {propellant_pair: "lox_kerosene", cycle_type: "ffsc"}, labels: {fuel_boost_out: "甲烷增压泵出口"},
   });
-  assert.equal(node(model, "fuel_boost_out").title, "煤油增压泵出口");
-  assert.deepEqual(node(model, "fuel_boost_out").composition, {c12h26: 1});
-  assert.match(group(model, "fuel").caption, /正十二烷替代物/);
+  assert.equal(model.status,"unsupported");
+  assert.deepEqual(model.nodes,[]);assert.deepEqual(model.groups,[]);
+  assert.deepEqual(states,before);
   assert.equal(buildFlowModel({fuel_tank: sample()}).nodes[0].title, "甲烷贮箱");
 });
 
@@ -111,7 +78,7 @@ test("composition stays in original mass fractions without dropping traces or no
 });
 
 test("metadata distinguishes inlet mixture quantities, backend sources and unknown raw fields", () => {
-  const model = buildFlowModel({gg_outlet: sample({metadata: {phi: 25, fuel_fraction: .865, gamma: 1.15,
+  const model = buildFlowModel({fuel_preburner_outlet: sample({metadata: {phi: 25, fuel_fraction: .865, gamma: 1.15,
     thermo_source: 1, t_inlet_K: 850, pi_t: 20, molar_mass: 17, cp: 3700,
     custom_diagnostic: {nested: [1, "keep me"]}}})});
   const meta = Object.fromEntries(model.nodes[0].metadata.map(item => [item.key, item]));
@@ -130,12 +97,12 @@ test("metadata distinguishes inlet mixture quantities, backend sources and unkno
 });
 
 test("component links refer only to adjacent components actually present in the result", () => {
-  const available = ["ox_pump", "fuel_pump", "cooling_channel", "gas_generator", "injector", "unrelated"];
+  const available = ["ox_pump", "fuel_pump", "cooling_channel", "ox_preburner", "fuel_preburner", "injector", "unrelated"];
   const model = buildFlowModel({lox_after_pump: sample(), fuel_after_pump: sample(), fuel_after_cooling: sample(), lox_tank: sample()}, {
-    inputs: {cycle_type: "gg"}, componentIds: available,
+    inputs: {cycle_type: "ffsc"}, componentIds: available,
   });
-  assert.deepEqual(node(model, "lox_after_pump").componentIds, ["ox_pump", "gas_generator", "injector"]);
-  assert.deepEqual(node(model, "fuel_after_cooling").componentIds, ["cooling_channel", "injector"]);
+  assert.deepEqual(node(model, "lox_after_pump").componentIds, ["ox_pump", "ox_preburner", "fuel_preburner"]);
+  assert.deepEqual(node(model, "fuel_after_cooling").componentIds, ["cooling_channel", "ox_preburner", "fuel_preburner"]);
   assert.deepEqual(node(model, "lox_tank").componentIds, []);
   for (const entry of model.nodes) assert.ok(entry.componentIds.every(id => available.includes(id) && id !== "unrelated"));
   assert.deepEqual(buildFlowModel({lox_after_pump: sample()}).nodes[0].componentIds, []);
@@ -158,10 +125,18 @@ test("unknown nodes stay isolated with visible original identities and text for 
 test("empty inputs are supported and records are not mutated or retained by reference", () => {
   assert.deepEqual(buildFlowModel(null), {nodes: [], groups: []});
   const states = freezeDeep({fuel_tank: sample({metadata: {nested: {array: [1, 2]}}})});
-  const options = freezeDeep({inputs: {propellant_pair: "lox_kerosene"}, labels: {fuel_tank: "燃料贮箱"}, componentIds: []});
+  const options = freezeDeep({inputs: {propellant_pair: "lox_methane"}, labels: {fuel_tank: "燃料贮箱"}, componentIds: []});
   const snapshot = JSON.stringify({states, options});
   const model = buildFlowModel(states, options);
   model.nodes[0].metadata[0].value.array.push(3);
   model.nodes[0].composition.CH4 = .5;
   assert.equal(JSON.stringify({states, options}), snapshot);
+});
+
+test('retired flow records do not receive FFSC routes or component links',()=>{
+  for(const [states,options] of [[ffsc(),{inputs:{cycle_type:'gg'}}],[{gg_outlet:sample()},{}],[ffsc(),{componentIds:['gas_generator']}]] ){
+    const before=structuredClone({states,options}),model=buildFlowModel(states,options);
+    assert.equal(model.status,'unsupported');assert.deepEqual(model.nodes,[]);assert.deepEqual(model.groups,[]);
+    assert.deepEqual({states,options},before);
+  }
 });

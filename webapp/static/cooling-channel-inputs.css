@@ -1,0 +1,26 @@
+[data-cooling-channel-inputs]{grid-column:1/-1;min-width:0}
+[data-group="chamber_channels"] [data-parameter-section="geometry"]:has([data-cooling-channel-pending]:not([hidden])) > label[data-field]{display:none!important}
+.cooling-channel-inputs{margin:1rem 0;padding:1rem;border:1px solid #d5e1e8;border-radius:4px;background:#f8fbfd}
+.cooling-channel-inputs [hidden]{display:none!important}
+.cooling-channel-inputs label{display:block;max-width:34rem;margin:.75rem 0;font-weight:600}
+.cooling-channel-inputs label input,.cooling-channel-inputs label select,.cooling-channel-inputs textarea{display:block;box-sizing:border-box;width:100%;margin-top:.4rem}
+.cooling-channel-inputs input,.cooling-channel-inputs select,.cooling-channel-inputs textarea{padding:.55rem;border:1px solid #bacdd9;border-radius:3px;background:white;color:inherit;font:inherit}
+.cooling-channel-inputs textarea{font-family:monospace;font-size:.9rem;min-width:100%}
+.cooling-channel-inputs button{padding:.45rem .7rem;cursor:pointer;border:1px solid #b9ccd8;background:white;color:#285c75;border-radius:3px;font:inherit}
+.cooling-channel-table{min-width:680px;width:100%;border-collapse:collapse;margin:.75rem 0}
+.cooling-channel-table th,.cooling-channel-table td{padding:.45rem;text-align:left;border-bottom:1px solid #d5e1e8}
+.cooling-channel-table input{width:100%;min-width:75px;box-sizing:border-box}
+.cooling-channel-table select{width:100%;min-width:130px}
+#workspace .cooling-channel-table{table-layout:fixed;min-width:780px}
+#workspace .cooling-channel-table th:first-child{width:20%}
+#workspace .cooling-channel-table th:nth-child(2){width:15%}
+#workspace .cooling-channel-table th:last-child{width:11%}
+#workspace .cooling-channel-table :is(select,button){white-space:nowrap}
+.cooling-channel-actions{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin-top:.75rem}
+.cooling-channel-issues{color:#8d4a19;font-size:.9rem;padding-left:1.5rem}
+.cooling-channel-derived{border-top:1px solid #d5e1e8;margin-top:1rem;padding-top:.75rem}
+.cooling-channel-derived dl{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:.35rem .75rem;font-size:.9rem;margin:.6rem 0}
+.cooling-channel-derived dt{color:#557080;grid-row:1}
+.cooling-channel-derived dd{margin:0;grid-row:2;font-variant-numeric:tabular-nums}
+.cooling-channel-inputs pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow:auto}
+@media(max-width:700px){.cooling-channel-derived dl{grid-template-columns:1fr 1fr}.cooling-channel-derived dt,.cooling-channel-derived dd{grid-row:auto}.cooling-channel-inputs{padding:.65rem}}

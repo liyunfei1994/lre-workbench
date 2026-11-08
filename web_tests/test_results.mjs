@@ -70,35 +70,16 @@ function record(cycle = "ffsc") {
 
 beforeEach(() => configureResultSchema(schema));
 
-test("both cycle families show the six desktop KPI values with correct names", () => {
-  const ffsc = renderAnalysis("overview",record());
-  const gg = renderAnalysis("overview",record("gg"));
-  for (const html of [ffsc,gg]) {
-    assert.equal((html.match(/class="kpi-card"/g) || []).length,6);
-    assert.match(html,/1,234\.567 <small>kN<\/small>/);
-    assert.match(html,/计算真空推力/);
-    assert.match(html,/工况计算值 1,000 kN（环境压力未记录）/);
-    assert.match(html,/计算真空比冲 Isp/);
-    assert.match(html,/350 <small>s<\/small>/);
-    assert.match(html,/300 <small>kg\/s<\/small>/);
-  }
-  assert.match(ffsc,/富氧预燃室温度/);
-  assert.match(ffsc,/富燃预燃室温度/);
-  assert.doesNotMatch(ffsc,/GG 涡轮排气温度/);
-  assert.match(gg,/燃气发生器温度/);
-  assert.match(gg,/GG 涡轮排气温度/);
-  assert.doesNotMatch(gg,/富氧预燃室温度/);
+test("FFSC shows the six system KPI values with correct names",()=>{
+  const html=renderAnalysis('overview',record());
+  assert.equal((html.match(/class="kpi-card"/g)||[]).length,6);
+  for(const text of ['计算真空推力','计算真空比冲 Isp','富氧预燃室温度','富燃预燃室温度'])assert(html.includes(text));
+  assert.match(html,/1,234\.567 <small>kN/);assert.match(html,/350 <small>s/);
 });
 
-test("server overview declarations and cycle-specific groups drive rendering", () => {
-  const ffsc = renderAnalysis("overview",record());
-  const gg = renderAnalysis("overview",record("gg"));
-  assert.match(ffsc,/FFSC 流量分配/);
-  assert.match(ffsc,/燃料至富氧预燃室比例/);
-  assert.doesNotMatch(ffsc,/GG 流量分配/);
-  assert.match(gg,/GG 流量分配/);
-  assert.match(gg,/<td class="metric-value">12<\/td><td class="metric-unit">kg\/s<\/td>/);
-  assert.doesNotMatch(gg,/FFSC 流量分配/);
+test("server FFSC declarations drive rendering and retired groups are omitted",()=>{
+  const html=renderAnalysis('overview',record());
+  assert.match(html,/FFSC 流量分配/);assert.match(html,/燃料至富氧预燃室比例/);assert.doesNotMatch(html,/GG 流量分配/);
 });
 
 test("numerical convergence never turns failed system checks green", () => {
@@ -153,7 +134,7 @@ test("system component values follow declared units and shared labels", () => {
 });
 
 test("system view retains cycle quantities and leaves detailed design in the original record", () => {
-  const input = record("gg");
+  const input = record("ffsc");
   input.result.calculation.components.ox_pump.outputs.impeller_safety_factor = .5;
   input.result.calculation.components.ox_pump.outputs.d_impeller_est_m = .25;
   input.result.calculation.components.ox_pump.notes.push("叶轮材料强度诊断：未通过");
@@ -163,7 +144,7 @@ test("system view retains cycle quantities and leaves detailed design in the ori
     delta_P_hydraulic_MPa:100,delta_P_source:0,
   },notes:["详细冷却诊断：水力压降超限"]};
   input.result.calculation.components.cooling_marching = {outputs:{T_wall_hot_max_K:1000},notes:["沿程历史诊断"]};
-  input.result.calculation.components.gg_turbine = {outputs:{
+  input.result.calculation.components.ox_preburner_turbine = {outputs:{
     turbine_power_MW:5,turbine_pressure_ratio:20,mass_flow_kgs:10,
     T_in_K:900,T_exhaust_K:500,rotor_safety_factor:.3,D_mean_m:.2,
   },notes:[]};
@@ -196,20 +177,21 @@ test("component aliases prefer saved SI quantities without discarding a usable f
   assert.equal(fields.find(field=>field.key==="p_in_Pa").value,1);
 });
 
-test("GG labels and nozzle velocity describe the stored quantities accurately", () => {
-  const input=record("gg");
-  input.result.calculation.components.gas_generator={outputs:{preburner_pressure_Pa:10000000,injector_dp_Pa:1200000,injector_dp_ratio:.12}};
-  input.result.calculation.components.nozzle.outputs.Ve_ms=3200;
-  input.result.calculation.components.nozzle.outputs.Cf=1.7;
-  input.result.calculation.components.nozzle.outputs.Cf_sl=1.7;
-  const items=componentAnalysisItems(input.result);
-  const gg=items.find(item=>item.id==="gas_generator");
-  assert(gg.fields.every(field=>!field.label.includes("预燃室")));
-  assert.equal(gg.fields.find(field=>field.key==="preburner_pressure_Pa").value,10);
-  const nozzle=items.find(item=>item.id==="nozzle");
-  assert.equal(nozzle.fields.find(field=>field.key==="Ve_ms").label,"喷管出口速度");
-  assert(!nozzle.fields.some(field=>field.key==="Cf"));
-  assert.equal(nozzle.fields.find(field=>field.key==="Cf_sl").label,"当前环境推力系数 Cf");
+test("retired results are unavailable in all system views and retain their raw data",()=>{
+  const input=record('gg'),before=structuredClone(input);
+  for(const view of ['overview','results_overview','solver_diagnostics','states','components','topology','log']){
+    const html=renderAnalysis(view,input);assert.match(html,/历史记录不在当前设计范围/);assert.doesNotMatch(html,/kpi-card|cy-svg|sa-svg/);
+  }
+  assert.deepEqual(componentAnalysisItems(input.result),[]);assert.deepEqual(flowAnalysisModel(input.result).nodes,[]);
+  assert.deepEqual(input,before);
+});
+
+test("conflicting archived cycle identity cannot leak through exported flow analysis",()=>{
+  const input=record();input.result.submitted_inputs={cycle_type:'gg'};
+  const before=structuredClone(input);
+  assert.equal(flowAnalysisModel(input.result).status,'unsupported');
+  assert.deepEqual(flowAnalysisModel(input.result).nodes,[]);
+  assert.deepEqual(input,before);
 });
 
 test("legacy assessments stay explicitly historical and preserve failed detailed checks", () => {
@@ -316,7 +298,7 @@ test("preburner hints follow immutable check evidence and active target mode ins
   Object.assign(input.result.submitted_inputs,{ox_preburner_temp_limit_status:"documented",ox_preburner_temp_limit:9999,ox_preburner_temp_limit_basis:"wrong snapshot"});
   Object.assign(input.result.calculation.inputs,{use_target_preburner_temp:0,use_target_preburner_mr:1,ox_preburner_mr_target:60});
   const html=renderAnalysis("overview",input);
-  assert.match(html,/指定 O\/F 60 · 上限未设定（未评估）/);
+  assert.match(html,/指定 氧燃质量比 60 · 上限未设定（未评估）/);
   assert.doesNotMatch(html,/目标 750 K|9,999|wrong snapshot/);
 });
 
@@ -381,11 +363,11 @@ test("all dynamic text, HTML attributes, SVG labels and server schema labels are
 });
 
 test("topology uses returned nodes and valid edges, with cycle scope stated", () => {
-  const input = record("gg");
+  const input = record("ffsc");
   input.result.calculation.topology_nodes.push({key:"bad",label:"非法坐标",pos:[null,10]});
   input.result.calculation.topology_edges.push({source:"missing",target:"sink",label:"不存在的连接"});
   const html = renderAnalysis("topology",input);
-  assert.match(html,/燃气发生器循环（GG，开式）/);
+  assert.match(html,/全流量分级燃烧循环（FFSC，闭式）/);
   assert.match(html,/液氧泵/);
   assert.match(html,/LOX 主路/);
   assert.match(html,/不表示实际布置或几何尺寸/);
@@ -445,6 +427,17 @@ test("welcome, queued, running and error records do not invent calculation resul
   assert.doesNotThrow(() => renderAnalysis("constructor",record()));
 });
 
+test("partitioned record views retain empty and failed states without inventing results",()=>{
+  for(const view of ["results_overview","solver_diagnostics"]){
+    assert.match(renderAnalysis(view,null),/从一个设计点开始/);
+    const failed={id:"no-result",status:"failed",error:'<script>saved failure</script>'},before=structuredClone(failed);
+    const html=renderAnalysis(view,failed);
+    assert.doesNotMatch(html,/<script>|稳态性能摘要|完整数值收敛/);
+    assert.match(html,/&lt;script&gt;saved failure/);
+    assert.deepEqual(failed,before);
+  }
+});
+
 function engineeringSchema(cycle) {
   const expanded=structuredClone(schema);
   expanded.overview_groups[cycle]=[
@@ -464,8 +457,8 @@ function engineeringSchema(cycle) {
 }
 
 test("engineering tables separate symbols, values and units while solver diagnostics are collapsed", () => {
-  engineeringSchema("gg");
-  const input=record("gg");
+  engineeringSchema("ffsc");
+  const input=record("ffsc");
   Object.assign(input.result.calculation.summary,{mdot_fuel_kg_s:60,mdot_ox_kg_s:240,mdot_chamber_kg_s:288,
     ox_pump_power_MW:2,fuel_pump_power_MW:3,gg_turbine_power_delivered_MW:4.8});
   const html=renderAnalysis("overview",input);
@@ -480,15 +473,13 @@ test("engineering tables separate symbols, values and units while solver diagnos
 });
 
 test("flow comparisons retain the actual shared scale and reveal mass imbalance", () => {
-  engineeringSchema("gg");
-  const input=record("gg");
-  Object.assign(input.result.calculation.summary,{mdot_total_kg_s:300,mdot_fuel_kg_s:60,mdot_ox_kg_s:240,
-    mdot_chamber_kg_s:290,gg_mdot_kg_s:12});
+  engineeringSchema("ffsc");
+  const input=record("ffsc");
+  Object.assign(input.result.calculation.summary,{mdot_total_kg_s:300,mdot_fuel_kg_s:62,mdot_ox_kg_s:240});
   const html=renderAnalysis("overview",input);
-  assert.match(html,/分流差额（主室 \+ GG − 总量）\+2 kg\/s/);
+  assert.match(html,/供给差额（液氧 \+ 甲烷 − 总量）\+2 kg\/s/);
   assert.match(html,/class="chart-bar-ox" x="118" y="28" width="264"/);
-  assert.match(html,/class="chart-bar-fuel" x="118" y="57" width="66"/);
-  assert.match(html,/class="chart-bar-gg" x="118" y="115" width="13\.2"/);
+  assert.match(html,/class="chart-bar-fuel" x="118" y="57" width="68\.2"/);
   assert.match(html,/横轴 0 至 300 kg\/s/);
   input.result.calculation.summary.mdot_ox_kg_s=null;
   const missing=renderAnalysis("overview",input);
@@ -497,42 +488,7 @@ test("flow comparisons retain the actual shared scale and reveal mass imbalance"
   assert.match(missing,/<td class="metric-value">—<\/td><td class="metric-unit">kg\/s<\/td>/);
 });
 
-test("single-shaft GG compares combined pumps with delivered work, preserving negative margin", () => {
-  engineeringSchema("gg");
-  const input=record("gg");
-  input.result.calculation.inputs.gg_layout="single_shaft";
-  Object.assign(input.result.calculation.summary,{ox_pump_power_MW:2,fuel_pump_power_MW:3,
-    gg_turbine_power_MW:6,gg_turbine_power_delivered_MW:4.8});
-  const html=renderAnalysis("overview",input);
-  assert.match(html,/共轴泵组/);
-  assert.match(html,/class="balance-readout delta-deficit">ΔP -0\.2 MW \(-4%\)/);
-  assert.match(html,/泵轴功率需求 5；涡轮可用轴功率 4\.8/);
-  assert.doesNotMatch(html,/液氧侧轴系|甲烷侧轴系/);
-  assert.match(html,/系统约束未通过/);
-  delete input.result.calculation.summary.gg_turbine_power_delivered_MW;
-  const missing=renderAnalysis("overview",input);
-  assert.match(missing,/ΔP — MW/);
-  assert.doesNotMatch(missing,/class="chart-bar-drive"/);
-});
 
-test("dual-shaft GG exposes opposing shaft margins instead of hiding them in an aggregate", () => {
-  engineeringSchema("gg");
-  const input=record("gg");
-  input.result.calculation.inputs.gg_layout="dual_shaft";
-  Object.assign(input.result.calculation.summary,{ox_pump_power_MW:2,fuel_pump_power_MW:3,
-    ox_turbine_power_MW:5,fuel_turbine_power_MW:5,gg_mech_efficiency:.5,
-    gg_turbine_power_delivered_MW:5});
-  const html=renderAnalysis("overview",input);
-  assert.match(html,/液氧侧轴系/);
-  assert.match(html,/甲烷侧轴系/);
-  assert.match(html,/ΔP \+0\.5 MW \(\+25%\)/);
-  assert.match(html,/ΔP -0\.5 MW \(-16\.667%\)/);
-  assert.doesNotMatch(html,/共轴泵组/);
-  delete input.result.calculation.summary.gg_mech_efficiency;
-  const missing=renderAnalysis("overview",input);
-  assert.equal((missing.match(/ΔP — MW/g) || []).length,2);
-  assert.doesNotMatch(missing,/class="chart-bar-drive"/);
-});
 
 test("FFSC shaft comparison follows its own output convention without applying GG efficiency", () => {
   engineeringSchema("ffsc");
@@ -548,93 +504,38 @@ test("FFSC shaft comparison follows its own output convention without applying G
   assert.deepEqual(input,before);
 });
 
-test("small signed power residual remains visible and neutral using the recorded tolerance", () => {
-  engineeringSchema("gg");
-  const input=record("gg");
-  Object.assign(input.result.calculation.summary,{ox_pump_power_MW:2,fuel_pump_power_MW:3,
-    gg_turbine_power_delivered_MW:5-1.234e-12});
-  const nearZero=renderAnalysis("overview",input);
+test("small signed power residual remains visible and neutral using the recorded tolerance",()=>{
+  engineeringSchema('ffsc');const input=record();
+  Object.assign(input.result.calculation.summary,{ox_pump_power_MW:5,fuel_pump_power_MW:3,ox_turbine_power_MW:5-1.234e-12,fuel_turbine_power_MW:3});
+  const nearZero=renderAnalysis('overview',input);
   assert.match(nearZero,/class="balance-readout delta-within-band">ΔP -[\d.]+e-12 MW/);
-  assert.match(nearZero,/色标容差 ±1%（默认参考） · 差额在容差范围内/);
-  assert.doesNotMatch(nearZero,/class="balance-readout delta-deficit"/);
-  assert.match(nearZero,/class="badge failed">系统约束未通过/);
-  input.result.assessment.checks.push({key:"power_error_percent",unit:"%",criterion:"maximum",limit:.1});
-  input.result.calculation.summary.gg_turbine_power_delivered_MW=4.99;
-  const tightened=renderAnalysis("overview",input);
+  input.result.assessment.checks.push({key:'ox_side_power_error_percent',unit:'%',criterion:'maximum',limit:.1});
+  input.result.calculation.summary.ox_turbine_power_MW=4.99;
+  const tightened=renderAnalysis('overview',input);
   assert.match(tightened,/class="balance-readout delta-deficit">ΔP -0.01 MW \(-0.2%\)/);
   assert.match(tightened,/色标容差 ±0.1%（本记录校核）/);
-  assert.doesNotMatch(tightened,/差额在容差范围内/);
 });
 
-test("recorded propellant controls system labels without changing flow or power quantities", () => {
-  engineeringSchema("gg");
-  const methane=record("gg");
-  methane.result.calculation.inputs.gg_layout="dual_shaft";
-  Object.assign(methane.result.calculation.summary,{mdot_total_kg_s:300,mdot_fuel_kg_s:60,
-    mdot_ox_kg_s:240,mdot_chamber_kg_s:290,gg_mdot_kg_s:12,ox_pump_power_MW:2,
-    fuel_pump_power_MW:3,ox_turbine_power_MW:5,fuel_turbine_power_MW:5,gg_mech_efficiency:.5});
-  const kerosene=structuredClone(methane);
-  kerosene.result.calculation.inputs.propellant_pair="lox_kerosene";
-  // Submitted inputs disagree deliberately: the actual serialized calculation wins.
-  kerosene.result.submitted_inputs.propellant_pair="lox_methane";
-  const before=structuredClone(kerosene), methaneHtml=renderAnalysis("overview",methane);
-  const html=renderAnalysis("overview",kerosene);
-  for(const text of ["煤油总流量","煤油供给","煤油泵功率","煤油侧轴系","LOX + C₁₂H₂₆","正十二烷单组分替代物","GG 稳态循环与给定冷却吸热量模型"]) assert(html.includes(text),text);
-  assert.doesNotMatch(html,/甲烷|CH₄|CH4/);
-  assert.match(methaneHtml,/甲烷供给|甲烷侧轴系/);
-  for(const rendered of [html,methaneHtml]) {
-    assert.match(rendered,/class="chart-bar-fuel" x="118" y="57" width="66"/);
-    assert.match(rendered,/分流差额（主室 \+ GG − 总量）\+2 kg\/s/);
-    assert.match(rendered,/ΔP \+0\.5 MW \(\+25%\)/);
-    assert.match(rendered,/ΔP -0\.5 MW \(-16\.667%\)/);
+
+
+test("every saved cycle and propellant identity must stay in platform scope", () => {
+  for(const location of ['inputs','submitted','calculated'])for(const identity of [
+    {cycle_type:'gg'},{cycle_type:null},{propellant_pair:'lox_kerosene'},{propellant_pair:null},null,
+  ]){
+    const input=record('ffsc');
+    if(location==='inputs')input.inputs=identity;
+    else if(location==='submitted')input.result.submitted_inputs=identity;
+    else input.result.calculation.inputs=identity;
+    const before=structuredClone(input);
+    for(const view of ['overview','states','components','topology']){
+      const html=renderAnalysis(view,input);
+      assert.match(html,/历史记录不在当前设计范围/,`${location}: ${JSON.stringify(identity)}`);
+      assert.doesNotMatch(html,/kpi-card|cy-svg|sa-svg/);
+    }
+    assert.deepEqual(input,before);
   }
-  assert.deepEqual(kerosene,before);
-  // Rendering a subsequent legacy calculation restores methane, with no shared fuel state.
-  assert.match(renderAnalysis("overview",methane),/甲烷侧轴系/);
-  assert.doesNotMatch(renderAnalysis("overview",methane),/煤油侧轴系|正十二烷/);
-});
-
-test("kerosene state, component and topology titles adapt while raw chemical species and diagnostics stay intact", () => {
-  const expanded=structuredClone(schema);
-  expanded.state_labels.fuel_tank="甲烷储箱";
-  expanded.component_labels.fuel_pump="甲烷泵";
-  expanded.component_labels.gg_turbine_fuel="GG 涡轮（CH4 轴）";
-  configureResultSchema(expanded);
-  const input=record("gg");
-  input.result.calculation.inputs.propellant_pair="lox_kerosene";
-  input.result.calculation.states.fuel_tank={name:"甲烷储箱",pressure:300000,temperature:300,
-    mass_flow:60,density:750,enthalpy:120000,composition:{c12h26:1},metadata:{}};
-  input.result.calculation.states.fuel_boost_out={name:"甲烷增压泵出口",composition:{c12h26:1}};
-  input.result.calculation.states.main_chamber.composition.CH4=.002;
-  input.result.calculation.components.fuel_pump={name:"fuel_pump",outputs:{power_MW:3},notes:["原始 CH4 文本保持不变"]};
-  input.result.calculation.components.gg_turbine_fuel={outputs:{turbine_power_MW:5}};
-  input.result.calculation.topology_nodes=[{key:"fuel_tank",label:"甲烷储箱",pos:[0,0]},
-    {key:"fuel_pump",label:"甲烷泵",pos:[200,0]}];
-  input.result.calculation.topology_edges=[{source:"fuel_tank",target:"fuel_pump",label:"主路 CH4"}];
-  const before=structuredClone(input), statesHtml=renderAnalysis("states",input);
-  assert.match(statesHtml,/煤油储箱/);
-  assert.match(statesHtml,/煤油增压泵出口/);
-  assert.match(statesHtml,/c12h26：原始质量分数 1/);
-  assert.match(statesHtml,/CH4：原始质量分数 0\.002/,"combustion species are data, not fuel labels");
-  const componentsHtml=renderAnalysis("components",input);
-  assert.match(componentsHtml,/>煤油泵</);
-  assert.match(componentsHtml,/GG 涡轮（C₁₂H₂₆ 轴）/);
-  const topologyHtml=renderAnalysis("topology",input);
-  assert.match(topologyHtml,/煤油储箱|煤油泵/);
-  assert.match(topologyHtml,/主路 C₁₂H₂₆/);
-  assert.doesNotMatch(topologyHtml,/甲烷|CH4/);
-  assert.match(renderAnalysis("log",input),/原始 CH4 文本保持不变/);
-  assert.deepEqual(input,before);
-});
-
-test("propellant naming falls back to submitted inputs only when serialized calculation inputs are absent", () => {
-  const input=record("gg");
-  input.result.submitted_inputs.propellant_pair="lox_kerosene";
-  delete input.result.calculation.inputs;
-  assert.match(renderAnalysis("overview",input),/液氧 \/ 煤油（正十二烷替代物）/);
-  input.result.calculation.inputs={cycle_type:"gg"};
-  assert.match(renderAnalysis("overview",input),/液氧 \/ 甲烷/);
-  assert.doesNotMatch(renderAnalysis("overview",input),/正十二烷/);
+  const legacy=record();delete legacy.inputs;delete legacy.result.calculation.inputs;
+  assert.match(renderAnalysis('overview',legacy),/液氧 \/ 甲烷/);
 });
 
 test("steady study conditions use saved inputs, preserve missing fields, and do not imply transient results", () => {
@@ -647,7 +548,7 @@ test("steady study conditions use saved inputs, preserve missing fields, and do 
   assert.match(html,/本页显示稳态设计点；热态扰动见瞬态响应分析/);
   assert.match(html,/<dt>指定燃烧室压力<\/dt><dd>33 <small>MPa/);
   assert.match(html,/<dt>环境压力边界<\/dt><dd>0\.101 <small>MPa/);
-  assert.match(html,/<dt>指定总氧燃比 O\/F<\/dt><dd>3\.6 /);
+  assert.match(html,/<dt>指定总氧燃质量比<\/dt><dd>3\.6 /);
   assert.match(html,/<dt>主喷管面积比 Ae\/At<\/dt><dd>34\.34 /);
   assert.doesNotMatch(html,/<dd>999 /);
   assert.deepEqual(input,before);
@@ -656,7 +557,7 @@ test("steady study conditions use saved inputs, preserve missing fields, and do 
 });
 
 test("performance calculations retain their recorded operating pressure instead of assuming sea level", () => {
-  for (const cycle of ["ffsc","gg"]) {
+  for (const cycle of ["ffsc"]) {
     for (const [pressure,label] of [[0,"0"],[35000,"35"],[101325,"101.325"]]) {
       const input=record(cycle);
       input.result.calculation.inputs.ambient_pressure=pressure;

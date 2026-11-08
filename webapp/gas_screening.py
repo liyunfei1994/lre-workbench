@@ -42,11 +42,11 @@ _SOURCES = ["https://cantera.org/stable/reference/thermo/phase-thermo.html",
 
 
 def _checkpoint():
-    # The solver adds src to sys.path. Also support standalone validation callers.
+    # The web package bootstraps the shared source package for standalone callers.
     try:
-        from task_control import checkpoint
+        from lre_workbench.runtime.tasks import checkpoint
     except ImportError:
-        from src.task_control import checkpoint
+        from lre_workbench.runtime.tasks import checkpoint
     checkpoint()
 
 
@@ -125,7 +125,7 @@ def _difference(candidate, baseline):
 
 def _gas_domain(gas):
     # Check every present species. Valid temperature coverage is not EOS accuracy.
-    from thermo import gas_temperature_applicability
+    from lre_workbench.properties.thermochemistry import gas_temperature_applicability
     evidence = gas_temperature_applicability(gas)
     _properties(gas)
     compressibility = _number(float(gas.isothermal_compressibility), positive=True)

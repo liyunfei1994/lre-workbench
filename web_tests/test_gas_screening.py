@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 from webapp import gas_screening as screen
 
 try:

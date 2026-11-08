@@ -280,3 +280,182 @@ test("historical pass and missing evidence remain visible as unresolved on the d
   assert.match(visibleText(overview.content),/未记录|缺少|待确认|需重算|证据不足/);
   assert.deepEqual(record,before);
 });
+
+test("partitioned results expose four analyses and route convergence to the shared record view",()=>{
+  configureResultSchema({});const record=resultRecord(),before=structuredClone(record);
+  const html=renderAnalysis("results_overview",record),panels=panelsOf(html);
+  assert.deepEqual(panels.map(item=>item.id),["overview","checks","cooling","models"]);
+  assert.doesNotMatch(html,/data-steady-tab="convergence"|class="panel convergence-workspace"/);
+  const diagnostics=renderAnalysis("solver_diagnostics",record);
+  assert.match(diagnostics,/完整收敛与迭代历程/);
+  assert.doesNotMatch(diagnostics,/data-steady-tab|稳态性能摘要/);
+  assert.match(diagnostics,/完整数值收敛/);
+  assert.match(diagnostics,/系统约束未通过/);
+  assert.match(diagnostics,/热力学适用性待核实/);
+  assert.deepEqual(record,before);
+});
+
+test("performance precedes collapsed conditions and evidence while issues stay visible",()=>{
+  configureResultSchema({});const record=resultRecord();
+  record.steady_design={schema_version:1,status:"blocked",scope_label:"保存的总体设计依据",
+    gates:Array.from({length:7},(_,index)=>({label:`验收门${index}`,status:index===0?"fail":"pass",detail:`详细依据${index}`,target:"checks"})),
+    actions:[{label:"检查热面温度",detail:"保存的说明",target:"checks"},{label:"补全物性依据",detail:"保存的说明",target:"models"}]};
+  const before=structuredClone(record),html=renderAnalysis("results_overview",record),visible=visibleText(html);
+  assert(html.indexOf('aria-label="稳态性能摘要"')<html.indexOf('class="panel steady-study-details"'));
+  for(const className of ["steady-study-details","steady-evidence"]){
+    const opening=html.match(new RegExp(`<details\\b[^>]*class="[^"]*${className}[^"]*"[^>]*>`))?.[0];
+    assert(opening);assert.doesNotMatch(opening,/\sopen(?:\s|=|>)/);
+  }
+  assert.match(visible,/待关注 2 项.*检查热面温度.*补全物性依据/);
+  assert.match(visible,/沿程热面壁温峰值.*1,?252\.873.*800/);
+  assert.match(visible,/系统约束未通过/);assert.match(visible,/温区外推/);
+  assert.doesNotMatch(visible,/详细依据0|验收门0|指定燃烧室压力/);
+  assert.match(html,/详细依据6/);
+  assert.deepEqual(record,before);
+});
+
+function wallRangeRecord(status="fail",statusLabel="超出数据温区"){
+  const record=resultRecord();
+  const gate={id:"wall_thermal_range",label:"壁面材料热物性数据范围",status,status_label:statusLabel,
+    detail:status==="pass"?"保存记录：0 个单元超出数据温区。数据范围与壁温限值分别检查。":"保存记录：12 个单元超出数据温区；最高壁温 1252.873 K，数据温区 300–1100 K。数据范围与壁温限值分别检查。",
+    target:"cooling"};
+  record.steady_design={schema_version:1,status:status==="fail"?"blocked":"review_required",scope_label:"保存的总体设计依据",
+    gates:[{id:"range",label:"流体物性声明范围",status:"pass",target:"models",detail:"保存的流体范围证据"},gate],
+    actions:status==="pass"?[]:[{...gate},{id:"constraints",label:"核对约束依据",target:"checks"}]};
+  return record;
+}
+
+test("wall material data range failure remains visible before opening evidence and is not repeated in pending actions",()=>{
+  configureResultSchema({});const record=wallRangeRecord();
+  // Transitional reports may contain both the gate action and the old action.
+  record.steady_design.actions.push({label:"壁材热物性超出来源温区",target:"cooling"},
+    {gate_id:"wall_thermal_range",label:"重复的壁面范围事项",target:"cooling"});
+  const before=structuredClone(record),html=renderAnalysis("results_overview",record);
+  const visible=visibleText(panelsOf(html).find(item=>item.id==="overview").content);
+  assert.match(visible,/壁面材料热物性数据范围：超出数据温区/);
+  assert.match(visible,/12 个单元.*1252\.873 K.*300–1100 K/);
+  assert.match(visible,/数据范围与壁温限值分别检查/);
+  assert.match(visible,/其他待关注 1 项：.*核对约束依据/);
+  assert.equal(visible.split("壁面材料热物性数据范围").length-1,1);
+  assert.doesNotMatch(visible,/壁材热物性超出来源温区|重复的壁面范围事项/);
+  assert.match(html,/data-steady-evidence="wall_thermal_range"[\s\S]*?data-steady-open="cooling">查看壁面材料依据/);
+  assert.match(visible,/流体物性：/);
+  const opening=html.match(/<details\b[^>]*class="[^"]*steady-evidence[^"]*"[^>]*>/)?.[0];
+  assert(opening);assert.doesNotMatch(opening,/\sopen(?:\s|=|>)/);
+  assert.match(html,/完整数值收敛/);
+  assert.deepEqual(record,before);
+});
+
+test("missing wall material range evidence is visible even without an actions array",()=>{
+  configureResultSchema({});const record=wallRangeRecord("review","证据不足");
+  record.steady_design.gates[1].detail="历史记录未保存逐单元材料温区证据。";
+  delete record.steady_design.actions;
+  const visible=visibleText(renderAnalysis("results_overview",record));
+  assert.match(visible,/壁面材料热物性数据范围：证据不足/);
+  assert.match(visible,/历史记录未保存逐单元材料温区证据/);
+  assert.doesNotMatch(visible,/其他待关注 0 项|数据温区内/);
+});
+
+test("wall range pass retains zero count without creating a range warning",()=>{
+  configureResultSchema({});const record=wallRangeRecord("pass","数据温区内");
+  const html=renderAnalysis("results_overview",record),visible=visibleText(html);
+  assert.match(visible,/壁面材料热物性数据范围：数据温区内/);
+  assert.match(visible,/0 个单元超出数据温区/);
+  assert.match(html,/<section class="steady-attention-card" aria-label="模型适用性摘要">/);
+  assert.doesNotMatch(visible,/其他待关注/);
+});
+
+test("legacy reports without a wall gate preserve their action and do not fabricate material coverage",()=>{
+  configureResultSchema({});const record=wallRangeRecord();
+  record.steady_design.gates=record.steady_design.gates.slice(0,1);
+  record.steady_design.actions=[{label:"壁材热物性超出来源温区",target:"cooling"}];
+  const visible=visibleText(renderAnalysis("results_overview",record));
+  assert.match(visible,/待关注 1 项：.*壁材热物性超出来源温区/);
+  assert.doesNotMatch(visible,/壁面材料热物性数据范围：|数据温区内/);
+});
+
+test("first-screen wall range evidence escapes server text and supports result-embedded historical reports",()=>{
+  configureResultSchema({});const record=wallRangeRecord();
+  const gate=record.steady_design.gates[1];
+  gate.label='<img src=x onerror="bad()">';gate.status_label='<script>bad()</script>';gate.detail='<iframe src="bad"></iframe>';
+  record.result.steady_design=record.steady_design;delete record.steady_design;
+  const before=structuredClone(record),html=renderAnalysis("results_overview",record);
+  assert.match(html,/&lt;img/);assert.match(html,/&lt;script&gt;bad/);assert.match(html,/&lt;iframe/);
+  assert.doesNotMatch(html,/<img|<script>|<iframe| onerror="bad/);
+  assert.deepEqual(record,before);
+});
+
+test("convergence links bubble to partition owner without resetting selected result analysis",()=>{
+  const node=host();node.workspace=workspace(["overview","checks","cooling","models"]);
+  const jump=new Element({steadyOpen:"convergence"},node.workspace);node.workspace.elements.push(jump);
+  const alias=new Element({steadyTarget:"models"},node.workspace);node.workspace.elements.push(alias);
+  mountSteadyWorkspace(node,"partition-record");node.click(tab(node,"cooling"));
+  assertSelected(node,"cooling");
+  assert.equal(node.click(jump),false);assertSelected(node,"cooling");
+  node.click(alias);assertSelected(node,"models");
+});
+
+function initializationRecord(){
+  return {id:"initialization-failure-only",status:"failed",error:"温度反求失败",inputs:{pc:33000000},result:{
+    initialization_diagnostics:{schema_version:1,status:"failed",stage:"initialization",formal_iteration_started:false,
+      attempted_inputs:{pc:33000000},variable_names:["总质量流量"],variable_units:["kg/s"],x:[700],
+      steps:[],counts:{forward_attempted:1,forward_completed:1,inversion_attempted:1,inversion_completed:0},
+      failure:{stage:"ox_temperature_inversion",component:"富氧预燃室",error_type:"ValueError",message:"已保存原始错误"}}}};
+}
+
+test("initialization-only failed tasks reach diagnostics without a calculation payload",()=>{
+  configureResultSchema({});const record=initializationRecord(),before=structuredClone(record);
+  const overview=renderAnalysis("results_overview",record),diagnostics=renderAnalysis("solver_diagnostics",record);
+  assert.match(overview,/初始化失败/);assert.match(overview,/正式稳态迭代尚未开始/);
+  assert.match(overview,/data-steady-open="convergence">查看初始化失败诊断/);
+  assert.match(diagnostics,/初始化失败诊断/);assert.match(diagnostics,/富氧预燃室/);
+  assert.match(diagnostics,/33000000/);assert.match(diagnostics,/调用类别/);
+  for(const html of [overview,diagnostics])assert.doesNotMatch(html,/稳态性能摘要|计算真空推力|cv-chart|<svg|完整数值收敛|系统约束通过/);
+  assert.deepEqual(record,before);assert.equal(record.result.calculation,undefined);
+});
+
+test("failed historical dialogs have working overview-to-initialization tabs rather than a dead link",()=>{
+  configureResultSchema({});const html=renderAnalysis("overview",initializationRecord()),panels=panelsOf(html);
+  assert.deepEqual(panels.map(panel=>panel.id),["overview","convergence"]);
+  assert.deepEqual(panels.filter(panel=>!panel.hidden).map(panel=>panel.id),["overview"]);
+  assert.match(panels.find(panel=>panel.id==="convergence").content,/初始化失败诊断/);
+  const node=host();node.workspace=workspace(["overview","convergence"]);mountSteadyWorkspace(node,"initialization-failure-only");
+  node.click(link(node,"convergence"));assertSelected(node,"convergence");
+});
+
+test("old failed records keep original error and an honest missing-diagnostics view",()=>{
+  configureResultSchema({});const record={id:"old-failure",status:"failed",error:'旧错误 <img src=x onerror="bad()">',result:null};
+  const overview=renderAnalysis("results_overview",record),diagnostics=renderAnalysis("solver_diagnostics",record);
+  assert.match(overview,/data-steady-open="convergence">查看已有失败诊断/);
+  assert.match(diagnostics,/未保存结构化初始化诊断/);assert.match(diagnostics,/不能据此判断正式迭代是否开始/);
+  assert.match(diagnostics,/旧错误 &lt;img/);assert.doesNotMatch(diagnostics,/<img|正式稳态迭代尚未开始|cv-chart|完整收敛与迭代历程/);
+  assert.match(diagnostics,/不能认定设计在物理上无解/);
+  assert.deepEqual(panelsOf(renderAnalysis("overview",record)).map(panel=>panel.id),["overview","convergence"]);
+});
+
+test("queued and cancelled records are not presented as initialization failures",()=>{
+  configureResultSchema({});
+  for(const status of ["queued","running","cancelled"]){
+    const html=renderAnalysis("solver_diagnostics",{status,result:null});
+    assert.doesNotMatch(html,/初始化失败诊断|正式稳态迭代尚未开始|查看已有失败诊断/);
+  }
+  const malformed=initializationRecord();malformed.result.initialization_diagnostics.schema_version=99;
+  assert.match(renderAnalysis("solver_diagnostics",malformed),/未保存结构化初始化诊断/);
+});
+
+test("selecting a failed task cannot reuse the previous successful task performance",()=>{
+  configureResultSchema({});const success=resultRecord();
+  assert.match(renderAnalysis("results_overview",success),/稳态性能摘要/);
+  const failed=initializationRecord(),before=structuredClone(failed);
+  failed.inputs.pc=99000000;
+  const diagnostics=renderAnalysis("solver_diagnostics",failed);
+  assert.match(diagnostics,/33000000/);assert.doesNotMatch(diagnostics,/99000000|2596624|3773\.6|稳态性能摘要/);
+  assert.deepEqual(failed.result,before.result);
+});
+
+test("new physical acceptance ratio is labelled independently of numerical residual scaling",()=>{
+  configureResultSchema({});const record=resultRecord();
+  record.result.assessment.numerical.residual=.2;
+  record.result.calculation.convergence.inner_runs=[{acceptance_policy:{schema_version:1}}];
+  assert.match(renderAnalysis("solver_diagnostics",record),/最大物理验收比 0\.2（阈值 1）/);
+});

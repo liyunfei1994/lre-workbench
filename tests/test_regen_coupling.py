@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from regen_coupling import close_regen_cycle, current_thermal_evidence
-from cooling_marching import CoolantMarchError
+from lre_workbench.systems.regenerative import close_regen_cycle, current_thermal_evidence
+from lre_workbench.components.cooling.marching import CoolantMarchError
 
 
 class CouplingTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class CouplingTests(unittest.TestCase):
                     "fuel_after_pump": NS(pressure=60e6), "lox_after_pump": NS(density=1200.)},
             steady_closure={})
 
-    @patch("pump.fluid_density", return_value=400.)
+    @patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.)
     def test_current_evidence_requires_owner_and_rechecks_physical_residuals(self, _):
         model = self.model()
         model._thermal_feedback_epoch = object()
@@ -44,7 +44,7 @@ class CouplingTests(unittest.TestCase):
         model._thermal_feedback_epoch = object()
         self.assertIsNone(current_thermal_evidence(model, result))
 
-    @patch("pump.fluid_density", return_value=400.)
+    @patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.)
     def test_pass_requires_two_consistent_heat_fields_and_restores_trial(self, _):
         model = self.model()
         result = close_regen_cycle(model, lambda: self.evaluation(model))
@@ -53,7 +53,7 @@ class CouplingTests(unittest.TestCase):
         self.assertEqual(evidence["iterations"], 2)
         self.assertEqual(model._hydraulic_trial, {"sentinel": 1})
 
-    @patch("pump.fluid_density", return_value=400.)
+    @patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.)
     def test_equal_total_heat_cannot_hide_nonconverged_spatial_distribution(self, _):
         model = self.model()
         count = 0
@@ -65,7 +65,7 @@ class CouplingTests(unittest.TestCase):
             close_regen_cycle(model, evaluate)
         self.assertEqual(model._hydraulic_trial, {"sentinel": 1})
 
-    @patch("pump.fluid_density", return_value=400.)
+    @patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.)
     def test_fixed_hardware_does_not_resize_to_hide_outer_area_mismatch(self, _):
         model = self.model()
         model._fixed_cooling_throat_area = .1
@@ -77,7 +77,7 @@ class CouplingTests(unittest.TestCase):
         self.assertEqual(model._fixed_cooling_throat_area, .1)
         self.assertEqual(result.components["nozzle"].outputs["At_m2"], .11)
 
-    @patch("pump.fluid_density", return_value=400.)
+    @patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.)
     def test_pressure_initialization_rejects_failed_states_then_closes_actual_drop(self, _):
         model = self.model()
         model.inputs.cooling_dp_pa = 2e6
@@ -93,7 +93,7 @@ class CouplingTests(unittest.TestCase):
         self.assertEqual(c["attempts"], c["iterations"] + 2)
         self.assertEqual(model.inputs.cooling_dp_pa, 2e6)
 
-    @patch("pump.fluid_density", return_value=400.)
+    @patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.)
     def test_oscillatory_pressure_fixed_point_is_damped_without_changing_root(self, _):
         model = self.model()
         def evaluate():

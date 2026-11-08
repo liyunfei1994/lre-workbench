@@ -13,7 +13,7 @@ import {renderThermodynamicApplicability} from "../webapp/static/thermo-applicab
 import {renderGasHandoff} from "../webapp/static/gas-handoff.js";
 
 const clone=value=>JSON.parse(JSON.stringify(value));
-const inputs={propellant_pair:"lox_kerosene",cycle_type:"gg",gg_layout:"single_shaft",pc:9.7e6,
+const inputs={propellant_pair:"lox_methane",cycle_type:"ffsc",pc:9.7e6,
   of_ratio:2.36,expansion_ratio:16,fuel_inlet_temp:290,ox_inlet_temp:90,inlet_pressure:1e6,ambient_pressure:101325};
 function context(){return {project:{id:"p1",revision:3},dirty:true,draft:{...inputs,pc:33e6,propellant_pair:"lox_methane"},
   record:{id:"design-1",project_id:"p1",revision:2,status:"succeeded",created:1,inputs:clone(inputs),
@@ -31,16 +31,16 @@ const result={source:{job_id:"design-1",revision:2},conservation:{kind:"conserva
       cea:{status:"ok",metrics:{Isp_vac_s:320,Tc_K:3630}},differences:{Isp_vac_s:{absolute:4,relative_percent:1.2658}},
       comparable:{conditions_aligned:true,products_aligned:false,notes:["产品集不同"]}},
     {of:2.5,eps:16,cantera:{status:"ok",metrics:{Isp_vac_s:318}},cea:{status:"error",reason:"CEA 点计算失败"},differences:{Isp_vac_s:null},comparable:{notes:["无法对比"]}},
-  ]},properties:{kind:"properties",status:"partial",checks:[{id:"fluid-1",fluid:"n-Dodecane",temperature_K:290,pressure_Pa:1e6,status:"pass",phase:"liquid",
+  ]},properties:{kind:"properties",status:"partial",checks:[{id:"fluid-1",fluid:"Methane",temperature_K:290,pressure_Pa:1e6,status:"pass",phase:"liquid",
     properties_si:{density_kg_m3:750,enthalpy_J_kg:300000,cp_J_kg_K:2100},refprop:{status:"unavailable",reason:"缺少授权后端"}}]},
   experiment:{kind:"experiment",status:"fail",checks:[{id:"thrust",label:"推力",status:"fail",predicted_si:845000,measured_si:820000,difference_si:25000,tolerance_si:5000,unit:"N",reason:"超出容差"}]}};
 
 test("validation defaults and requests bind the frozen completed design, never the current draft",()=>{
   const ctx=context(),before=clone(ctx),form=createValidationForm(ctx);
   assert.equal(form.pc_MPa,"9.7");assert.equal(form.T_fuel_K,"290");
-  assert.match(form.property_points,/n-Dodecane, 290, 1/);
+  assert.match(form.property_points,/Methane, 290, 1/);
   const request=buildValidationRequest(ctx,{...form,scan_mode:"point"},"thermochemistry");
-  assert.deepEqual(request,{source_job_id:"design-1",thermochemistry:{propellant_pair:"lox_kerosene",pc_pa:9.7e6,of_values:[2.36],eps_values:[16],T_fuel_K:290,T_ox_K:90,mode:"equilibrium",product_policy:"native_databases",cantera_dataset:"production",methane_thermo_dataset:"gri30"}});
+  assert.deepEqual(request,{source_job_id:"design-1",thermochemistry:{propellant_pair:"lox_methane",pc_pa:9.7e6,of_values:[2.36],eps_values:[16],T_fuel_K:290,T_ox_K:90,mode:"equilibrium",product_policy:"matched_cho_gas",cantera_dataset:"production",methane_thermo_dataset:"gri30"}});
   assert.deepEqual(buildValidationRequest(ctx,form,"conservation"),{source_job_id:"design-1"});
   assert.deepEqual(ctx,before);
   delete ctx.record.inputs;
@@ -52,6 +52,16 @@ test("validation defaults and requests bind the frozen completed design, never t
 test("unfinished, absent and foreign-project source jobs cannot be submitted",()=>{
   for(const mutate of [ctx=>ctx.record.status="running",ctx=>ctx.record=null,ctx=>ctx.record.project_id="p-other",ctx=>ctx.record.result=null]){
     const ctx=context();mutate(ctx);
+    assert.throws(()=>buildValidationRequest(ctx,createValidationForm(ctx),"conservation"),/已完成/);
+  }
+});
+
+test("conflicting saved identities cannot start a validation task",()=>{
+  for(const location of ["inputs","submitted_inputs","calculation"]){
+    const ctx=context();
+    if(location==="inputs")ctx.record.inputs.cycle_type="gg";
+    else if(location==="submitted_inputs")ctx.record.result.submitted_inputs.cycle_type="gg";
+    else ctx.record.result.calculation.inputs.cycle_type="gg";
     assert.throws(()=>buildValidationRequest(ctx,createValidationForm(ctx),"conservation"),/已完成/);
   }
 });
@@ -69,7 +79,7 @@ test("thermochemistry grid, mode and numeric boundaries fail before an API reque
 test("property points preserve fluid identity and convert MPa to Pa with a twenty-point limit",()=>{
   const ctx=context(),form=createValidationForm(ctx);
   const request=buildValidationRequest(ctx,{...form,compare_refprop:true},"properties");
-  assert.deepEqual(request.properties,{compare_refprop:true,points:[{fluid:"Oxygen",temperature_K:90,pressure_Pa:1e6},{fluid:"n-Dodecane",temperature_K:290,pressure_Pa:1e6}]});
+  assert.deepEqual(request.properties,{compare_refprop:true,points:[{fluid:"Oxygen",temperature_K:90,pressure_Pa:1e6},{fluid:"Methane",temperature_K:290,pressure_Pa:1e6}]});
   for(const property_points of ["RP1,290,1","Methane,100,0","Oxygen,90","Oxygen,NaN,1","Oxygen,10001,1","Oxygen,90,1e308",Array(21).fill("Oxygen,90,1").join("\n")]){
     assert.throws(()=>buildValidationRequest(ctx,{...form,property_points},"properties"));
   }
@@ -78,13 +88,13 @@ test("property points preserve fluid identity and convert MPa to Pa with a twent
 test("property defaults prefer recorded state points and leave absent pressures blank instead of inventing them",()=>{
   const ctx=context();
   ctx.record.result.calculation.states={lox_pump_inlet:{temperature:92,pressure:.8e6},fuel_pump_inlet:{temperature:294,pressure:.9e6}};
-  assert.equal(createValidationForm(ctx).property_points,"Oxygen, 92, 0.8\nn-Dodecane, 294, 0.9");
+  assert.equal(createValidationForm(ctx).property_points,"Oxygen, 92, 0.8\nMethane, 294, 0.9");
   delete ctx.record.result.calculation.states;
   delete ctx.record.inputs.inlet_pressure;
-  assert.equal(createValidationForm(ctx).property_points,"Oxygen, 90, \nn-Dodecane, 290, ");
+  assert.equal(createValidationForm(ctx).property_points,"Oxygen, 90, \nMethane, 290, ");
   assert.throws(()=>buildValidationRequest(ctx,createValidationForm(ctx),"properties"),/压力/);
   ctx.record.inputs.ox_tank_pressure=.4e6;ctx.record.inputs.fuel_tank_pressure=.3e6;
-  assert.equal(createValidationForm(ctx).property_points,"Oxygen, 90, 0.4\nn-Dodecane, 290, 0.3");
+  assert.equal(createValidationForm(ctx).property_points,"Oxygen, 90, 0.4\nMethane, 290, 0.3");
 });
 
 test("experiment requires confirmed conditions and real measurements with explicit uncertainty or tolerance",()=>{
@@ -99,7 +109,7 @@ test("experiment requires confirmed conditions and real measurements with explic
   const request=buildValidationRequest(ctx,form,"experiment");
   assert.deepEqual(request.experiment.measurements,[{metric:"thrust_N",value:840,unit:"kN",tolerance:5,uncertainty:2}]);
   assert.deepEqual(request.experiment.conditions.ambient_pressure,{value:.101325,unit:"MPa",tolerance:0});
-  assert.equal(request.experiment.conditions.propellant_pair,"lox_kerosene");
+  assert.equal(request.experiment.conditions.propellant_pair,"lox_methane");
   assert.equal(request.experiment.role,"holdout");
   form.experiment_role="calibration";form.exp_thrust="0";
   assert.equal(buildValidationRequest(ctx,form,"experiment").experiment.measurements[0].value,0);
@@ -174,7 +184,7 @@ test("mount shows source differences, missing dependencies and all five tabs wit
   for(const tab of ["gas_handoff","thermochemistry","conservation","properties","experiment"])assert.match(h.container.innerHTML,new RegExp(`data-validation-tab="${tab}"`));
   h.tab("experiment");
   assert.match(h.container.innerHTML,/data-validation-field="conditions_confirmed" type="checkbox" >/);
-  assert.match(h.container.innerHTML,/液氧 \/ 煤油/);
+  assert.match(h.container.innerHTML,/液氧 \/ 甲烷/);
   for(const [label,unit] of [["环境压力下推力","kN"],["环境压力下比冲","s"],["总流量","kg/s"]]){
     for(const name of ["实测值","判定容差","测量不确定度"])assert.ok(h.container.innerHTML.includes(`aria-label="${label}${name} / ${unit}"`));
   }
@@ -255,7 +265,7 @@ test("sync refreshes dirty warnings without network requests or discarding enter
   assert.match(h.container.innerHTML,/当前草稿或方案版本/);
   assert.match(h.container.innerHTML,/data-validation-field="pc_MPa" value="12.5"/);
   assert.equal(h.calls.length,0);
-  assert.match(h.container.innerHTML,/O\/F 起始值/);
+  assert.match(h.container.innerHTML,/氧燃质量比 起始值/);
   assert.doesNotMatch(h.container.innerHTML,/比热比 γ/);
   h.controller.onLeave();
 });
@@ -403,14 +413,14 @@ test("property scan modes initialize from frozen inlet states and retain fields 
   assert.match(h.container.innerHTML,/data-validation-field="property_start" value="81"/);
   assert.match(h.container.innerHTML,/data-validation-field="property_end" value="99"/);
   assert.match(h.container.innerHTML,/data-validation-field="property_fixed" value="1"/);
-  h.changeField("property_fluid","n-Dodecane");
+  h.changeField("property_fluid","Methane");
   assert.match(h.container.innerHTML,/data-validation-field="property_start" value="261"/);
   h.changeField("property_mode","pressure");
   assert.match(h.container.innerHTML,/data-validation-field="property_fixed" value="290"/);
   h.field("property_start","0.4");await h.controller.refresh();
   assert.match(h.container.innerHTML,/data-validation-field="property_start" value="0.4"/);
-  h.changeField("property_fluid","Methane");
-  assert.match(h.container.innerHTML,/data-validation-field="property_fixed" value=""/);
+  h.changeField("property_fluid","Oxygen");
+  assert.match(h.container.innerHTML,/data-validation-field="property_fixed" value="90"/);
   h.controller.onLeave();
 });
 
@@ -436,7 +446,8 @@ test("recorded main-nozzle assumption initializes independent comparison without
 
 test("advanced comparison datasets require the common methane gas set and persist explicit choices",()=>{
   const ctx=context(),form={...createValidationForm(ctx),product_policy:"matched_cho_gas",cantera_dataset:"nasa_gas_candidate"};
-  assert.throws(()=>buildValidationRequest(ctx,form,"thermochemistry"),/仅适用于液氧/);
+  const legacy=context();legacy.record.inputs.cycle_type="gg";
+  assert.throws(()=>buildValidationRequest(legacy,form,"thermochemistry"),/已完成/);
   ctx.record.inputs.propellant_pair="lox_methane";
   const result=buildValidationRequest(ctx,form,"thermochemistry").thermochemistry;
   assert.equal(result.product_policy,"matched_cho_gas");
@@ -487,13 +498,13 @@ test("station selectors retain selected point and section and reset on record sw
   await h.controller.refresh();h.station("exit");h.thermoPoint("1");
   assert.match(h.container.innerHTML,/data-thermo-stations open/);
   assert.match(h.container.innerHTML,/value="exit" selected/);
-  assert.match(h.container.innerHTML,/value="1" selected>2 · O\/F/);
+  assert.match(h.container.innerHTML,/value="1" selected>2 · 氧燃质量比/);
   assert.match(h.container.innerHTML,/1,300/);
   assert.match(h.container.innerHTML,/本次校核关联的设计记录/);
   assert.doesNotMatch(h.container.innerHTML,/原始诊断与口径/);
   h.record("check-1");await settle();
   assert.match(h.container.innerHTML,/value="chamber" selected/);
-  assert.match(h.container.innerHTML,/value="0" selected>1 · O\/F/);
+  assert.match(h.container.innerHTML,/value="0" selected>1 · 氧燃质量比/);
   h.controller.onLeave();
 });
 

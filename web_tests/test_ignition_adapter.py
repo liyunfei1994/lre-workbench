@@ -24,7 +24,7 @@ class IgnitionAdapterTests(unittest.TestCase):
         source=source_fixture('gg',True)
         setup=ignition_setup(source)
         self.assertFalse(setup['ready'])
-        self.assertTrue(any('煤油' in issue for issue in setup['issues']))
+        self.assertTrue(any('FFSC' in issue for issue in setup['issues']))
         with self.assertRaises(ValueError): normalize_request({'source_job_id':source['id']},source)
         source=source_fixture()
         for fragment in ({'chilldown_job_id':'snapshot'},{'initial_liquid_mass_kg':1},

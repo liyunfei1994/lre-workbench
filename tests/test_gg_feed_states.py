@@ -5,10 +5,10 @@ import unittest
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import thermo
-from core import EngineInputs
-from engine_presets import preset_input_values
-from gg_cycle import GGCycleModel
+import lre_workbench.properties.thermochemistry as thermo
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.application.presets import preset_input_values
+from lre_workbench.legacy.gg_cycle import GGCycleModel
 
 
 @unittest.skipUnless(thermo.CANTERA_AVAILABLE and thermo.COOLPROP_AVAILABLE, "scientific libraries required")

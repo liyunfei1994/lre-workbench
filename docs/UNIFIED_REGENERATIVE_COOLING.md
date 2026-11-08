@@ -4,7 +4,7 @@
 
 ## 1. 本轮解决的重复计算问题
 
-生产计算只有一个沿程冷却内核：[cooling_marching.py / march_regen_circuit](../src/cooling_marching.py)。[CoolingChannel](../src/cooling.py) 直接使用它保存的总吸热、端口压差、出口温度和出口焓。热气侧、供给压力闭合、部件页和曲线消费同一份记录，不允许系统点采用给定压降、另一个后处理模型再产生不同压降和壁温。
+生产计算只有一个沿程冷却内核：[cooling_marching.py / march_regen_circuit](../src/lre_workbench/components/cooling/marching.py)。[CoolingChannel](../src/lre_workbench/components/cooling/model.py) 直接使用它保存的总吸热、端口压差、出口温度和出口焓。热气侧、供给压力闭合、部件页和曲线消费同一份记录，不允许系统点采用给定压降、另一个后处理模型再产生不同压降和壁温。
 
 给定吸热量与压降的预算模式仍供明确的系统预算及历史兼容使用。它用 HEOS 压力—焓状态求出口温度，不用固定 cp 推温；它没有沿程解，不能给出壁温曲线或固定冷却硬件预测。物理沿程模式中的旧 Q、cp、dp 预算输入不控制最终冷却解，其中 dp 可以作为耦合数值初猜，不能当成实际计算压降。旧 `cooling_dp_auto`、`cooling_marching_enable` 兼容字段不再选择另一套物理求解器。
 
@@ -12,7 +12,7 @@
 
 ## 2. 几何、冷却剂与壁面方程
 
-[regen_geometry.py](../src/regen_geometry.py) 使用正式燃烧室/喷管轮廓，保留准确喉部、冷却覆盖边界和实际喷管出口。冷却坐标 `s_m` 随冷却剂流向递增，`x_m` 始终保留发动机轴向坐标；逆流不改变热气物理流向。
+[regen_geometry.py](../src/lre_workbench/components/cooling/geometry.py) 使用正式燃烧室/喷管轮廓，保留准确喉部、冷却覆盖边界和实际喷管出口。冷却坐标 `s_m` 随冷却剂流向递增，`x_m` 始终保留发动机轴向坐标；逆流不改变热气物理流向。
 
 通道几何可以来自明确的轴向表，或喉部宽度按半径缩放的几何假设。通道数、宽、高、肋宽、壁厚均参与校验；非正尺寸、通道宽超过节距、无效覆盖范围、无法解析的几何表直接失败，不回退到另一种几何。沿程变通道数需要明确的分支/集流腔模型，目前拒绝。设计点自动定深只根据入口密度、目标流速、喉部宽度与通道数定尺寸，不代表沿程恒流速，也不暗中截断通道深度。
 
@@ -33,11 +33,11 @@ G = mdot / A_flow
 
 ## 3. 物性与焓基准
 
-[fluid_properties.py](../src/fluid_properties.py) 提供检查后的纯流体 HEOS 状态。每次 p/T、p/h、p/s 求值检查声明温压范围、单相状态、可用熔化线、密度、cp、声速及需要的输运物性。没有完整固相边界证据时保存该限制；声明范围内不等于实验精度已验证。当前通道物理模型只支持单相甲烷，不包含热裂解、积碳、两相流和堵塞。
+[fluid_properties.py](../src/lre_workbench/properties/fluids.py) 提供检查后的纯流体 HEOS 状态。每次 p/T、p/h、p/s 求值检查声明温压范围、单相状态、可用熔化线、密度、cp、声速及需要的输运物性。没有完整固相边界证据时保存该限制；声明范围内不等于实验精度已验证。当前通道物理模型只支持单相甲烷，不包含热裂解、积碳、两相流和堵塞。
 
 冷却剂物性来自体相状态，不以超出数据库温区的冷壁温度强行调用 HEOS。这样避免了近壁物性外推，但也没有证明体相关联式对强物性梯度或拟临界换热可靠，仍须独立对照。
 
-纯流体 EOS 焓与 Cantera 化学焓的对齐在 [thermo.py](../src/thermo.py) 和 `fluid_properties.ideal_reference_enthalpy` 中完成：
+纯流体 EOS 焓与 Cantera 化学焓的对齐在 [thermo.py](../src/lre_workbench/properties/thermochemistry.py) 和 `fluid_properties.ideal_reference_enthalpy` 中完成：
 
 ```text
 h_chemical(T,p) = h_Cantera,ideal,pure(Tref)
@@ -47,15 +47,15 @@ h_HEOS,ideal(Tref) = h_HEOS(Tref,pref) − h_HEOS,residual(Tref,pref)
 
 甲烷/氧采用 298.15 K 参考温度；有限参考压力只用于求 HEOS 状态，其残余焓已经显式扣除。不能把有限压力的 HEOS 总焓直接当理想参考焓，也不能把 HEOS 绝对焓零点当化学生成焓。通道保存化学基准的 h/h0，并另存 HEOS 原始焓用于可追溯检查。
 
-新构造的 [EngineInputs](../src/core.py) 默认 `methane_thermo_dataset="gri30_highT"`。旧方案中显式保存的 `gri30` 不自动迁移，记录显示实际使用数据。更换热化学数据不改变当前燃气的理想气体混合物假设，也不免除逐物种温区审计。CEA 对照、HEOS/REFPROP 纯流体对照与混合燃气 EOS 验证是不同问题，不能互相替代。
+新构造的 [EngineInputs](../src/lre_workbench/domain/models.py) 默认 `methane_thermo_dataset="gri30_highT"`。旧方案中显式保存的 `gri30` 不自动迁移，记录显示实际使用数据。更换热化学数据不改变当前燃气的理想气体混合物假设，也不免除逐物种温区审计。CEA 对照、HEOS/REFPROP 纯流体对照与混合燃气 EOS 验证是不同问题，不能互相替代。
 
 ## 4. 热气与冷却在循环内部闭合
 
-[heated_nozzle.py](../src/heated_nozzle.py) 使用从主室冻结组成的理想混合物准一维热气模型，在共同几何上扣除各单元壁面热量；同时求流动状态，不再把全部冷却热量先从主室集中扣除后又沿喷管扣除。物理沿程模式的主室化学平衡接口不重复扣除同一笔冷却热量。预算模式保留明确的集中热汇近似，不能与沿程结果混用。
+[heated_nozzle.py](../src/lre_workbench/components/nozzles/heated.py) 使用从主室冻结组成的理想混合物准一维热气模型，在共同几何上扣除各单元壁面热量；同时求流动状态，不再把全部冷却热量先从主室集中扣除后又沿喷管扣除。物理沿程模式的主室化学平衡接口不重复扣除同一笔冷却热量。预算模式保留明确的集中热汇近似，不能与沿程结果混用。
 
 热气模型通过面积和累计热量的连续表示处理亚声速、临界和超声速段，求有热损时的临界位置，不强制声速位置必在几何喉部。记录区分几何喉部状态与临界声速状态；独立动量积分、临界正则性和临界展开敏感性仍须通过。它是系统级流动模型，不是经过验证的跨声速 CFD。
 
-[regen_coupling.py / close_regen_cycle](../src/regen_coupling.py) 将冷却总压差、出口状态、热气恢复温度、热气状态向量、逐单元热量和设计点喉面积反馈到同一次循环求值。验收不只比较总 Q，还检查局部热量分布和热气反馈状态，防止不同沿程分布碰巧具有相同总吸热而被误判闭合。实际容差和迭代历程随 profile 保存，界面只展示这些值。
+[regen_coupling.py / close_regen_cycle](../src/lre_workbench/systems/regenerative.py) 将冷却总压差、出口状态、热气恢复温度、热气状态向量、逐单元热量和设计点喉面积反馈到同一次循环求值。验收不只比较总 Q，还检查局部热量分布和热气反馈状态，防止不同沿程分布碰巧具有相同总吸热而被误判闭合。实际容差和迭代历程随 profile 保存，界面只展示这些值。
 
 热启动只复用附近已闭合状态作为初猜，全部方程和验收仍重新执行。未接受的压力试探独立保存，不形成物理解或曲线；尝试次数不能代替已通过的物理迭代记录。达到最大迭代次数仍未闭合时失败，不能返回“成功”结果。
 
@@ -77,7 +77,7 @@ h_HEOS,ideal(Tref) = h_HEOS(Tref,pref) − h_HEOS,residual(Tref,pref)
 | `validity` | 物性域、温限等当前检查状态，含未验证换热关联式的边界 |
 | `hot_side_coupling` / `hot_side_profile` | 已记录的耦合残差、容差、试探历程和同源热气侧结果 |
 
-[Web 冷却显示](../webapp/static/cooling.js) 和桌面 [chamber_design.py](../src/chamber_design.py)、[ui_chamber_design.py](../src/ui_chamber_design.py) 只读保存 profile。压力、温度、h/h0、壁温、热流曲线共享冷却剂弧长坐标；缺值断线，不补点、不重算。历史无 profile 或预算模式显示“无沿程解”，不伪造曲线。修改几何、材料或输入后需要完整循环重算，取消“只回写压降”的操作。
+[Web 冷却显示](../webapp/static/cooling.js) 和桌面 [chamber_design.py](../src/lre_workbench/components/chambers/design.py)、[ui_chamber_design.py](../src/lre_workbench/desktop/chamber_design.py) 只读保存 profile。压力、温度、h/h0、壁温、热流曲线共享冷却剂弧长坐标；缺值断线，不补点、不重算。历史无 profile 或预算模式显示“无沿程解”，不伪造曲线。修改几何、材料或输入后需要完整循环重算，取消“只回写压降”的操作。
 
 桌面热结构筛查只消费已保存壁温与载荷，材料对比明确为固定热载荷对比，不再为每个候选材料另求热场。相关应力/寿命估计不是结构验证；修改材料后的热反馈需要完整循环重新计算。本轮系统计算不执行 CFD/FEA，既有外部 CFD 协同入口不属于本模型验证范围。
 
@@ -85,7 +85,7 @@ Web 系统校核范围版本 3 同时检查完整冷却剖面的水力有效性�
 
 [webapp/throttle.py](../webapp/throttle.py) 从不可变的源设计记录提取冷却硬件；检查模型版本、输入与几何一致性、端口状态、逐单元能量和动量、局部损失、热侧同源记录及耦合验收，不能只读取一个保存的 pass 字样。缺少新模型证据的旧记录必须重新计算设计点，不能直接建立新的固定硬件基准。
 
-压力网络中的设计损失预算与固定 K 阻力属于不同模式；固定 K 后按实际流量和密度求压差。额外调节阀损失与基础损失分列。求得所需泵出口压力，不证明固定泵提供该压力；没有泵/涡轮地图和阀门特性时，不宣称获得实机节流包线。参见 [steady_network.py](../src/steady_network.py) 的硬件与压力证据契约。
+压力网络中的设计损失预算与固定 K 阻力属于不同模式；固定 K 后按实际流量和密度求压差。额外调节阀损失与基础损失分列。求得所需泵出口压力，不证明固定泵提供该压力；没有泵/涡轮地图和阀门特性时，不宣称获得实机节流包线。参见 [steady_network.py](../src/lre_workbench/systems/steady_network.py) 的硬件与压力证据契约。
 
 ## 6. 已实际通过的局部检查
 

@@ -5,9 +5,9 @@ import unittest
 
 import numpy as np
 
-from shutdown_rotor import ShutdownRotorModel, default_settings, validate_settings
-from feed_network import evaluate_pump_map
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.operations.shutdown_rotor import ShutdownRotorModel, default_settings, validate_settings
+from lre_workbench.operations.feed_network import evaluate_pump_map
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 
 
 class ShutdownRotorTests(unittest.TestCase):

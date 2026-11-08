@@ -34,13 +34,9 @@ METRICS = {
     "mdot_total_kg_s": ("mdot_total_kg_s", 1, "kg/s", "总质量流量"),
     "mdot_fuel_kg_s": ("mdot_fuel_kg_s", 1, "kg/s", "燃料流量"),
     "mdot_ox_kg_s": ("mdot_ox_kg_s", 1, "kg/s", "氧化剂流量"),
-    "gg_mdot_kg_s": ("gg_mdot_kg_s", 1, "kg/s", "燃气发生器流量"),
     "chamber_temperature_K": ("chamber_temperature_K", 1, "K", "主燃烧室温度"),
-    "gg_T_combustion_K": ("gg_T_combustion_K", 1, "K", "燃气发生器温度"),
-    "gg_turbine_exhaust_T_K": ("gg_turbine_exhaust_T_K", 1, "K", "GG 涡轮排气温度"),
     "lox_pump_out_pressure_Pa": ("lox_pump_out_pressure_Pa", 1, "Pa", "氧泵出口压力"),
     "fuel_pump_out_pressure_Pa": ("fuel_pump_out_pressure_Pa", 1, "Pa", "燃料泵出口压力"),
-    "gg_pressure_Pa": ("gg_pressure_Pa", 1, "Pa", "GG 压力"),
     "ox_pump_power_W": ("ox_pump_power_MW", 1e6, "W", "氧泵功率"),
     "fuel_pump_power_W": ("fuel_pump_power_MW", 1e6, "W", "燃料泵功率"),
     "turbine_power_W": ("turbine_power_MW", 1e6, "W", "涡轮总功率"),
@@ -126,15 +122,13 @@ def validate_experiment_request(request):
         return {}
     request = _object(request, "试验检查请求", {"role", "conditions", "measurements"})
     role = _choice(request.get("role"), ("holdout", "calibration"), "role")
-    conditions = _object(request.get("conditions", {}), "试验工况", set(CONDITIONS) | {"propellant_pair", "cycle_type", "gg_layout"})
+    conditions = _object(request.get("conditions", {}), "试验工况", set(CONDITIONS) | {"propellant_pair", "cycle_type"})
     normalized = {}
     for key, value in conditions.items():
         if key == "propellant_pair":
-            normalized[key] = _choice(value, ("lox_methane", "lox_kerosene"), key)
+            normalized[key] = _choice(value, ("lox_methane",), key)
         elif key == "cycle_type":
-            normalized[key] = _choice(value, ("ffsc", "gg"), key)
-        elif key == "gg_layout":
-            normalized[key] = _choice(value, ("single_shaft", "dual_shaft"), key)
+            normalized[key] = _choice(value, ("ffsc",), key)
         else:
             normalized[key] = _quantity(value, CONDITIONS[key], key, condition=True)
     measurements = request.get("measurements", [])
@@ -161,7 +155,7 @@ def _parts(source):
 
 def _source_checks(source, summary):
     from webapp.solver import EngineInputs  # initializes the shared src import path
-    from convergence import numerical_convergence
+    from lre_workbench.solvers.convergence import numerical_convergence
     numerical = numerical_convergence(source)
     residual = numerical["residual"]
     checks = [{"id": "numerical_convergence", "label": "源计算数值收敛", "status":
@@ -204,6 +198,13 @@ def _closure(key, label, left, right, unit, *, atol=1e-6, rtol=1e-6):
 
 
 def conservation_checks(source_result):
+    from webapp.design_scope import require_supported_source
+    try:
+        require_supported_source({"result": source_result})
+    except ValueError as exc:
+        return {"kind": "conservation", "status": "unavailable", "checks": [
+            {"id": "cycle_identity", "label": "源循环模型", "status": "unavailable", "reason": str(exc)}],
+            "energy_balance": None, "notes": [str(exc)]}
     inputs, summary, components, states = _parts(source_result)
     checks = _source_checks(source_result, summary)
     def val(key, factor=1):
@@ -216,17 +217,7 @@ def conservation_checks(source_result):
     total_flow, fuel, ox = (val(k) for k in ("mdot_total_kg_s", "mdot_fuel_kg_s", "mdot_ox_kg_s"))
     flow("total_mass", "总流量 = 燃料 + 氧化剂", total_flow, total(fuel, ox))
     cycle = inputs.get("cycle_type")
-    if cycle == "gg":
-        gg_fuel, gg_ox, gg, main = (val(k) for k in ("gg_mdot_fuel_kg_s", "gg_mdot_ox_kg_s", "gg_mdot_kg_s", "mdot_chamber_kg_s"))
-        flow("gg_mass", "GG 流量 = GG 燃料 + GG 氧化剂", gg, total(gg_fuel, gg_ox))
-        flow("chamber_gg_split", "总流量 = 主室通流 + GG 通流", total_flow, total(main, gg))
-        flow("fuel_split", "燃料总流量 = 主路冷却流量 + GG 燃料", fuel, total(val("mdot_coolant_kg_s"), gg_fuel))
-        eta = val("gg_mech_efficiency")
-        if eta is not None and not 0 < eta <= 1:
-            checks.append({"id": "mechanical_efficiency", "label": "GG 机械效率范围", "status": "fail", "value": eta})
-            eta = None
-        turbine = val("gg_turbine_power_MW", 1e6)
-    elif cycle == "ffsc":
+    if cycle == "ffsc":
         flow("fuel_split", "燃料总流量 = 两预燃室燃料流量之和", fuel,
              total(val("mdot_fuel_to_ox_preburner_kg_s"), val("mdot_fuel_to_fuel_preburner_kg_s")))
         flow("ox_split", "氧化剂总流量 = 两预燃室氧化剂流量之和", ox,
@@ -240,7 +231,7 @@ def conservation_checks(source_result):
     pumps = total(val("ox_pump_power_MW", 1e6), val("fuel_pump_power_MW", 1e6))
     checks.append(_closure("shaft_power", "主轴涡轮可用功率 = 主泵功率", turbine * eta if turbine is not None and eta is not None else None,
                            pumps, "W", atol=1, rtol=1e-3))
-    if cycle == "ffsc" or (cycle == "gg" and inputs.get("gg_layout") == "dual_shaft"):
+    if cycle == "ffsc":
         for side, label in (("ox", "氧侧"), ("fuel", "燃料侧")):
             power = val(f"{side}_turbine_power_MW", 1e6)
             checks.append(_closure(f"{side}_shaft_power", f"{label}轴可用涡轮功率 = 泵功率",
@@ -252,7 +243,7 @@ def conservation_checks(source_result):
         component_power = _finite(outputs.get("power_W")) if isinstance(outputs, dict) else None
         checks.append(_closure(f"{key}_reported_power", f"{label}部件功率与汇总一致性",
                                component_power, val(f"{key}_power_MW", 1e6), "W", atol=1, rtol=1e-6))
-    from gas_handoff import capture_gas_handoff
+    from lre_workbench.integrations.gas_handoff import capture_gas_handoff
     # Recompute from immutable flow states and the verified saved mechanism,
     # rather than trusting a cached pass flag in the source result.
     handoff = capture_gas_handoff(source_result)
@@ -264,7 +255,7 @@ def conservation_checks(source_result):
     checks.extend(element_rows)
     energy_balance = None
     if cycle == "ffsc":
-        from steady_closure import audit_energy
+        from lre_workbench.systems.steady_closure import audit_energy
         # Recompute from saved states and outputs; do not trust the saved ledger,
         # pass flag, or summary ratios. Legacy records lack the needed evidence.
         energy_balance = audit_energy(states, components)
@@ -284,7 +275,7 @@ def conservation_checks(source_result):
                        "reason": "缺少所有边界的统一参考焓、排气动能、壁面热损失和外部增压泵功，不能把轴功率平衡当成系统能量守恒。"})
     return {"kind": "conservation", "status": _status(checks), "checks": checks, "energy_balance": energy_balance,
             "notes": ["流量闭合采用绝对容差 1e-6 kg/s + 相对容差 1e-6；轴功率采用 1 W + 0.1%，属于数值检查政策。",
-                      "GG 功率含记录的机械效率；FFSC 按当前模型的轴功率定义。外部增压/补压泵未纳入主轴平衡。",
+                      "按 FFSC 当前模型的双轴功率定义。外部增压/补压泵未纳入主轴平衡。",
                       "FFSC 能量分项另按 10 W + 1e-5 × 最大绝对能量项重新核算；内部再生热与主轴功不重复计入边界。",
                       "这些是同一计算记录的内部一致性检查，不是独立试验验证。"]}
 
@@ -600,8 +591,6 @@ def experiment_checks(source_result, experiment):
     checks = _source_checks(source_result, summary)
     conditions = experiment["conditions"]
     required = {"propellant_pair", "cycle_type", "pc", "of_ratio", "fuel_inlet_temp", "ox_inlet_temp"}
-    if inputs.get("cycle_type") == "gg" or conditions.get("cycle_type") == "gg":
-        required.add("gg_layout")
     if any(m["metric"] in ("thrust_N", "Isp_s") for m in experiment["measurements"]):
         required.add("ambient_pressure")
     condition_checks = []

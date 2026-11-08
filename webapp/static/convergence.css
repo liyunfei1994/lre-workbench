@@ -76,6 +76,19 @@
 .cv-table-wrap tbody tr:nth-child(even) { background:#fafcfd; }
 .cv-notice,.cv-empty { border-left:3px solid #a5b9c8; background:#f3f6f9; padding:12px 14px; font-size:11px; line-height:1.9; color:#6f8392; margin:0; }
 .cv-notice { color:#846b41; border-color:#b99a62; background:#fcf8ef; }
+.cv-diagnostics { padding:14px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+.cv-diagnostic-summary { padding:12px 14px; background:#f0f5f8; border-left:3px solid #65859c; }
+.cv-diagnostic-summary.cv-diagnostic-failed { background:#fff4ee; border-color:#ac674f; }
+.cv-diagnostic-summary h4 { margin:0 0 6px; color:#294b61; font-size:15px; line-height:1.6; }
+.cv-diagnostic-summary p { margin:4px 0; font-size:14px; line-height:1.8; color:#516674; overflow-wrap:anywhere; }
+.cv-diagnostics .cv-description,.cv-diagnostics .cv-values summary,.cv-diagnostics .cv-method-metrics span { font-size:14px; color:#526b7c; }
+.cv-diagnostics .cv-method-metrics { margin:0; padding:4px 0; }
+.cv-diagnostics .cv-method-metrics strong { font-size:19px; }
+.cv-diagnostics .cv-table-wrap table { font-size:14px; }
+.cv-diagnostics .cv-values { padding-inline:0; }
+.cv-diagnostics .cv-table-wrap td { max-width:540px; white-space:normal; overflow-wrap:anywhere; text-align:left; }
+.cv-diagnostics[aria-label="初始化失败诊断"] .cv-table-wrap th { text-align:left; white-space:normal; }
+.cv-diagnostic-missing { margin:12px; }
 @container (max-width:1000px) { .cv-layers { grid-template-columns:repeat(2,minmax(0,1fr)); } .cv-layer:nth-child(2) { border-right:0; } .cv-layer:nth-child(-n+2) { border-bottom:1px solid #dce4eb; } }
 @container (max-width:650px) { .cv-outer-grid { grid-template-columns:1fr; } .cv-layers { grid-template-columns:1fr; } .cv-layer { border-right:0; border-bottom:1px solid #dce4eb; } .cv-layer:last-child { border-bottom:0; } }
 @media print { .cv-run { break-inside:avoid; } .cv-values .cv-table-wrap { max-height:none; } }

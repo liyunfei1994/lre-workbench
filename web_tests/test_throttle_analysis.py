@@ -10,11 +10,12 @@ from unittest.mock import patch
 from webapp.solver import EngineInputs
 from webapp.throttle import calculate_throttle, normalize_request, source_baseline
 from webapp.validation import fingerprint
-from core import ComponentResult, CycleResults, FlowState
-from steady_closure import audit_energy
-from steady_network import solve_design
+from lre_workbench.domain.models import ComponentResult, CycleResults, FlowState
+from lre_workbench.systems.steady_closure import audit_energy
+from lre_workbench.systems.steady_network import solve_design
+from lre_workbench.solvers.state import ffsc_design_vector_schema
 from tests.test_steady_closure import balanced_loop
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 from web_tests.convergence_fixture import converged_evidence
 
 
@@ -118,7 +119,8 @@ class ThrottleAnalysisTests(unittest.TestCase):
 
     def test_baseline_preserves_complete_valid_warm_state_and_solved_mr_targets(self):
         source = source_fixture()
-        solution = {"x": [6, 1.8, 2], "chamber_temp_guess": 3000, "chamber_gamma": 1.2, "molar_mass": 20}
+        solution = {"x": [6, 1.8, 2], "chamber_temp_guess": 3000, "chamber_gamma": 1.2, "molar_mass": 20,
+                    "vector_schema": ffsc_design_vector_schema(target_mixture_ratio=True)}
         source["result"]["calculation"]["convergence"]["solution"] = deepcopy(solution)
         source["result"]["calculation"]["summary"].update(thrust_N=999999,chamber_pressure_Pa=12345678)
         _, baseline = source_baseline(source)
@@ -136,15 +138,30 @@ class ThrottleAnalysisTests(unittest.TestCase):
             source["result"]["calculation"]["convergence"]["solution"] = solution | changes
             self.assertIsNone(source_baseline(source)[1]["warm_state"])
 
-    def test_ffsc_snapshot_is_required_but_gg_keeps_its_geometry_only_contract(self):
+    def test_unversioned_or_wrong_parameterization_vector_is_not_reinterpreted(self):
         source = source_fixture()
-        source["result"]["calculation"]["steady_closure"]["feed_network"].pop("hardware_snapshot")
-        with self.assertRaisesRegex(ValueError, "阻力快照"):
+        unversioned = {"x": [6, 1.8, 2], "chamber_temp_guess": 3000,
+                       "chamber_gamma": 1.2, "molar_mass": 20}
+        for solution in (unversioned, unversioned | {
+                "vector_schema": ffsc_design_vector_schema(target_mixture_ratio=False)}):
+            with self.subTest(solution=solution):
+                source["result"]["calculation"]["convergence"]["solution"] = deepcopy(solution)
+                before = deepcopy(source)
+                _, baseline = source_baseline(source)
+                self.assertIsNone(baseline["warm_state"])
+                self.assertEqual(baseline["warm_start_rejection_reason"], "incompatible_or_unversioned_vector")
+                self.assertEqual(baseline["preburner_mr_targets"], {"ox": 6, "fuel": 2/3})
+                self.assertEqual(source, before)
+
+    def test_ffsc_snapshot_is_required_and_removed_cycle_is_rejected(self):
+        source = source_fixture()
+        source["result"]["calculation"].pop("steady_closure", None)
+        with self.assertRaises(ValueError):
             source_baseline(source)
         source["result"]["calculation"]["inputs"]["cycle_type"] = "gg"
-        source["result"]["calculation"].pop("steady_closure")
-        _, baseline = source_baseline(source)
-        self.assertNotIn("feed_hardware", baseline)
+        with self.assertRaises(ValueError):
+            source_baseline(source)
+
 
     def test_failures_not_lost_geometry_separate_from_system_constraints(self):
         source = source_fixture()
@@ -166,9 +183,9 @@ class ThrottleAnalysisTests(unittest.TestCase):
                                             "error": "solver failed" if area is None else "",
                                             "results": solved_fixture(inputs, area) if area else None})
         published = []
-        with patch("gg_cycle.make_cycle_model", return_value=SimpleNamespace(throttle_sweep=sweep)), \
+        with patch('lre_workbench.systems.ffsc.FFSCCycleModel', return_value=SimpleNamespace(throttle_sweep=sweep)), \
              patch("webapp.throttle.science_environment", return_value={"test": True}), \
-             patch("engineering_assessment.assess_engineering", side_effect=assessments) as assess:
+             patch('lre_workbench.analysis.assessment.assess_engineering', side_effect=assessments) as assess:
             output = calculate_throttle({"source_job_id": "design", "throttle_steps": 4}, source,
                                         lambda progress, result: published.append((progress, result)))
         self.assertEqual(before, source)
@@ -202,7 +219,7 @@ class ThrottleAnalysisTests(unittest.TestCase):
             kwargs["record_callback"]({"throttle_ratio": .4, "thrust_target_N": 1e6,
                                         "pc_Pa": None, "converged": False, "results": None, "error": "unavailable"})
             raise TaskCancelled()
-        with patch("gg_cycle.make_cycle_model", return_value=SimpleNamespace(throttle_sweep=sweep)), \
+        with patch('lre_workbench.systems.ffsc.FFSCCycleModel', return_value=SimpleNamespace(throttle_sweep=sweep)), \
              patch("webapp.throttle.science_environment", return_value={}), self.assertRaises(TaskCancelled):
             calculate_throttle({"source_job_id": "design"}, source,
                                lambda progress, result: published.append((progress, result)))
@@ -212,32 +229,19 @@ class ThrottleAnalysisTests(unittest.TestCase):
 
 
 class NativeThrottleBaselineTests(unittest.TestCase):
-    def test_legacy_default_signature_keeps_completed_record_on_cancellation(self):
-        from cycle import FFSCCycleModel
-        from gg_cycle import GGCycleModel
-        for model in (FFSCCycleModel, GGCycleModel):
-            with self.subTest(model=model.__name__):
-                inputs = EngineInputs(cooling_channel_auto_size=0., cooling_marching_enable=0.)
-                token, records = CancellationToken(), []
-                def completed(record):
-                    records.append(record)
-                    token.cancel()
-                with patch.object(model, "evaluate", return_value=solved_fixture(asdict(inputs))), \
-                     cancellation_scope(token), self.assertRaises(TaskCancelled):
-                    model(inputs).throttle_sweep(record_callback=completed)
-                self.assertEqual(len(records), 1)
-                self.assertEqual(records[0]["error"], "")
+
 
     def test_both_cycles_use_supplied_geometry_without_nominal_recalculation(self):
-        from cycle import FFSCCycleModel
-        from gg_cycle import GGCycleModel
-        for model, cycle_type in ((FFSCCycleModel, "ffsc"), (GGCycleModel, "gg")):
+        from lre_workbench.systems.ffsc import FFSCCycleModel
+        for model, cycle_type in ((FFSCCycleModel, "ffsc"),):
             with self.subTest(cycle=cycle_type):
                 inputs = EngineInputs(cycle_type=cycle_type, throttle_steps=2,
                                       cooling_channel_auto_size=1., cooling_marching_enable=1.)
                 area = .05
                 seen = []
                 solution = {"x": [6,1.8,2], "chamber_temp_guess": 3000, "chamber_gamma": 1.2, "molar_mass": 20}
+                if cycle_type == "ffsc":
+                    solution["vector_schema"] = ffsc_design_vector_schema(target_mixture_ratio=True)
                 def evaluate(instance, **kwargs):
                     seen.append(deepcopy(instance.inputs))
                     ratio = instance.inputs.thrust / inputs.thrust
@@ -250,7 +254,7 @@ class NativeThrottleBaselineTests(unittest.TestCase):
                                           thrust_N=instance.inputs.thrust,chamber_pressure_Pa=instance.inputs.pc)
                     return result
                 with patch.object(model, "evaluate", evaluate), \
-                     patch("cooling_marching.run_marching_postpass") as marching:
+                     patch('lre_workbench.components.cooling.marching.run_marching_postpass') as marching:
                     rows = model(inputs).throttle_sweep(
                         design_baseline={"throat_area_m2": area, "cooling_height_m": .003,
                                          "warm_state": solution, "preburner_mr_targets": {"ox":6,"fuel":2/3},

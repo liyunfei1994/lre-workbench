@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cooling import CoolingChannel, resolve_channel_height, resolve_inlet_velocity_height
-from cooling_marching import CoolantMarchError
-from core import ValidationError
-from fluid_properties import state_tp
+from lre_workbench.components.cooling.model import CoolingChannel, resolve_channel_height, resolve_inlet_velocity_height
+from lre_workbench.components.cooling.marching import CoolantMarchError
+from lre_workbench.domain.models import ValidationError
+from lre_workbench.properties.fluids import state_tp
 
 
 BASE = dict(mdot_fuel=166.3, t_inlet=122.35, p_inlet=74.89e6,
@@ -73,18 +73,18 @@ class ChannelSizingTests(unittest.TestCase):
                             results[1].outputs["coolant_inlet_velocity_ms"])
 
     def test_explicit_channel_table_takes_precedence_over_auto_sizing(self):
-        from chamber_design import ChannelRow
+        from lre_workbench.components.chambers.design import ChannelRow
         rows = [ChannelRow(anchor="injector", w_mm=2.372, h_mm=8.),
                 ChannelRow(anchor="throat", w_mm=1.5, h_mm=8.),
                 ChannelRow(anchor="exit", w_mm=8.79, h_mm=8.)]
-        with patch("cooling.resolve_inlet_velocity_height", side_effect=AssertionError("must not resize")):
+        with patch('lre_workbench.components.cooling.model.resolve_inlet_velocity_height', side_effect=AssertionError("must not resize")):
             _, result = CoolingChannel(**BASE, channel_table=rows, auto_size=True,
                 sizing_reference="coolant_inlet_velocity", target_velocity_ms=100).evaluate()
         self.assertEqual(result.profile["channel_sizing"]["status"], "prescribed_channel_table")
         self.assertTrue(all(n["height_m"] == .008 for n in result.profile["geometry"]["nodes"]))
 
     def test_full_march_must_verify_the_sized_inlet_velocity(self):
-        with patch("cooling.resolve_inlet_velocity_height", return_value=(.008, {})):
+        with patch('lre_workbench.components.cooling.model.resolve_inlet_velocity_height', return_value=(.008, {})):
             with self.assertRaisesRegex(ValueError, "完整沿程计算不一致"):
                 CoolingChannel(**BASE, sizing_reference="coolant_inlet_velocity",
                     target_velocity_ms=20.).evaluate()
