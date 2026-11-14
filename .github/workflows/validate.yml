@@ -57,7 +57,10 @@ jobs:
       - name: Run web API and data contract tests
         run: .\.venv\Scripts\python.exe -m unittest discover -s web_tests -p "test_*.py" -v
       - name: Run browser module tests
-        run: node --test web_tests/*.mjs
+        run: |
+          # Schema checks spawned by Node need the installed project dependencies.
+          $env:PATH = "$env:GITHUB_WORKSPACE\.venv\Scripts;$env:PATH"
+          node --test web_tests/*.mjs
       - name: Capture environment
         if: always()
         run: .\.venv\Scripts\python.exe scripts/bootstrap.py --diagnose
