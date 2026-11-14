@@ -19,6 +19,16 @@ def calculation():
 
 
 class OperatingThrottlePhysicsTests(unittest.TestCase):
+    def test_rejects_segmented_eos_baseline(self):
+        source = calculation()
+        source['inputs'].update(gas_eos='Peng-Robinson', gas_species_policy='pr_supported_v1')
+        source['states']['main_chamber']['metadata'] = {'model': {'eos': 'ideal-gas'}}
+        setup = configuration(source)
+        self.assertFalse(setup['ready'])
+        self.assertIn('仅支持理想燃气', setup['issues'][0])
+        with self.assertRaisesRegex(ValueError, '仅支持理想燃气'):
+            calculate(source, dict(throttle_min=.9, throttle_max=1., throttle_steps=5))
+
     def test_nominal_reproduces_actual_reference_and_all_balances_close(self):
         source = calculation()
         source["inputs"].update(thrust=999999., pc=99e6, use_target_preburner_temp=1,

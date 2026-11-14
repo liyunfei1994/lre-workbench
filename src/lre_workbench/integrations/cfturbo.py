@@ -4,8 +4,9 @@ cfturbo_export.py
 把数字样机求解结果里的四个叶轮机械（液氧泵 / 甲烷泵 / 富氧涡轮 / 富燃涡轮）
 设计点，整理成一份 *CFTurbo 录入参考* 的 Markdown 文档。
 
-所有量纲已换算到 CFTurbo 的常用显示单位：
-  · 体积流量 Q [m³/h]   · 温度 [°C]   · 压力 [bar]   · 功率 [kW]
+报告中的压力统一使用 MPa；录入时须核对目标字段的单位设置。
+其余量纲采用以下工程单位：
+  · 体积流量 Q [m³/h]   · 温度 [°C]   · 压力 [MPa]   · 功率 [kW]
   · 摩尔质量 M [kg/mol]（注意：CFTurbo 是 kg/mol，不是 kg/kmol！）
   · 涡轮总态口径只采用组件保存的显式 state_basis 声明
 
@@ -61,16 +62,27 @@ def _show_missing(text: str) -> str:
     return re.sub(r"(?<![\w.])nan(?![\w.])", "未记录／待确认", text)
 
 
+def _pressure_pa(outputs: dict, quantity: str) -> float:
+    """Read SI pressure first, with unit-aware fallbacks for saved legacy results."""
+    for suffix, scale in (("Pa", 1.0), ("MPa", 1e6), ("bar", 1e5)):
+        value = _g(outputs, f"{quantity}_{suffix}")
+        if math.isfinite(value):
+            return value * scale
+    return float("nan")
+
+
 def _pump_block(title: str, fluid_cn: str, coolprop_name: str, molar_kg_per_mol: float,
                 o: dict, T_in_K: float, mdot_kg_s: float) -> str:
     Q_m3h = _g(o, "volume_flow_m3h")
     if not math.isfinite(Q_m3h):
         Q_m3h = _g(o, "volume_flow_m3s") * 3600.0
-    p_in_bar = _g(o, "p_in_bar")
-    p_out_bar = _g(o, "p_out_bar")
+    p_in_pa = _pressure_pa(o, "p_in")
+    p_in_mpa = p_in_pa / 1e6
+    p_out_mpa = _pressure_pa(o, "p_out") / 1e6
+    delta_p_mpa = _pressure_pa(o, "delta_p") / 1e6
     T_out_K = _g(o, "T_out_K")
     npsha_m = _g(o, "npsh_available_m")   # pump.py 已按 (p_in-p_vap)/(ρ·g) 报出压头[m]
-    pr = _fluid_props(coolprop_name, T_in_K, p_in_bar * 1e5)
+    pr = _fluid_props(coolprop_name, T_in_K, p_in_pa)
 
     lines = [
         f"### {title}",
@@ -83,10 +95,10 @@ def _pump_block(title: str, fluid_cn: str, coolprop_name: str, molar_kg_per_mol:
         f"| Mass flow ṁ | {mdot_kg_s:.1f} | kg/s |",
         f"| Volume flow Q | {Q_m3h:.0f} | m³/h |",
         f"| 入口密度参考扬程 Href（非已校正总扬程） | {_g(o,'head_m'):.0f} | m |",
-        f"| 节点压升 Δp | {_g(o,'delta_p_bar'):.1f} | bar |",
+        f"| 节点压升 Δp | {delta_p_mpa:.3f} | MPa |",
         f"| Revolutions n | {_g(o,'nr_rpm'):.0f} | /min |",
         f"| Stages（级数） | {_g(o,'n_stages'):.0f} | — |",
-        f"| 入口节点压力 p | {p_in_bar:.2f} | bar |",
+        f"| 入口节点压力 p | {p_in_mpa:.3f} | MPa |",
         f"| 入口节点温度 T | {T_in_K - _K:.2f} | °C |",
         f"| 系统泵效率 η（口径待核对） | {_g(o,'eta'):.3f} | — |",
         "",
@@ -96,7 +108,7 @@ def _pump_block(title: str, fluid_cn: str, coolprop_name: str, molar_kg_per_mol:
         "",
         "| | 入口 | 出口 |",
         "|---|---|---|",
-        f"| 压力 [bar] | {p_in_bar:.2f} | {p_out_bar:.1f} |",
+        f"| 压力 [MPa] | {p_in_mpa:.3f} | {p_out_mpa:.3f} |",
         f"| 温度 [°C] | {T_in_K - _K:.2f} | {T_out_K - _K:.2f} |",
         f"| 温度 [K] | {T_in_K:.1f} | {T_out_K:.1f} |",
         f"| 密度 [kg/m³] | {_g(o,'rho_in_kgm3'):.1f} | {_g(o,'rho_out_kgm3'):.1f} |",
@@ -118,7 +130,7 @@ def _pump_block(title: str, fluid_cn: str, coolprop_name: str, molar_kg_per_mol:
     # 流体物性（CFTurbo Fluid 录入）
     lines += [
         "",
-        f"**{fluid_cn} 流体物性（按保存入口状态用当前 CoolProp 查询，@ 入口 {T_in_K - _K:.2f} °C / {p_in_bar:.2f} bar）**",
+        f"**{fluid_cn} 流体物性（按保存入口状态用当前 CoolProp 查询，@ 入口 {T_in_K - _K:.2f} °C / {p_in_mpa:.3f} MPa）**",
         "本组为导出时的物性查询，不是原计算记录保存的物性快照；与 CFturbo 中所选物性模型及版本核对后使用。",
         "",
         "| 字段 | 值 | 单位 |",
@@ -132,7 +144,7 @@ def _pump_block(title: str, fluid_cn: str, coolprop_name: str, molar_kg_per_mol:
             f"| Heat capacity cp | {pr['cp']:.1f} | J/(kg·K) |",
             f"| Thermal conductivity λ | {pr['lam']:.5f} | W/(m·K) |",
             f"| **Molar weight M** | {molar_kg_per_mol:.6f} | **kg/mol** |",
-            f"| Vapor pressure pv | {pr['pv']/1e5:.5f} | bar |",
+            f"| Vapor pressure pv | {pr['pv']/1e6:.6g} | MPa |",
         ]
     else:
         lines.append("| 物性 | 未记录／待确认（物性库、工质或入口工况不可用） | — |")
@@ -142,8 +154,8 @@ def _pump_block(title: str, fluid_cn: str, coolprop_name: str, molar_kg_per_mol:
 
 def _turbine_block(title: str, gas_cn: str, o: dict) -> str:
     Tt_in_C = _g(o, "T_in_K") - _K
-    pt_in_bar = _g(o, "p_in_Pa") / 1e5
-    p_out_bar = _g(o, "p_out_Pa") / 1e5
+    pt_in_mpa = _pressure_pa(o, "p_in") / 1e6
+    p_out_mpa = _pressure_pa(o, "p_out") / 1e6
     mw_kmol = _g(o, "molar_mass_in")
     if mw_kmol <= 0:
         mw_kmol = float("nan")
@@ -167,9 +179,9 @@ def _turbine_block(title: str, gas_cn: str, o: dict) -> str:
         f"| Mass flow ṁ（本涡轮实际流量） | {_g(o,'mass_flow_kgs'):.3f} | kg/s |",
         f"| {ratio_label} | {_g(o,'turbine_pressure_ratio'):.4f} | — |",
         f"| Revolutions n | {_g(o,'shaft_speed_rpm'):.0f} | /min |",
-        f"| {pin_label} | {pt_in_bar:.1f} | bar |",
+        f"| {pin_label} | {pt_in_mpa:.3f} | MPa |",
         f"| {tin_label} | {Tt_in_C:.2f} | °C |",
-        f"| {pout_label} | {p_out_bar:.1f} | bar |",
+        f"| {pout_label} | {p_out_mpa:.3f} | MPa |",
         f"| {eta_label} | {_g(o,'eta_turbine'):.3f} | — |",
         "",
         "**保存的入口工质参数（Perfect gas 常物性近似需另行确认）**",
@@ -244,7 +256,8 @@ def build_cfturbo_markdown(results) -> str:
         f"- 发动机：推力 {_g(s,'thrust_N')/1e6:.3f} MN，Isp {_g(s,'Isp_s'):.1f}/{_g(s,'Isp_vac_s'):.1f} s，"
         f"Pc {_g(vars(inp), 'pc')/1e6:.3f} MPa，氧燃质量比 {_g(vars(inp), 'of_ratio'):.2f}，总流量 {_g(s,'mdot_total_kg_s'):.1f} kg/s",
         f"- 求解残差 {_g(s,'solver_residual_norm'):.3e}\n",
-        "> 单位：体积流量 m³/h、摩尔质量 kg/mol（非 kg/kmol）、温度 °C、压力 bar。"
+        "> 单位：体积流量 m³/h、摩尔质量 kg/mol（非 kg/kmol）、温度 °C、压力 MPa。"
+        "录入 CFturbo 时须核对目标字段的单位设置。"
         "缺失数据保留为待确认；边界口径以各组件保存记录为准。\n",
         "## 泵设计点\n",
     ]

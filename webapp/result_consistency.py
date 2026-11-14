@@ -341,6 +341,8 @@ def result_consistency_view(result, record_id=""):
     _audit_inputs(audit, calculation)
     _audit_aliases(audit, _dict(calculation.get("components")))
     _audit_system(audit, calculation)
+    from webapp.cooling_design import valve_cooling_boundary_checks
+    audit.checks.extend(valve_cooling_boundary_checks(calculation))
     _audit_geometry(audit, record_id)
     conflicts = [row for row in audit.checks if row["status"] == "conflict"]
     partial = sum(row["status"] == "partial" for row in audit.checks)

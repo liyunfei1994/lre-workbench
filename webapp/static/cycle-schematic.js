@@ -30,6 +30,29 @@ function nozzleSymbol() {
 
 /** Fixed engineering layouts are display coordinates, never engine dimensions. */
 export function cycleLayout(model) {
+  if(model.kind==='ffsc'&&model.valveTopology){
+    const paper=model.valveTopology==='paper_split_before_cooling_v1';
+    const positions={fuel_tank:[340,100],lox_tank:[940,100],fuel_pump:[340,210],ox_pump:[940,210],
+      MFV:[340,310],FPOV:[640,300],cooling_channel:[340,410],OPFV:[640,510],
+      fuel_preburner:[340,610],ox_preburner:[940,610],fuel_preburner_turbine:[340,725],
+      ox_preburner_turbine:[940,725],main_chamber:[640,820],nozzle:[640,945]};
+    const paths={
+      'fuel_tank>fuel_pump':'M340 128V175','lox_tank>ox_pump':'M940 128V175',
+      'fuel_pump>MFV':'M340 245V285','MFV>cooling_channel':'M340 335V374',
+      'cooling_channel>fuel_preburner':'M340 446V574','ox_pump>ox_preburner':'M940 245V574',
+      'ox_pump>FPOV':'M940 270H700V300H675','FPOV>fuel_preburner':'M605 300H450V550H390V574',
+      'OPFV>ox_preburner':'M675 510H910V574',
+      'fuel_preburner>fuel_preburner_turbine':'M340 646V690','ox_preburner>ox_preburner_turbine':'M940 646V690',
+      'fuel_preburner_turbine>main_chamber':'M340 760V780H590','ox_preburner_turbine>main_chamber':'M940 760V780H690',
+      'main_chamber>nozzle':'M640 860V865',
+      ...(paper?{'fuel_pump>OPFV':'M340 260H520V510H605'}:{'cooling_channel>OPFV':'M340 475H560V510H605'}),
+    };
+    const shafts=[{source:'fuel_preburner_turbine',target:'fuel_pump',d:'M305 725H64V210H305',x:64,y:470,label:'燃料轴 · 功率传递'},
+      {source:'ox_preburner_turbine',target:'ox_pump',d:'M975 725H1216V210H975',x:1216,y:470,label:'液氧轴 · 功率传递'}];
+    const labels=Object.fromEntries(Object.entries(positions).map(([id,[x,y]])=>[id,
+      id==='main_chamber'?[830,818]:id==='nozzle'?[850,970]:id==='FPOV'||id==='OPFV'?[640,y+57]:[x===340?180:1100,y-9]]));
+    return {width:1280,height:1090,positions,paths,shafts,junctions:[[340,paper?260:475,'fuel'],[940,270,'ox']],labels};
+  }
   if(model.kind==='ffsc') {
     // A compact process drawing. Shaft lines express power transfer, not a bent physical shaft.
     const positions={fuel_tank:[340,100],lox_tank:[940,100],fuel_pump:[340,210],ox_pump:[940,210],
@@ -71,6 +94,9 @@ export function cycleLayout(model) {
 function symbol(node) {
   const equipment=cycleEquipmentSymbol(node);
   if(equipment)return equipment;
+  if(node.type==='valve')return node.id==='MFV'
+    ?'<path class="cy-symbol" d="M-24-25H24L-24 25H24Z"/><path class="cy-detail" d="M0 0H45M45-12V12"/>'
+    :'<path class="cy-symbol" d="M-35-22V22L35-22V22Z"/><path class="cy-detail" d="M0 0V-40M-12-40H12"/>';
   if(node.type==="chamber") {
     const {halfWidth:r,top,bottom}=thrustChamberProfile().chamber;
     return `<path class="cy-flow-volume" d="M${-r} ${top}H${r}V${bottom}H${-r}Z"/><path class="cy-flow-wall cy-chamber-wall" d="M${-r} ${bottom}V${top}H${r}V${bottom}"/><path class="cy-injector" d="M-57-43H57V-33H-57Z"/><path class="cy-detail" d="M-30-26V-16M-10-26V-16M10-26V-16M30-26V-16"/><path class="cy-flow-direction" d="M0-8V27M-7 19L0 27L7 19"/>`;
@@ -113,7 +139,7 @@ function diagram(model) {
     const labelPosition=layout.labels?.[node.id];
     const labelX=labelPosition?.[0] ?? (mainNozzle?x+195:x),labelY=labelPosition?.[1] ?? (mainNozzle?y+25:node.type==="nozzle" ? y+5 : node.type==="tank" ? y-43 : y-50);
     const hit=mainNozzle?[x-115,y-83,230,178]:node.type==='chamber'?[x-72,y-53,144,103]:[x-82,y-57,164,node.type==='nozzle'?146:130];
-    return `<g class="cy-object${node.id===defaultId?' is-selected':''}" data-cy-object="${esc(node.id)}" data-cy-states="${(node.states || []).map(s=>esc(s.id)).join(' ')}" data-tone="${tone(node.tone)}" role="button" tabindex="0" aria-label="查看${esc(node.title)}" aria-pressed="${node.id===defaultId}"><title>${esc(node.title)} · 选择查看记录参数</title><rect class="cy-hit" x="${hit[0]}" y="${hit[1]}" width="${hit[2]}" height="${hit[3]}" rx="6"/><g transform="translate(${x} ${y})">${symbol(node)}</g>${labelPosition?`<path class="cy-label-leader" d="M${x<640?labelX+90:labelX-90} ${labelY+5}H${x<640?x-76:x+76}"/>`:''}<text class="cy-object-title" x="${labelX}" y="${labelY}" text-anchor="middle">${esc(node.title)}</text>${annotations(node,x,y,labelPosition)}</g>`;
+    return `<g class="cy-object${node.id===defaultId?' is-selected':''}" data-cy-object="${esc(node.id)}" data-cy-states="${(node.states || []).map(s=>esc(s.id)).join(' ')}" data-tone="${tone(node.tone)}" role="button" tabindex="0" aria-label="查看${esc(node.title)}" aria-pressed="${node.id===defaultId}"><title>${esc(node.title)} · 选择查看记录参数</title><rect class="cy-hit" x="${hit[0]}" y="${hit[1]}" width="${hit[2]}" height="${hit[3]}" rx="6"/><g transform="translate(${x} ${y})">${symbol(node)}</g>${labelPosition&&labelX!==x?`<path class="cy-label-leader" d="M${x<640?labelX+90:labelX-90} ${labelY+5}H${x<640?x-76:x+76}"/>`:''}<text class="cy-object-title" x="${labelX}" y="${labelY}" text-anchor="middle">${esc(node.title)}</text>${annotations(node,x,y,labelPosition)}</g>`;
   }).join("");
   const labelPositions=model.kind==='ffsc' ? [['ox_pump','fuel_preburner',650,252],['cooling_channel','ox_preburner',650,372]]
     : [];
@@ -122,7 +148,8 @@ function diagram(model) {
     const short=String(edge.label).split(' · ')[0];
     return ['pt','none','flow'].map(mode=>`<text class="cy-branch-label" data-cy-annotation="${mode}"${mode==='pt'?'':' hidden'} x="${x}" y="${y}" text-anchor="middle">${esc(mode==='flow'?edge.label:short)}</text>`).join('');
   }).join('');
-  const sheet=model.kind==='ffsc'?`<path class="cy-sheet-rule" d="M96 42H1184M96 904H1184"/><text class="cy-circuit-label" x="340" y="30" text-anchor="middle">FUEL / ${esc(model.fuel?.name || '燃料')}支路</text><text class="cy-circuit-label" x="940" y="30" text-anchor="middle">OXIDIZER / 液氧支路</text><text class="cy-sheet-label" x="640" y="550" text-anchor="middle">THRUST CHAMBER</text><text class="cy-sheet-label" x="96" y="923">FFSC / 系统流路与功率传递</text><text class="cy-sheet-label" x="1184" y="923" text-anchor="end">示意剖面 · 非比例绘制</text>`:`<text class="cy-sheet-label" x="24" y="30">ENGINE CYCLE / 稳态系统</text><text class="cy-sheet-label" x="1096" y="30" text-anchor="end">${model.kind==='generic'?'RECORDED CONNECTIONS':'FUNCTIONAL SCHEMATIC'}</text>`;
+  const sheetBottom=model.valveTopology?1064:904, sheetFooter=sheetBottom+19;
+  const sheet=model.kind==='ffsc'?`<path class="cy-sheet-rule" d="M96 42H1184M96 ${sheetBottom}H1184"/><text class="cy-circuit-label" x="340" y="30" text-anchor="middle">FUEL / ${esc(model.fuel?.name || '燃料')}支路</text><text class="cy-circuit-label" x="940" y="30" text-anchor="middle">OXIDIZER / 液氧支路</text><text class="cy-sheet-label" x="640" y="${model.valveTopology?710:550}" text-anchor="middle">THRUST CHAMBER</text><text class="cy-sheet-label" x="96" y="${sheetFooter}">FFSC / 系统流路与功率传递</text><text class="cy-sheet-label" x="1184" y="${sheetFooter}" text-anchor="end">示意剖面 · 非比例绘制</text>`:`<text class="cy-sheet-label" x="24" y="30">ENGINE CYCLE / 稳态系统</text><text class="cy-sheet-label" x="1096" y="30" text-anchor="end">${model.kind==='generic'?'RECORDED CONNECTIONS':'FUNCTIONAL SCHEMATIC'}</text>`;
   return `<svg class="cy-svg" viewBox="0 0 ${layout.width} ${layout.height}" role="group" aria-label="${esc(names[model.kind] || names.generic)}原理图"><defs>${defs}</defs><rect class="cy-paper" width="100%" height="100%"/>${sheet}${shafts}${edges}${branchLabels}${layout.junctions.map(([x,y,t])=>`<circle class="cy-junction" data-tone="${t}" cx="${x}" cy="${y}" r="3.5"/>`).join('')}${shapes}</svg>`;
 }
 

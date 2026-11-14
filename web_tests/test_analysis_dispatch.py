@@ -10,7 +10,9 @@ from lre_workbench.domain.analysis_contract import concept_design_task
 
 class AnalysisDispatchTests(unittest.TestCase):
     def setUp(self):
-        self.values = asdict(EngineInputs())
+        # Exercise task-schema compatibility with the runnable combustion model;
+        # withdrawn temperature-rise snapshots are covered by model identity tests.
+        self.values = asdict(EngineInputs(combustion_loss_model="adiabatic"))
         self.task = concept_design_task(self.values)
 
     def test_explicit_fixed_mode_never_enters_design(self):

@@ -189,7 +189,7 @@ class CoolingChannel:
             sizing_reference="legacy_inlet_density_throat_width",
             wall_temp_limit_status="provisional", wall_temp_limit_basis="",
             channel_roughness_m=None, k_minor_inlet=None, k_minor_outlet=None,
-            htc_enhancement_basis=""):
+            htc_enhancement_basis="", reference_wall_temperature_K=800., estimate_basis=""):
         self.fuel_species = normalize_fuel_species(fuel_species)
         if self.fuel_species == "c12h26":
             validate_surrogate_state(t_inlet, p_inlet)
@@ -197,12 +197,14 @@ class CoolingChannel:
                 raise ValidationError("煤油替代模型当前采用给定吸热量与压降，不支持甲烷准一维冷却关联式。")
         for name, value in (("mdot_fuel",mdot_fuel),("t_inlet",t_inlet),("p_inlet",p_inlet)):
             _check_range("CoolingChannel."+name, value, lo=0, lo_inclusive=False)
-        if not bartz_mode:
+        if bartz_mode not in (0, 1, 2):
+            raise ValidationError("Unknown cooling model; expected 0, 1 or 2")
+        if bartz_mode != 1:
             _check_range("CoolingChannel.dp_pa",dp_pa,lo=0)
             _check_range("CoolingChannel.heat_load",heat_load,lo=0)
             if dp_pa >= p_inlet:
                 raise ValidationError("CoolingChannel: 指定压降不小于入口压力")
-        else:
+        if bartz_mode:
             for name,value in (("mdot_total",mdot_total),("pc",pc),("t_chamber",t_chamber),
                 ("molar_mass_c",molar_mass_c),("l_star_m",l_star_m)):
                 _check_range("CoolingChannel."+name,value,lo=0,lo_inclusive=False)
@@ -210,7 +212,7 @@ class CoolingChannel:
             _check_range("CoolingChannel.contraction_ratio",contraction_ratio,lo=1.,lo_inclusive=False)
             if throat_area_m2 is not None:
                 _check_range("CoolingChannel.throat_area_m2",throat_area_m2,lo=0,lo_inclusive=False)
-        if int(n_channels) != n_channels or n_channels <= 0:
+        if bartz_mode == 1 and (int(n_channels) != n_channels or n_channels <= 0):
             raise ValidationError("cooling channel count must be a positive integer")
         if sizing_reference not in ("legacy_inlet_density_throat_width", "coolant_inlet_velocity"):
             raise ValidationError("unknown cooling channel sizing reference")
@@ -219,7 +221,7 @@ class CoolingChannel:
         self.__dict__.update({key:value for key,value in locals().copy().items()
             if key not in ("self","name","value","__class__","fuel_species")})
         self.fuel_species = normalize_fuel_species(fuel_species)
-        self.bartz_mode = bool(bartz_mode)
+        self.bartz_mode = int(bartz_mode)
         self.auto_size = bool(auto_size)
         self.dp_auto = bool(dp_auto)
         self.n_channels = int(n_channels)
@@ -394,4 +396,7 @@ class CoolingChannel:
         return state,component
 
     def evaluate(self):
+        if self.bartz_mode == 2:
+            from lre_workbench.components.cooling.estimate import evaluate_concept_heat
+            return evaluate_concept_heat(self)
         return self._evaluate_bartz() if self.bartz_mode else self._evaluate_fixed()

@@ -22,6 +22,16 @@ class DatasetContractTests(unittest.TestCase):
                 self.assertEqual(input_values({"methane_thermo_dataset": dataset}, saved_snapshot=snapshot)[0]["methane_thermo_dataset"], dataset)
         self.assertEqual(preset_input_values("raptor3_ffsc")["methane_thermo_dataset"], "gri30_highT")
 
+    def test_new_ffsc_baseline_is_explicit_and_does_not_migrate_saved_research(self):
+        baseline = preset_input_values("raptor3_ffsc")
+        self.assertEqual(baseline["gas_eos"], "ideal-gas")
+        self.assertEqual(baseline["gas_species_policy"], "full")
+        self.assertEqual(baseline["combustion_loss_model"], "adiabatic")
+        old = {"gas_eos": "Peng-Robinson-Boston-Mathias", "gas_species_policy": "auto",
+               "methane_thermo_dataset": "gri30", "combustion_loss_model": "legacy_temperature_rise"}
+        restored = input_values(old, saved_snapshot=True)[0]
+        self.assertEqual({key: restored[key] for key in old}, old)
+
     def test_science_fingerprint_changes_with_species_data_not_eos(self):
         old = science_environment("lox_methane", "gri30")
         new = science_environment("lox_methane", "gri30_highT")

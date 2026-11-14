@@ -108,7 +108,7 @@ def compute_geometry(
         if not isinstance(cooling_profile, dict):
             raise ValueError("已给冷却剖面必须为包含实际几何的记录。")
         cg = cooling_profile.get("geometry", {})
-        if (cooling_profile.get("model_id") != "regen_quasi1d_ph_v1"
+        if (cooling_profile.get("model_id") not in ("regen_quasi1d_ph_v1", "regen_concept_heat_v1")
                 or not isinstance(cg, dict) or not cg.get("nodes")):
             raise ValueError("冷却剖面缺少实际几何，不能用喷管所需面积重新生成展示轮廓。")
         # Off-design nozzle At is a required area being matched by an outer
@@ -174,6 +174,7 @@ def compute_geometry(
     )
 
     if cooling_profile is not None and cg.get("full_nodes"):
+        nozzle.geometry_scope = chamber.geometry_scope
         # Display/export the exact saved computational mesh, including uncooled
         # extension. Never redraw existing fixed hardware from mutable inputs.
         stations = [row for row in cg["full_nodes"] if row["x_m"] >= cg["L_cyl_m"] - 1e-12]

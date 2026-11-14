@@ -25,6 +25,8 @@ def _cooling_profile_evidence(component, inputs):
     """Read complete common-mesh evidence; never use an old postpass/single point."""
     missing = (None, None, "缺少主循环完整沿程冷却证据；预算模式或旧记录须重新计算，不能用单点温度代替沿程峰值。")
     profile = getattr(component, "profile", None)
+    if getattr(inputs, "cooling_bartz_mode", None) == 2:
+        return None, None, "当前为概略热负荷估算；参考壁温是输入假设，尚未求解实际壁温、通道换热与水力能力。需完成详细部件冷却计算后评估冷却可行性。"
     if not bool(getattr(inputs, "cooling_bartz_mode", False)) or not isinstance(profile, dict):
         return missing
     if profile.get("version") != 1 or profile.get("model_id") != "regen_quasi1d_ph_v1":
@@ -133,6 +135,13 @@ def assess_engineering(results, power_tolerance_percent: float = 1.0, *, scope: 
                 feed_pressure_tolerance_pa = network["pressure_tolerance_Pa"]
             check("feed_network_closure", "四支路供给方程闭合", 0.0 if network["status"] == "pass" else 1.0,
                   0.0, "", "maximum", "由记录支路重新核算质量、压力、阻力与非负阀压降；闭合不代表具有压力储备。")
+            if closure.get("feed_network", {}).get("mode") == "valve_constrained_concept_design":
+                from lre_workbench.systems.valve_network import evaluate_installed_valves
+                valve_audit = evaluate_installed_valves(closure["feed_network"], states)
+                for valve_id, row in valve_audit["valves"].items():
+                    check(f"valve_{valve_id}_feasibility", f"{valve_id} 实体阀需求/开度可行性",
+                          0. if row["status"] in ("available", "feasible") else 1., 0., "", "maximum",
+                          f"从本次安装端口重新核算；{row.get('reason')}。单相候选域检查，不代表无汽蚀或厂家认证。")
             heat_terms = [_finite(getattr(components.get(name), "outputs", {}).get("heat_loss_W"))
                           for name in ("main_chamber", "nozzle")]
             heat_allocation = (

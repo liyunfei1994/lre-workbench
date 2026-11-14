@@ -265,7 +265,8 @@ class NestedConvergenceTests(unittest.TestCase):
         result.summary.update(ox_preburner_T_combustion_K=temperatures[0],
                               fuel_preburner_T_combustion_K=temperatures[1],
                               ox_preburner_pressure_ratio=2, fuel_preburner_pressure_ratio=2)
-        result.states = {"fuel_after_cooling": SimpleNamespace(temperature=350, enthalpy=-4.7e6),
+        result.states = {"branch_fuel_to_opb": SimpleNamespace(temperature=300, enthalpy=-4.8e6),
+                         "fuel_after_cooling": SimpleNamespace(temperature=350, enthalpy=-4.7e6),
                          "lox_after_pump": SimpleNamespace(temperature=90, enthalpy=-4e5)}
         return result
 

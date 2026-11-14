@@ -30,7 +30,7 @@ class InjectorAPITests(unittest.TestCase):
             app=create_app(Path(temp)/'workspace.sqlite3',queue_enabled=False)
             with client(app) as api:
                 self.assertEqual(api.post('/api/auth/setup',json={'username':'admin','display_name':'测试用户','password':TEST_PASSWORD}).status_code,200)
-                project=api.post('/api/projects',json={'name':'喷注器测试','inputs':asdict(EngineInputs())}).json()['project']
+                project=api.post('/api/projects',json={'name':'喷注器测试','inputs':asdict(EngineInputs(combustion_loss_model="adiabatic"))}).json()['project']
                 job=api.post(f"/api/projects/{project['id']}/jobs",json={'revision':1}).json()['id']
                 new=sample();old=deepcopy(new)
                 old['calculation']['components']['injector']['profile']=None

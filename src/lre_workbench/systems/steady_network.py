@@ -90,7 +90,7 @@ def validate_hardware(snapshot):
 def solve_design(*, total_fuel, total_ox, mr_ox, mr_fuel, p_pre_ox, p_pre_fuel,
                  injector_ratio, line_dp, densities=None, temperatures=None,
                  fixed_hardware=None, flows_override=None, allow_unclosed_flows=False,
-                 branch_budgets=None):
+                 branch_budgets=None, valve_configuration=None, cooling_drop_Pa=0., pump_densities=None):
     """Solve the reduced network; pressures are SI absolute and flows kg/s.
 
     ``densities`` and ``temperatures`` are keyed ``fuel``/``ox`` and refer to
@@ -225,6 +225,11 @@ def solve_design(*, total_fuel, total_ox, mr_ox, mr_fuel, p_pre_ox, p_pre_fuel,
             "Pump/turbine maps and valve travel limits are absent; this is not a validated fixed-engine envelope.",
         ],
     }
+    if valve_configuration and valve_configuration.get("enabled"):
+        if fixed_hardware is not None or allow_unclosed_flows:
+            raise ValueError("实体三阀概念网络不能复用旧四支路冻结阻力或最低压头展开式。")
+        from lre_workbench.systems.valve_network import configure_network
+        return configure_network(result, valve_configuration, cooling_drop_Pa, pump_densities or density)
     checked = audit_network(result, total_fuel=total_fuel, total_ox=total_ox,
                             mr_ox=mr_ox if flows_override is None else None,
                             mr_fuel=mr_fuel if flows_override is None else None)
@@ -238,6 +243,9 @@ def audit_network(network, *, total_fuel, total_ox, mr_ox=None, mr_fuel=None):
     The result is suitable for saved-data validation and counterexample tests.
     This checks algebraic model consistency, not hardware validation.
     """
+    if network.get("mode") == "valve_constrained_concept_design":
+        from lre_workbench.systems.valve_network import audit_valve_network
+        return audit_valve_network(network, total_fuel=total_fuel, total_ox=total_ox, mr_ox=mr_ox, mr_fuel=mr_fuel)
     errors = []
     try:
         total = {"fuel": _finite(total_fuel, "total_fuel", positive=True),
@@ -406,7 +414,8 @@ def pressure_contract(network, states, inputs, cooling_component=None):
             detail="预燃室出口直接作为涡轮入口，未另计两者间管路压降；涡轮排气至主室为热气喷注段预算，固定四支路阻力扫描中仍沿用该预算。",
         ))
 
-    cooling_budget = number(get(inputs, "cooling_dp_pa"), "inputs.cooling_dp_pa", nonnegative=True)
+    cooling_key = "cooling_estimated_dp_pa" if get(inputs, "cooling_bartz_mode") == 2 else "cooling_dp_pa"
+    cooling_budget = number(get(inputs, cooling_key), f"inputs.{cooling_key}", nonnegative=True)
     profile = get(cooling_component, "profile", {}) or {}
     outputs = get(cooling_component, "outputs", {}) or {}
     unified = get(profile, "version") == 1 and get(profile, "model_id") == "regen_quasi1d_ph_v1"
@@ -415,6 +424,10 @@ def pressure_contract(network, states, inputs, cooling_component=None):
         cooling_source = "unified_cooling_profile"
         recorded_drop = number(get(get(profile, "summary", {}) or {}, "dp_total_Pa"),
                                "cooling.profile.summary.dp_total_Pa", nonnegative=True)
+    elif get(profile, "version") == 1 and get(profile, "model_id") == "regen_concept_heat_v1":
+        cooling_source = "concept_pressure_estimate"
+        recorded_drop = number(get(get(profile, "assumptions", {}) or {}, "estimated_pressure_drop_Pa"),
+                               "cooling.profile.assumptions.estimated_pressure_drop_Pa", nonnegative=True)
     elif profile:
         cooling_source = "unavailable"
         missing.append("cooling.profile.supported_model")
@@ -440,9 +453,16 @@ def pressure_contract(network, states, inputs, cooling_component=None):
         tap_state = pressure(tap_key)
         tap_required = number((network.get("tap_pressures_Pa") or {}).get(side), f"network.tap_pressures_Pa.{side}", positive=True)
         cooling_drop = difference(p_out, tap_state) if side == "fuel" else 0.0
+        mfv_drop = 0.0
+        if side == "fuel" and network.get("mode") == "valve_constrained_concept_design":
+            cooling_inlet = pressure("cooling_inlet")
+            mfv_drop = difference(p_out, cooling_inlet)
+            cooling_drop = difference(cooling_inlet, tap_state)
         adopted_cooling_drop = (recorded_drop if cooling_component is not None else
                                 cooling_drop if cooling_auto else cooling_budget) if side == "fuel" else 0.0
         required_out = tap_required + adopted_cooling_drop if None not in (tap_required, adopted_cooling_drop) else None
+        if network.get("mode") == "valve_constrained_concept_design":
+            required_out = number(network.get("pump_pressures_Pa", {}).get(side), f"network.pump_pressures_Pa.{side}", positive=True)
         residual = difference(p_out, required_out)
         tolerance = max(1.0, max(p_out, required_out) * 1e-9) if None not in (p_out, required_out) else None
         pumps.append(dict(id=side, label=label, inlet_pressure_Pa=p_in,
@@ -450,6 +470,7 @@ def pressure_contract(network, states, inputs, cooling_component=None):
             model_outlet_pressure_Pa=p_out, source_tap_pressure_Pa=tap_state,
             required_tap_pressure_Pa=tap_required, cooling_drop_Pa=cooling_drop,
             adopted_cooling_drop_Pa=adopted_cooling_drop,
+            mfv_drop_Pa=mfv_drop,
             cooling_drop_source=cooling_source if side == "fuel" else "not_in_oxygen_path",
             cooling_budget_residual_Pa=difference(cooling_drop, cooling_budget) if side == "fuel" and cooling_source == "specified_design_budget" else None,
             pressure_residual_Pa=residual, pressure_tolerance_Pa=tolerance,
@@ -460,20 +481,21 @@ def pressure_contract(network, states, inputs, cooling_component=None):
             detail="所需出口压力反馈主泵功；输入转速或按比转速反推转速不构成固定泵扬程—流量能力证据。"))
 
     roles = []
+    design_mode = mode in ("design", "valve_constrained_concept_design")
     for branch_id, label, _, _, _ in BRANCHES:
         for kind, suffix in (("line", "基础管阀压降比 Δp/pc"), ("injector", "喷注压降比 Δp/pPB")):
             key = BRANCH_BUDGET_FIELDS[branch_id][kind]
             raw_value = get(inputs, key)
             source_key = COMMON_BUDGET_FIELDS[kind] if raw_value is None else key
-            effective = number(get(inputs, source_key), f"inputs.{source_key}", nonnegative=True) if mode == "design" else None
+            effective = number(get(inputs, source_key), f"inputs.{source_key}", nonnegative=True) if design_mode else None
             roles.append(dict(key=key, label=f"{label}：{suffix}", value=raw_value, unit="1",
-                effective_value=effective, effective_source=source_key if mode == "design" else None,
-                role=("inactive_with_frozen_resistance" if mode != "design" else
+                effective_value=effective, effective_source=source_key if design_mode else None,
+                role=("inactive_with_frozen_resistance" if not design_mode else
                       "inherited_common_budget" if raw_value is None else "specified_design_budget"),
                 source_status="unverified_engineering_assumption",
                 detail="本支路设计压降预算；未单独设置时继承通用值。冻结阻力计算采用保存的阻力系数与当前流量、密度。"))
     def common_role(kind):
-        if mode != "design":
+        if not design_mode:
             return "inactive_with_frozen_resistance"
         inherited = any(get(inputs, fields[kind]) is None for fields in BRANCH_BUDGET_FIELDS.values())
         return "specified_design_budget" if inherited else "inactive_with_branch_budgets"
@@ -486,9 +508,12 @@ def pressure_contract(network, states, inputs, cooling_component=None):
          "富氧涡轮排气进入主室的热气侧预算，并非液氧直接进入主室的喷注损失。"),
         ("fuel_turbine_exhaust_dp_ratio", "富燃热气喷注段压降比 Δp/pc", "1", "specified_design_budget",
          "富燃涡轮排气进入主室的热气侧预算，并非液甲烷直接进入主室的喷注损失。"),
-        ("cooling_dp_pa", "给定再生冷却总压降", "Pa", "inactive_with_hydraulic_model" if cooling_auto else "specified_design_budget" if cooling_source == "specified_design_budget" else "not_recorded",
-         "统一沿程模式采用本次冷却剖面的压降，该预算输入不生效；给定预算模式采用组件记录的压降，不是初值。"),
+        ("cooling_dp_pa", "外部指定再生冷却压降", "Pa", "inactive_with_concept_estimate" if cooling_key == "cooling_estimated_dp_pa" else "inactive_with_hydraulic_model" if cooling_auto else "specified_design_budget" if cooling_source == "specified_design_budget" else "not_recorded",
+         "仅外部指定模式将此值作为物理压降；详细通道模式中仅用于初始化，概略模型不采用此值。"),
     ]
+    if cooling_key == "cooling_estimated_dp_pa":
+        definitions.append((cooling_key, "概略冷却压降估计", "Pa", "concept_pressure_estimate",
+            "总体循环采用的压降估计，参与泵压需求与冷却出口状态；未由通道水力计算确定，不是允许上限或数值初值。"))
     for key, label, unit, role, detail in definitions:
         roles.append(dict(key=key, label=label, value=(get(inputs, key) if role.startswith("inactive_")
                           else number(get(inputs, key), f"inputs.{key}", nonnegative=True)),

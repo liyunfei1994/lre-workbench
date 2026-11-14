@@ -102,7 +102,7 @@ class PumpGeometryAPITests(unittest.TestCase):
             app = create_app(Path(temp) / "workspace.sqlite3", queue_enabled=False)
             with client(app) as api:
                 api.post("/api/auth/setup", json={"username": "admin", "display_name": "测试", "password": TEST_PASSWORD})
-                p = api.post("/api/projects", json={"name": "泵几何测试", "inputs": asdict(EngineInputs())}).json()["project"]
+                p = api.post("/api/projects", json={"name": "泵几何测试", "inputs": asdict(EngineInputs(combustion_loss_model="adiabatic"))}).json()["project"]
                 key = api.post(f"/api/projects/{p['id']}/jobs", json={"revision": 1}).json()["id"]
                 old = fixture()
                 for prefix in ("lox", "fuel"):

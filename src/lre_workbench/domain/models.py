@@ -40,6 +40,70 @@ class ValidationError(Exception):
 PREBURNER_LIMIT_STATUSES = ("unset", "provisional", "documented")
 
 
+SUPPLY_FIELD_FALLBACKS = {
+    f"{side}_{name}": legacy
+    for side in ("fuel", "ox")
+    for name, legacy in (
+        ("tank_pressure_pa", "tank_pressure_pa"),
+        ("boost_outlet_pressure_pa", "inlet_pressure"),
+        ("feed_line_dp_pa", "feed_line_dp_pa"),
+        ("boost_pump_efficiency", "boost_pump_efficiency"),
+    )
+}
+
+
+def supply_conditions(inputs, side: str) -> dict:
+    """Resolve independent supply inputs without mutating saved evidence.
+
+    Only missing/null branch inputs inherit the historical shared values.
+    A zero pressure loss is an explicit input, never a fallback request.
+    """
+    if side not in ("fuel", "ox"):
+        raise ValueError("supply side must be fuel or ox")
+    read = inputs.get if isinstance(inputs, dict) else lambda key, default=None: getattr(inputs, key, default)
+    legacy_defaults = {"tank_pressure_pa": 3e5, "inlet_pressure": 1e6,
+                       "feed_line_dp_pa": 5e4, "boost_pump_efficiency": .70}
+    result = {}
+    for key, legacy in SUPPLY_FIELD_FALLBACKS.items():
+        if not key.startswith(side + "_"):
+            continue
+        value = read(key)
+        source = key
+        if value is None:
+            value = read(legacy, legacy_defaults[legacy])
+            source = legacy
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValidationError(f"{source} 必须为有限数值；分路输入可留空以沿用历史共用值。")
+        result[key[len(side) + 1:]] = value
+    result["pump_inlet_pressure_pa"] = result["boost_outlet_pressure_pa"] - result["feed_line_dp_pa"]
+    return result
+
+
+def supply_summary(inputs) -> dict:
+    """Keep common legacy outputs only when both branches actually agree."""
+    branches = {side: supply_conditions(inputs, side) for side in ("fuel", "ox")}
+    outputs = {}
+    mapping = {
+        "tank_pressure_bar": ("tank_pressure_pa", 1e5),
+        "boost_out_pressure_bar": ("boost_outlet_pressure_pa", 1e5),
+        "main_pump_inlet_pressure_bar": ("pump_inlet_pressure_pa", 1e5),
+        "feed_line_dp_bar": ("feed_line_dp_pa", 1e5),
+        "boost_pump_efficiency": ("boost_pump_efficiency", 1),
+    }
+    for side, values in branches.items():
+        for name, (key, factor) in mapping.items():
+            outputs[f"{side}_{name}"] = values[key] / factor
+        outputs[f"{side}_boost_pump_dp_bar"] = (values["boost_outlet_pressure_pa"] - values["tank_pressure_pa"]) / 1e5
+    for name in (*mapping, "boost_pump_dp_bar"):
+        a, b = outputs[f"fuel_{name}"], outputs[f"ox_{name}"]
+        outputs[name] = a if a == b else None
+    outputs["supply_pressure_note"] = "；".join(
+        f"{label}：贮箱出口 {v['tank_pressure_pa']/1e6:g} MPa → 前置泵出口 {v['boost_outlet_pressure_pa']/1e6:g} MPa"
+        f" → 管路压降 {v['feed_line_dp_pa']/1e6:g} MPa → 主泵入口 {v['pump_inlet_pressure_pa']/1e6:g} MPa"
+        for side, label in (("ox", "液氧"), ("fuel", "燃料")) for v in (branches[side],))
+    return outputs
+
+
 def preburner_temperature_constraint(inputs, side: str) -> dict:
     """Resolve an optional gas-temperature constraint without inventing evidence.
 
@@ -141,6 +205,13 @@ class EngineInputs:
     # Old snapshots keep GRI30. High-temperature species data are an explicit
     # model choice, not an EOS change or a finite-rate chemistry certification.
     methane_thermo_dataset: str = "gri30_highT"
+    gas_eos: str = "ideal-gas"
+    # PR is an explicitly restricted equilibrium candidate until full species
+    # parameters are available. Independent comparisons select the same set.
+    gas_species_policy: str = "auto"
+    # Empty means the historical lumped network. New valve definitions are
+    # immutable task input, never looked up from a global mutable valve table.
+    valve_configuration_json: str = ""
 
     # ---------- 贮箱出口边界（历史键名 inlet_temp）----------
     fuel_inlet_temp: float = 100.0   # 燃料贮箱出口温度 [K]，工程边界假设
@@ -166,6 +237,16 @@ class EngineInputs:
     # ---------- 增压泵→主泵 短管压降 ----------
     feed_line_dp_pa: float = 0.5e5    # 增压泵→主泵短管压降预算 [Pa]
 
+    # Independent overrides; None preserves legacy shared settings on replay.
+    fuel_tank_pressure_pa: float | None = None
+    ox_tank_pressure_pa: float | None = None
+    fuel_boost_outlet_pressure_pa: float | None = None
+    ox_boost_outlet_pressure_pa: float | None = None
+    fuel_feed_line_dp_pa: float | None = None
+    ox_feed_line_dp_pa: float | None = None
+    fuel_boost_pump_efficiency: float | None = None
+    ox_boost_pump_efficiency: float | None = None
+
     # ---------- 部件常效率假设（非 Raptor 实测值）----------
     pump_efficiency_ox:   float = 0.86
     pump_efficiency_fuel: float = 0.85
@@ -173,11 +254,13 @@ class EngineInputs:
     turbine_efficiency_fuel: float = 0.88
 
     # ---------- 冷却系统 ----------
-    # V8：默认启用 Bartz 热流估算模式（cooling_bartz_mode=True）
-    # Bartz 模式：从发动机参数（mdot、pc、Tc、γ、Mm）自动推算喉部面积和热载荷
-    # 固定模式（cooling_bartz_mode=False）：直接用 cooling_heat_load（V7 兼容）
-    cooling_bartz_mode: float = 1.0      # 1=Bartz估算（默认），0=固定热载荷（V7兼容）
-    cooling_heat_load: float = 90.0e6   # 再生冷却吸热量 [W]（固定模式用；Bartz模式忽略）
+    # 新建 Web 方案显式采用模式 2；缺失模式的旧输入保留模式 1 的历史语义。
+    # 0: 外部指定功率/压降；1: 详细通道热工/水力；2: 参考壁温下概略热负荷。
+    cooling_bartz_mode: float = 1.0      # 0=外部指定，1=详细通道，2=概略热负荷；旧缺省值保留
+    cooling_heat_load: float = 90.0e6   # 外部指定吸热功率 [W]；仅模式 0 生效
+    cooling_reference_wall_temp_K: float = 800.0  # 概略热环境估算假设，不是求得壁温或验收限值
+    cooling_estimated_dp_pa: float = 5.0e6  # 概略循环压降估计；不来自通道水力求解
+    cooling_estimate_basis: str = ""  # 参考壁温、概略轮廓与压降估计的来源及适用范围
     coolant_cp: float = 2.4e3           # 历史无物性库回退用常数 [J/(kg·K)]；正常焓路径不用
 
     # ---------- 再生冷却通道几何（V14：正式纳入，之前用 getattr 读但未定义 → 锁死）----------
@@ -488,6 +571,9 @@ class EngineInputs:
     cooling_k_minor_inlet: float | None = None  # 成对覆盖旧总 K；各自使用相邻通道动压
     cooling_k_minor_outlet: float | None = None
     cooling_htc_enhancement_basis: str = "" # 试验/仿真标定依据，仅记录，不改变倍率
+    # Preserve each EOS's established design default. The paired EOS study
+    # explicitly selects the same thermodynamic hot-side method on both runs.
+    hot_side_thermo_method: str = "legacy"
 
     @classmethod
     def from_dict(cls, values):
@@ -512,6 +598,8 @@ class EngineInputs:
         can be inspected and corrected. A runnable model must call this gate;
         it never repairs a label, substitutes a dataset or mutates the draft.
         """
+        if self.cooling_bartz_mode == 2:
+            return None
         if not self.wall_thermal_dataset_id and not self.cooling_bartz_mode:
             return None
         from lre_workbench.materials.wall import validate_wall_dataset_material
@@ -522,6 +610,11 @@ class EngineInputs:
             raise ValidationError(f"壁面热物性设置无效：{exc}") from exc
 
     def __post_init__(self):
+        from lre_workbench.components.valves import parse_configuration
+        try:
+            parse_configuration(self.valve_configuration_json)
+        except ValueError as exc:
+            raise ValidationError(f"valve_configuration_json: {exc}") from exc
         """输入参数物理范围校验。"""
 
         if self.nonlinear_solver not in ("newton", "broyden", "trf"):
@@ -535,7 +628,7 @@ class EngineInputs:
             validate_wall_dataset_material, WallMaterialIdentityError)
         from lre_workbench.components.cooling.wall_thermal import parse_material_zones, validate_manufacturing_state
         try:
-            if self.wall_thermal_dataset_id == "" and self.cooling_bartz_mode:
+            if self.wall_thermal_dataset_id == "" and self.cooling_bartz_mode == 1:
                 self.wall_thermal_dataset_id = default_dataset_for_material(self.chamber_inner_wall_material)
             if self.wall_thermal_dataset_id:
                 try:
@@ -568,13 +661,18 @@ class EngineInputs:
         _check_range("feed_line_dp_pa（增压泵→主泵短管压降）", self.feed_line_dp_pa, lo=0)
         _check_range("boost_pump_efficiency（增压泵效率）",
                      self.boost_pump_efficiency, lo=0, hi=1.0, lo_inclusive=False)
-        # 增压泵出口必须高于贮箱压力（否则不是「增压」）
-        if self.inlet_pressure <= self.tank_pressure_pa:
-            raise ValidationError(
-                f"inlet_pressure（增压泵出口 {self.inlet_pressure/1e5:.2f} bar）必须高于 "
-                f"tank_pressure_pa（贮箱 {self.tank_pressure_pa/1e5:.2f} bar）"
-            )
-        _warn_range("tank_pressure_pa（贮箱压力）", self.tank_pressure_pa, 1.5e5, 6.0e5)
+        for side in ("fuel", "ox"):
+            supply = supply_conditions(self, side)
+            for name in ("tank_pressure_pa", "boost_outlet_pressure_pa"):
+                _check_range(f"{side}_{name}", supply[name], lo=0, lo_inclusive=False)
+            _check_range(f"{side}_feed_line_dp_pa", supply["feed_line_dp_pa"], lo=0)
+            _check_range(f"{side}_boost_pump_efficiency", supply["boost_pump_efficiency"],
+                         lo=0, hi=1, lo_inclusive=False)
+            if supply["boost_outlet_pressure_pa"] <= supply["tank_pressure_pa"]:
+                raise ValidationError(f"{side}_boost_outlet_pressure_pa 必须高于 {side}_tank_pressure_pa；"
+                                      "未设置分路值时分别沿用 inlet_pressure 和 tank_pressure_pa。")
+            if supply["pump_inlet_pressure_pa"] <= 0:
+                raise ValidationError(f"{side}_feed_line_dp_pa 必须小于 {side}_boost_outlet_pressure_pa，主泵入口压力必须为正。")
         _check_range("ambient_pressure（环境压力）", self.ambient_pressure, lo=0)
 
         # ── 氧燃比（必须 > 0）──────────────────────────────
@@ -586,6 +684,15 @@ class EngineInputs:
             raise ValidationError("combustion_loss_model 必须是 adiabatic 或 legacy_temperature_rise。")
         if self.methane_thermo_dataset not in ("gri30", "gri30_highT"):
             raise ValidationError("methane_thermo_dataset 必须是 gri30 或 gri30_highT。")
+        if self.gas_eos not in ("ideal-gas", "Peng-Robinson", "Peng-Robinson-Boston-Mathias"):
+            raise ValidationError("gas_eos 必须是 ideal-gas、Peng-Robinson 或 Peng-Robinson-Boston-Mathias。")
+        if self.gas_species_policy not in ("auto", "full", "pr_supported_v1"):
+            raise ValidationError("gas_species_policy 必须是 auto、full 或 pr_supported_v1。")
+        if self.hot_side_thermo_method not in ("legacy", "same_eos"):
+            raise ValidationError("hot_side_thermo_method 必须是 legacy 或 same_eos。")
+        if (self.gas_eos != "ideal-gas" or self.gas_species_policy == "pr_supported_v1") and (
+                self.propellant_pair != "lox_methane" or self.cycle_type != "ffsc"):
+            raise ValidationError("PR 及共同受限物种候选目前仅支持液氧甲烷 FFSC。")
         _check_range("combustion_efficiency（主室温升折减系数）",
                      self.combustion_efficiency, lo=0, hi=1.0, lo_inclusive=False)
         _warn_range("combustion_efficiency（主室温升折减系数）",
@@ -618,7 +725,14 @@ class EngineInputs:
         _warn_range("turbine_efficiency_fuel", self.turbine_efficiency_fuel, 0.60, 0.92)
 
         # ── 冷却系统（必须 ≥ 0 / > 0）────────────────────
-        _check_range("cooling_bartz_mode（Bartz模式开关）", self.cooling_bartz_mode, lo=0.0, hi=1.0)
+        if self.cooling_bartz_mode not in (0, 1, 2):
+            raise ValidationError("cooling_bartz_mode 必须为 0（外部指定）、1（详细通道）或 2（概略热负荷）。")
+        if self.cooling_bartz_mode == 2 and (self.cycle_type != "ffsc" or self.propellant_pair != "lox_methane"):
+            raise ValidationError("概略热负荷与循环反馈目前支持液氧甲烷 FFSC。")
+        _check_range("cooling_reference_wall_temp_K（参考壁温假设）", self.cooling_reference_wall_temp_K, lo=0, lo_inclusive=False)
+        _check_range("cooling_estimated_dp_pa（概略冷却压降估计）", self.cooling_estimated_dp_pa, lo=0)
+        if not isinstance(self.cooling_estimate_basis, str):
+            raise ValidationError("概略热负荷估算依据必须为文本。")
         _check_range("cooling_heat_load（冷却热载荷）", self.cooling_heat_load, lo=0)
         _check_range("coolant_cp（冷却剂比热）",        self.coolant_cp,        lo=0, lo_inclusive=False)
 

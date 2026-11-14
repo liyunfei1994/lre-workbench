@@ -49,7 +49,7 @@ class CoolingNormalizationTests(unittest.TestCase):
             self.assertIsNone(normalized["cooling_channel_roughness_m"])
 
     def test_zero_and_basis_survive_saved_input_normalization(self):
-        source = asdict(EngineInputs(cooling_channel_roughness_m=0.,
+        source = asdict(EngineInputs(combustion_loss_model="adiabatic", cooling_channel_roughness_m=0.,
             cooling_k_minor_inlet=0., cooling_k_minor_outlet=2.4,
             cooling_htc_enhancement_basis="thermal bench 12"))
         normalized, _ = input_values(source, saved_snapshot=True)

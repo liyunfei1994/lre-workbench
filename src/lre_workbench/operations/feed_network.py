@@ -16,6 +16,7 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import minimize_scalar
 
 from lre_workbench.runtime.tasks import checkpoint
+from lre_workbench.components.valves import actuator_derivative
 
 
 def _number(value, label, minimum=None, maximum=None, *, positive=False):
@@ -240,7 +241,7 @@ class FeedNetworkModel:
             dp = (Qin-Qout)/par['C']
             dqi = (c['tank_pressure_Pa']-p+pump['pump_head_Pa']-inlet_drop)/par['L_in']
             dqo = (p-c['outlet_pressure_Pa']-outlet_drop-valve_drop)/par['L_out']
-            da = float(np.clip((command-a)/c['valve_tau_s'], -c['valve_rate_per_s'], c['valve_rate_per_s']))
+            da = actuator_derivative(a, command, c['valve_tau_s'], c['valve_rate_per_s'])
             mass_rate = c['rho_kg_m3']*(Qin-Qout)
             boundary = c['tank_pressure_Pa']*Qin-c['outlet_pressure_Pa']*Qout
             dissipation = inlet_drop*Qin+(outlet_drop+valve_drop)*Qout

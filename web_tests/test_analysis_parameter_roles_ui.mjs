@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {renderAnalysisParameterRoles,renderParameterField,renderParameterGroups} from "../webapp/static/parameter-editor.js";
+import {renderAnalysisParameterRoles,renderParameterField,renderParameterGroups,renderParameterReference} from "../webapp/static/parameter-editor.js";
 
 test("the role comparison uses its supplied catalog, escapes text and highlights the selected mode",()=>{
   const catalog={version:1,rows:[
@@ -19,12 +19,16 @@ test("the role comparison uses its supplied catalog, escapes text and highlights
   assert.equal(renderAnalysisParameterRoles({rows:[]},'concept_design'),'');
 });
 
-test("field help and compact parameter notes preserve the fixed-mode identity without creating controls",()=>{
+test("field help and parameter reference preserve mode identity while compact forms link to that reference",()=>{
   const field={key:'pc',label:'主室压力',role:'design_input',role_label:'设计输入',default:1,factor:1,help:'当前为概念设计输入',
     analysis_modes:{fixed_hardware_steady:{roles:['result'],description:'通常为工作点结果 <script>x</script>'}}};
-  for(const html of [renderParameterField(field,{pc:3}),renderParameterGroups([{id:'design',title:'设计',fields:[field]}],{pc:3})]){
+  const group={id:'design',title:'设计',fields:[field]};
+  for(const html of [renderParameterField(field,{pc:3}),renderParameterReference(group,{pc:3})]){
     assert.match(html,/固定硬件稳态：通常为工作点结果 &lt;script&gt;x&lt;\/script&gt;/);
-    assert.equal((html.match(/data-input=/g)||[]).length,1);
     assert.doesNotMatch(html,/data-input="control|<script>/);
   }
+  const html=renderParameterGroups([group],{pc:3});
+  assert.equal((html.match(/data-input=/g)||[]).length,1);
+  assert.match(html,/data-help-chapter="parameter:design"/);
+  assert.doesNotMatch(renderParameterReference(group,{pc:3}),/data-input=/);
 });

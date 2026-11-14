@@ -112,6 +112,25 @@ def physical_source_fixture(*, material_zones=(), cover_eps=0.,
 
 
 class ThrottleCoolingContractTests(unittest.TestCase):
+    def test_pr_bm_can_supply_saved_geometry_but_cannot_initialize_local_throttle(self):
+        from webapp.operating_throttle import configuration
+
+        source = physical_source_fixture()
+        calculation = source["result"]["calculation"]
+        eos = "Peng-Robinson-Boston-Mathias"
+        calculation["inputs"]["gas_eos"] = source["inputs"]["gas_eos"] = eos
+        calculation["summary"]["thrust_N"] = 1e6
+        components = calculation["components"]
+        hot = components["nozzle"]["profile"]
+        hot.update(model_id="heated_frozen_pr_bm_quasi1d_v1", gas_eos=eos)
+        components["cooling_channel"]["profile"]["hot_side_profile"] = deepcopy(hot)
+        before = deepcopy(source)
+        self.assertEqual(source_baseline(source)[1]["cooling_hardware"]["status"], "saved_model_balances_checked")
+        setup = configuration(source)
+        self.assertFalse(setup["ready"])
+        self.assertIn("仅支持理想燃气", setup["issues"][0])
+        self.assertEqual(source, before)
+
     def test_checked_spatial_record_retains_geometry_without_certifying_accuracy(self):
         source = physical_source_fixture()
         before = deepcopy(source)

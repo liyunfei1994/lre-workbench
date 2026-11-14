@@ -11,6 +11,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
+from lre_workbench.components.nozzles.model_ids import HEATED_IDEAL_LEGACY_MODEL
 from lre_workbench.domain.models import ComponentResult, G0
 from lre_workbench.runtime.tasks import checkpoint
 
@@ -19,21 +20,9 @@ class _GasTrialDomainError(ValueError):
     """A Runge-Kutta stage left the state domain; retry with a shorter step."""
 
 
-def heated_nozzle(chamber, mdot, pc, expansion_ratio, p_amb, circuit):
-    from lre_workbench.properties.thermochemistry import _gas_for_state, _dict_to_Y, gas_temperature_applicability
-    import cantera as ct
-    if not all(math.isfinite(v) and v > 0 for v in (mdot, pc, expansion_ratio)):
-        raise ValueError("热侧质量流量、室压和面积比必须为有限正数。")
-    if not math.isfinite(p_amb) or p_amb < 0:
-        raise ValueError("环境压力必须为有限非负数。")
-    gas = _gas_for_state(chamber)
-    if gas.thermo_model != "ideal-gas":
-        raise ValueError("本准一维热侧仅实现冻结组成理想气体混合物。")
-    gas.TPY = chamber.temperature, pc, _dict_to_Y(gas, chamber.composition)
-    h0, s0, R = gas.enthalpy_mass, gas.entropy_mass, ct.gas_constant/gas.mean_molecular_weight
-    Y = gas.Y.copy()
+def _flow_geometry(circuit, expansion_ratio):
     geometry = circuit["geometry"]
-    cells = sorted((c for c in circuit["cells"] if c.get("kind", "channel") == "channel"), key=lambda c: c["x_m"])
+    cells = sorted((c for c in circuit["cells"] if c.get("kind", "channel") in ("channel", "heat_estimate")), key=lambda c: c["x_m"])
     gn = sorted(geometry["nodes"], key=lambda n: n["x_m"])
     if not cells or len(gn) != len(cells)+1:
         raise ValueError("热侧与冷却单元边界数量不一致。")
@@ -64,6 +53,29 @@ def heated_nozzle(chamber, mdot, pc, expansion_ratio, p_amb, circuit):
         raise ValueError("热侧几何必须包含精确喉部及与指定膨胀比一致的喷管出口。")
     log_area = PchipInterpolator(base_x, np.log(areas))
     heat_curve = PchipInterpolator(base_x, cumulative)
+    return cells, base_x, areas, throat_x, geom_th, cumulative, log_area, heat_curve
+
+
+def heated_nozzle(chamber, mdot, pc, expansion_ratio, p_amb, circuit, *, thermo_method="legacy"):
+    from lre_workbench.properties.thermochemistry import _gas_for_state, _dict_to_Y, gas_temperature_applicability
+    import cantera as ct
+    if not all(math.isfinite(v) and v > 0 for v in (mdot, pc, expansion_ratio)):
+        raise ValueError("热侧质量流量、室压和面积比必须为有限正数。")
+    if not math.isfinite(p_amb) or p_amb < 0:
+        raise ValueError("环境压力必须为有限非负数。")
+    if thermo_method not in ("legacy", "same_eos"):
+        raise ValueError("未知的喷管热侧热力学计算方法。")
+    gas = _gas_for_state(chamber)
+    if (gas.thermo_model == "Peng-Robinson-Boston-Mathias"
+            or (gas.thermo_model == "ideal-gas" and thermo_method == "same_eos")):
+        from lre_workbench.components.nozzles.heated_real_gas import heated_real_gas_nozzle
+        return heated_real_gas_nozzle(gas, chamber, mdot, pc, expansion_ratio, p_amb, circuit)
+    if gas.thermo_model != "ideal-gas":
+        raise ValueError("本准一维热侧不支持所选燃气状态方程。")
+    gas.TPY = chamber.temperature, pc, _dict_to_Y(gas, chamber.composition)
+    h0, s0, R = gas.enthalpy_mass, gas.entropy_mass, ct.gas_constant/gas.mean_molecular_weight
+    Y = gas.Y.copy()
+    cells, base_x, areas, throat_x, geom_th, cumulative, log_area, heat_curve = _flow_geometry(circuit, expansion_ratio)
     area_prime, area_second = log_area.derivative(), log_area.derivative(2)
     heat_prime, heat_second = heat_curve.derivative(), heat_curve.derivative(2)
     tmin = max(float(gas.min_temp), 300.)
@@ -305,7 +317,7 @@ def heated_nozzle(chamber, mdot, pc, expansion_ratio, p_amb, circuit):
          "主室输入温压按零速储室总态使用，沿程节点报告局部静态温压。",
          "跨声速临界位置与双侧斜率由面积变化及壁面热损的正则性条件求解。",
          "未建模激波、分离、有限速率反应及燃气壁面摩擦；高压输运与换热仍需独立验证。"])
-    result.profile = dict(model_id="heated_frozen_quasi1d_v1", nodes=nodes, cells=hot_cells,
+    result.profile = dict(model_id=HEATED_IDEAL_LEGACY_MODEL, nodes=nodes, cells=hot_cells,
         max_scaled_residual=residual, iterations=accepted_steps, function_evaluations=calls, heat_loss_W=Q,
         rejected_domain_attempts=rejected_domain_attempts,
         critical_x_m=critical_x, geometric_throat_x_m=throat_x,

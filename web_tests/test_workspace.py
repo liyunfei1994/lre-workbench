@@ -139,7 +139,8 @@ class WorkspaceTests(unittest.TestCase):
                 ({"ambient_pressure": 0}, []),
                 ({"thrust": None}, ["thrust"]),
                 ({"pc": -1}, ["pc"]),
-                ({"inlet_pressure": project["inputs"]["tank_pressure_pa"]}, ["inlet_pressure", "tank_pressure_pa"])):
+                ({"inlet_pressure": project["inputs"]["tank_pressure_pa"]},
+                 ["fuel_boost_outlet_pressure_pa", "fuel_tank_pressure_pa", "inlet_pressure", "tank_pressure_pa"])):
             with self.subTest(edits=edits):
                 response = self.admin.post(url, json={"inputs": project["inputs"] | edits})
                 self.assertEqual(response.status_code, 200, response.text)

@@ -57,9 +57,10 @@ test("branch navigation resolves field ownership including gas paths", () => {
 });
 
 test("topology reads design boundaries without introducing editable copies or solved states", () => {
-  const html = renderPressureTopology({pc:33e6, tank_pressure_pa:.5e6, ox_inlet_temp:90, fuel_inlet_temp:111, cooling_bartz_mode:1});
+  const html = renderPressureTopology({pc:33e6, tank_pressure_pa:.5e6, ox_tank_pressure_pa:.7e6, fuel_tank_pressure_pa:null, ox_inlet_temp:90, fuel_inlet_temp:111, cooling_bartz_mode:1});
   assert.match(html, /data-pressure-reference="pc"[^>]*>33 /);
-  assert.match(html, /data-pressure-reference="tank_pressure_pa"[^>]*>0.5 /);
+  assert.match(html, /data-pressure-reference="ox_tank_pressure_pa"[^>]*>0.7 /);
+  assert.match(html, /data-pressure-reference="fuel_tank_pressure_pa"[^>]*>0.5 /);
   assert.match(html, /氧化剂经主泵后分流，燃料经再生冷却后分流/);
   assert.match(html, /当前沿程模型/);
   assert.doesNotMatch(html, /<(input|select|textarea)\b/);
@@ -81,8 +82,10 @@ test("saved branch pressure and power results retain SI signs and never imply ca
 
 test("historical omitted overrides and new null fields have identical result identity", () => {
   const record = fixture(), inputs = record.result.calculation.inputs;
-  const draft = {...inputs, ...Object.fromEntries(overrideKeys.map(key => [key, null]))};
+  const supplyKeys = ["ox", "fuel"].flatMap(side => ["tank_pressure_pa", "boost_outlet_pressure_pa", "feed_line_dp_pa", "boost_pump_efficiency"].map(suffix => `${side}_${suffix}`));
+  const draft = {...inputs, ...Object.fromEntries([...overrideKeys, ...supplyKeys].map(key => [key, null]))};
   assert.match(renderPressureResults(record, draft), /data-pressure-result-state="current"/);
+  assert.match(renderPressureResults(record, {...draft, ox_tank_pressure_pa:400000}), /data-pressure-result-state="stale"/);
   draft.ox_to_fpb_line_dp_ratio = .04;
   assert.match(renderPressureResults(record, draft), /data-pressure-result-state="stale"/);
   const before = JSON.stringify(record);

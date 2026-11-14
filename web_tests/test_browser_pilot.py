@@ -79,6 +79,7 @@ class PilotTests(unittest.TestCase):
                 continue
             path = route.path.replace("{project_id}", self.original["id"]).replace("{revision}", "1")
             path = path.replace("{candidate_id}", "candidate-1")
+            path = path.replace("{baseline_id}", "baseline-1")
             for name in JOB_PARAMETERS:
                 path = path.replace("{" + name + "}", job["id"])
             self.assertNotIn("{", path, "New resource needs an authorization regression case")

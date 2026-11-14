@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {buildDesignReadiness, collectLocalReadiness, renderDesignReadiness} from "../webapp/static/design-readiness.js";
+import {buildDesignReadiness, collectLocalReadiness, renderDesignReadiness, renderDesignGroupReadiness} from "../webapp/static/design-readiness.js";
 import {parameterGroups} from "../webapp/static/parameter-editor.js";
 
 const groups = [
@@ -95,7 +95,7 @@ test("methods-only groups do not require confirmation or inflate confirmed param
     assert.equal(model.groups[1].status, "readonly");
     assert.equal(model.groups[1].requiresReview, false);
     const html = renderDesignReadiness(model);
-    assert.match(html, /1 个参数分组已确认或采用示例/);
+    assert.match(html, /1 个适用分组已就绪/);
     assert.match(html, /1 个只读分组无需确认/);
     assert.match(html, /data-status="readonly">只读说明/);
     assert.doesNotMatch(html, /查看待确认分组|2 个参数分组已确认/);
@@ -156,4 +156,129 @@ test("virtual editable selectors continue to require group confirmation", () => 
   const model = buildDesignReadiness(active, [], {phase:"ready", groupReviews:new Map()});
   assert.equal(model.pendingReviewCount, 1);
   assert.equal(model.groups[0].requiresReview, true);
+});
+
+test("a fixed model configuration requires confirmation and maps dataset issues to its group", () => {
+  const active = [{id:"chamber_chemistry", title:"燃烧热化学与燃气物性", requires_review:true,
+    configuration_context:[{key:"methane_thermo_dataset"}], fields:[{key:"gas_eos",read_only:true},{key:"gas_species_policy",read_only:true}]}];
+  const pending = buildDesignReadiness(active, [], {phase:"ready",groupReviews:new Map()});
+  assert.equal(pending.groups[0].requiresReview,true);
+  assert.equal(pending.groups[0].status,"review");
+  assert.equal(pending.readonlyCount,0);
+  const confirmed = buildDesignReadiness(active, [], {phase:"ready",groupReviews:new Map([["chamber_chemistry","confirmed"]])});
+  assert.equal(confirmed.groups[0].status,"confirmed");
+  const blocked = buildDesignReadiness(active,[{fields:["methane_thermo_dataset"],message:"热化学数据集不适用于当前设计计算。"}],
+    {phase:"ready",groupReviews:new Map([["chamber_chemistry","confirmed"]])});
+  assert.equal(blocked.groups[0].status,"invalid");
+  assert.equal(blocked.globalIssues.length,0);
+  assert.match(renderDesignGroupReadiness(blocked,"chamber_chemistry"),/热化学数据集不适用/);
+  assert.doesNotMatch(renderDesignGroupReadiness(blocked,"chamber_chemistry"),/无需确认参数|✓ 已确认/);
+});
+
+test("a parameter page shows only its own issues and links, including shared constraints", () => {
+  const model = buildDesignReadiness(parameterGroups(groups, draft), [
+    {fields:["thrust","nozzle_contour_method"], message:"推力与型面不匹配 <script>。"},
+    {fields:["cooling_grid_points"], message:"冷却离散数无效。"},
+    {fields:[], message:"整机检查连接中断。"},
+  ], {phase:"ready", groupReviews:new Map([["design", "confirmed"]])});
+  const html = renderDesignGroupReadiness(model, "design");
+  assert.match(html, /本组参数状态/);
+  assert.match(html, /data-readiness-state="invalid"/);
+  assert.match(html, /推力与型面不匹配 &lt;script&gt;/);
+  assert.match(html, /data-readiness-group="design" data-readiness-field="thrust"/);
+  assert.doesNotMatch(html, /<script>|冷却离散数无效|整机检查连接中断|data-readiness-group="geometry"/);
+  assert.doesNotMatch(html, /分组状态|计算前检查|已确认|可提交设计点计算/);
+
+  const unrelated = renderDesignGroupReadiness(model, "preburners");
+  assert.match(unrelated, /data-readiness-state="filled"/);
+  assert.match(unrelated, /确认状态待复核/);
+  assert.doesNotMatch(unrelated, /定位参数|输入校验通过|已确认|冷却离散数无效/);
+});
+
+test("a group summary distinguishes confirmation, adopted examples and read-only explanations", () => {
+  const active = parameterGroups([...groups, coolingMethods], {...draft, cooling_bartz_mode:1});
+  const model = buildDesignReadiness(active, [], {phase:"ready", warnings:["整机温度提示，不属于当前分组。"],
+    groupReviews:new Map([["design", "confirmed"], ["geometry", "preset"]])});
+  const confirmed = renderDesignGroupReadiness(model, "design");
+  assert.match(confirmed, /data-status="confirmed"/);
+  assert.match(confirmed, /本组参数已确认并保存/);
+  assert.doesNotMatch(confirmed, /组参数待确认|整机温度提示|可提交设计点计算|分组状态/);
+  assert.match(confirmed, /整机输入提示见“输入检查与运行”/);
+  assert.match(renderDesignGroupReadiness(model, "geometry"), /data-status="preset".*采用示例/s);
+  const pending = renderDesignGroupReadiness(model, "preburners");
+  assert.match(pending, /data-status="review"/);
+  assert.match(pending, /请核对取值并确认本组参数/);
+  const readonly = renderDesignGroupReadiness(model, "cooling_methods");
+  assert.match(readonly, /data-status="readonly"/);
+  assert.match(readonly, /无需确认参数/);
+  assert.doesNotMatch(readonly, /已确认|请核对取值并确认本组参数/);
+  const validationOnly = buildDesignReadiness(active, [], {phase:"ready"});
+  assert.match(renderDesignGroupReadiness(validationOnly, "design"), /data-status="ready">校验通过/);
+  assert.doesNotMatch(renderDesignGroupReadiness(validationOnly, "design"), /已确认|已就绪|可提交/);
+});
+
+test("unfinished input checks never expose a stored confirmation as the active group status", () => {
+  const active = parameterGroups([groups[0], coolingMethods], {cooling_bartz_mode:1});
+  const saved = buildDesignReadiness(active, [], {phase:"ready", groupReviews:new Map([["design", "confirmed"]])});
+  for (const phase of ["pending", "checking", "unavailable"]) {
+    // Even a caller retaining the previous group model while checking must not
+    // render the old confirmation or read-only badge as the validation result.
+    const model = {...saved, phase, validationPhase:phase};
+    for (const id of ["design", "cooling_methods"]) {
+      const html = renderDesignGroupReadiness(model, id);
+      assert.match(html, new RegExp(`data-readiness-state="${phase}"`));
+      assert.doesNotMatch(html, /已确认|无需确认参数|校验通过|可提交/);
+      if (phase === "unavailable") assert.match(html, /data-readiness-retry>重新检查/);
+      else assert.match(html, /正在检查本组参数/);
+    }
+  }
+});
+
+test("a confirmed group reports stale selected results separately and offers only navigation", () => {
+  const model = buildDesignReadiness(parameterGroups(groups, draft), [], {phase:"ready", groupReviews:new Map([["design", "confirmed"]])});
+  const freshness = {state:"stale", changedGroups:[{id:"design"}]};
+  const html = renderDesignGroupReadiness(model, "design", {freshness,hasResult:true});
+  assert.match(html, /data-readiness-state="confirmed"/);
+  assert.match(html, /data-status="confirmed">✓ 已确认/);
+  assert.match(html, /data-result-state="stale"/);
+  assert.match(html, /所选结果需重算/);
+  assert.match(html, /本组输入与所选计算记录不同/);
+  assert.match(html, /确认与保存仅更新输入/);
+  assert.match(html, /type="button"[^>]+data-workspace-view="design_run">前往输入检查与运行/);
+  assert.doesNotMatch(html, /type="submit"|data-readiness-state="stale"|data-status="stale"|data-review-design-group/);
+  assert.equal(model.groups.find(group=>group.id==="design").status,"confirmed");
+  assert.equal(freshness.state,"stale");
+  const other = renderDesignGroupReadiness(model, "design", {freshness:{state:"stale",changedGroups:[{id:"preburners"}]},hasResult:true});
+  assert.match(other,/其他输入与所选计算记录不同/);
+  assert.doesNotMatch(other,/本组输入与所选计算记录不同/);
+});
+
+test("a changed task without results is not presented as an existing result to recompute", () => {
+  const model = buildDesignReadiness(parameterGroups(groups, draft), [], {phase:"ready", groupReviews:new Map([["design", "confirmed"]])});
+  const html = renderDesignGroupReadiness(model,"design",{freshness:{state:"stale",changedGroups:[{id:"design"}]},hasResult:false});
+  assert.match(html,/data-status="confirmed"/);
+  assert.match(html,/所选任务输入与当前方案不同/);
+  assert.match(html,/尚无可用计算结果.*不会更新已提交的任务/);
+  assert.doesNotMatch(html,/所选结果需重算|data-result-state="stale"/);
+  assert.match(html,/data-workspace-view="design_run"/);
+});
+
+test("a selected result note requires proven differences rather than missing comparison evidence", () => {
+  const model = buildDesignReadiness(parameterGroups(groups, draft), [], {phase:"ready", groupReviews:new Map([["design", "confirmed"]])});
+  for(const state of ["current","missing","unknown","foreign","invalid"]){
+    const html = renderDesignGroupReadiness(model,"design",{freshness:{state,changedGroups:[{id:"design"}]}});
+    assert.match(html,/data-status="confirmed"/);
+    assert.doesNotMatch(html,/所选结果需重算|data-result-state="stale"|data-workspace-view="design_run"/);
+  }
+});
+
+test("missing or informational selections do not fall back to the full design checklist", () => {
+  const model = buildDesignReadiness(parameterGroups(groups, draft), [], {phase:"ready", groupReviews:new Map()});
+  for (const [id, pattern] of [["", /请选择左侧设置项/], ["reference", /未列入参数检查清单/]]) {
+    const html = renderDesignGroupReadiness(model, id);
+    assert.match(html, pattern);
+    assert.match(html, /data-readiness-state="unselected"/);
+    assert.doesNotMatch(html, /分组状态|设计目标与工况|data-readiness-group=|已确认|校验通过|可提交/);
+  }
+  assert.match(renderDesignGroupReadiness(null, ""), /请选择左侧设置项/);
 });

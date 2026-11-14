@@ -69,6 +69,47 @@ const freezeDeep=value=>{
   return value;
 };
 
+function valveFixture(topologyId="paper_split_before_cooling_v1"){
+  const result=fixture(),calc=result.calculation,paper=topologyId==="paper_split_before_cooling_v1";
+  const ports={MFV:["CH4","fuel_after_pump","cooling_inlet"],OPFV:["CH4",paper?"fuel_after_pump":"fuel_after_cooling","opfv_outlet"],FPOV:["O2","lox_after_pump","fpov_outlet"]};
+  calc.inputs.valve_configuration_json=JSON.stringify({schema_version:1,enabled:true,topology_id:topologyId,valves:Object.fromEntries(Object.entries(ports).map(([id,[fluid,upstream_node,downstream_node]])=>[id,{id,fluid,upstream_node,downstream_node}]))});
+  const removed=new Set(["fuel_pump>fuel_cooling","fuel_cooling>ox_preburner","ox_pump>fuel_preburner"]);
+  calc.topology_nodes.push(...["MFV","OPFV","FPOV"].map((key,index)=>({key,label:key,pos:[index*200,300]})));
+  calc.topology_edges=calc.topology_edges.filter(edge=>!removed.has(`${edge.source}>${edge.target}`));
+  calc.topology_edges.push(...[["fuel_pump","MFV"],["MFV","fuel_cooling"],[paper?"fuel_pump":"fuel_cooling","OPFV"],["OPFV","ox_preburner"],["ox_pump","FPOV"],["FPOV","fuel_preburner"]].map(([source,target])=>({source,target,label:"saved valve"})));
+  Object.assign(calc.states,{cooling_inlet:state(70e6,122,paper?150:160),opfv_outlet:state(69e6,paper?122:380,10),fpov_outlet:state(69e6,83,30)});
+  calc.states.fuel_after_cooling.mass_flow=paper?150:160;
+  calc.steady_closure={valve_design:{valves:{MFV:{mass_flow_kg_s:paper?150:160,pressure_drop_Pa:1e6,opening:.7,required_rated_cda_m2:.001}}}};
+  return result;
+}
+
+test("saved three-valve topologies draw actual split positions with separate shaft balances",()=>{
+  for(const id of ["paper_split_before_cooling_v1","all_fuel_cooled_then_split_valves_v1"]){
+    const result=freezeDeep(valveFixture(id)),before=JSON.stringify(result),model=build(result),paper=id==="paper_split_before_cooling_v1";
+    assert.equal(model.kind,"ffsc");assert.equal(model.valveTopology,id);assert.equal(model.nodes.length,14);
+    assert.ok(edge(model,"fuel_pump","MFV"));assert.ok(edge(model,"MFV","cooling_channel"));
+    assert.ok(edge(model,paper?"fuel_pump":"cooling_channel","OPFV"));assert.ok(edge(model,"OPFV","ox_preburner"));
+    assert.equal(edge(model,paper?"cooling_channel":"fuel_pump","OPFV"),undefined);
+    assert.equal(edge(model,"cooling_channel","ox_preburner"),undefined);
+    assert.ok(edge(model,"ox_pump","FPOV"));assert.ok(edge(model,"FPOV","fuel_preburner"));
+    assert.equal(model.shafts.length,2);assert.equal(value(model,"MFV","可行开度"),70);
+    assert.equal(value(model,"MFV","需求额定 CdA"),1000);
+    assert.equal(value(model,"MFV","质量流量"),paper?150:160);
+    assert.deepEqual(node(model,"OPFV").states.map(row=>row.id),[paper?"fuel_after_pump":"fuel_after_cooling","opfv_outlet"]);
+    if(paper)assert.doesNotMatch(model.notes.join(""),/燃料全部经过冷却/);
+    assert.equal(JSON.stringify(result),before);
+  }
+});
+
+test("conflicting valve input or graph does not silently become the other template",()=>{
+  const result=valveFixture(),config=JSON.parse(result.calculation.inputs.valve_configuration_json);
+  config.valves.OPFV.upstream_node="fuel_after_cooling";
+  result.calculation.inputs.valve_configuration_json=JSON.stringify(config);
+  assert.equal(build(result).kind,"generic");
+  const mismatch=valveFixture();mismatch.calculation.topology_edges.push({source:"cooling_channel",target:"ox_preburner"});
+  assert.equal(build(mismatch).kind,"generic");
+});
+
 test("FFSC expands real turbines, connects fuel cross feed after cooling, and keeps separate shafts",()=>{
   const model=build(fixture());
   assert.equal(model.kind,"ffsc");

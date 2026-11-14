@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 from webapp.store import Store
+from webapp.monitor import append_event, insert_event, task_event
 from webapp.design_scope import require_supported_design, require_supported_source
 from webapp.solver import calculate_design_job, initialization_failure_result, science_environment
 
@@ -21,14 +22,31 @@ def persist_failure(store, job, exc):
     diagnostic_result = initialization_failure_result(exc, job)
     payload = (json.dumps(diagnostic_result, ensure_ascii=False, allow_nan=False)
                if diagnostic_result is not None else None)
-    return store.execute(
-        "UPDATE jobs SET status='failed',error=?,result=COALESCE(?,result),finished=? "
-        "WHERE id=? AND status='running'",
-        (f"{type(exc).__name__}: {exc}"[:1600], payload, time.time(), job["id"]))
+    message = f"{type(exc).__name__}: {exc}"[:1600]
+    with store.connect(immediate=True) as db:
+        changed = db.execute(
+            "UPDATE jobs SET status='failed',error=?,result=COALESCE(?,result),finished=? "
+            "WHERE id=? AND status='running'",
+            (message, payload, time.time(), job["id"])).rowcount
+        if changed and job.get("kind") == "design":
+            insert_event(db, job["id"], task_event("end", status="failed", reason=message))
+        return changed
+
+
+def persist_success(store, job, result):
+    """Commit completion with the last observation; cancellation wins its race."""
+    payload = json.dumps(result, ensure_ascii=False, allow_nan=False)
+    with store.connect(immediate=True) as db:
+        changed = db.execute("UPDATE jobs SET status='succeeded',result=?,finished=? "
+                             "WHERE id=? AND status='running'",
+                             (payload, time.time(), job["id"])).rowcount
+        if changed and job.get("kind") == "design":
+            # succeeded denotes process completion, not numerical convergence.
+            insert_event(db, job["id"], task_event("end", status="succeeded", reason="calculation_completed"))
+        return changed
 
 
 def main():
-    faulthandler.dump_traceback_later(120, repeat=True)
     print("Worker started.", flush=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", required=True)
@@ -76,6 +94,8 @@ def main():
         store.execute("UPDATE jobs SET progress=? WHERE id=? AND status='running'",
                       (payload, args.job))
     try:
+        if job.get("kind") == "design":
+            append_event(store, args.job, task_event("start", status="running"))
         project = store.one("SELECT inputs FROM projects WHERE id=?", (job["project_id"],))
         if project:
             require_supported_design(json.loads(project["inputs"]))
@@ -113,33 +133,39 @@ def main():
 
             result = calculate_study(payload, source, study_progress)
         elif job.get("kind") == "validation":
+            from webapp.eos_comparison import PROGRESS_PHASE
             from webapp.validation import calculate_validation
             payload = json.loads(job["inputs"])
-            source = store.one("SELECT * FROM jobs WHERE id=? AND kind='design' AND status='succeeded'",
-                               (payload["source_job_id"],))
-            if not source or source["project_id"] != job["project_id"]:
+            source = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND revision=? AND kind='design' "
+                               "AND status='succeeded' AND result IS NOT NULL",
+                               (payload["source_job_id"], job["project_id"], job["revision"]))
+            if not source:
                 raise ValueError("来源计算记录不存在或尚未完成。")
             source["inputs"], source["result"] = json.loads(source["inputs"]), json.loads(source["result"])
             require_supported_source(source)
             def validation_progress(done, total, point):
+                status = {"iteration": done, "maximum": total, "phase": "热化学对比"}
+                if isinstance(point, dict) and point.get("phase") == PROGRESS_PHASE:
+                    status.update({key: point[key] for key in (
+                        "phase", "eos", "stage", "solver_iteration", "solver_maximum", "residual") if key in point})
                 store.execute("UPDATE jobs SET progress=? WHERE id=? AND status='running'",
-                              (json.dumps({"iteration": done, "maximum": total, "phase": "热化学对比"}), args.job))
+                              (json.dumps(status, allow_nan=False), args.job))
             result = calculate_validation(payload, source, validation_progress)
         elif job.get("kind") == "design":
-            result = calculate_design_job(job, progress)
+            result = calculate_design_job(job, progress,
+                                          monitor_callback=lambda event: append_event(store, args.job, event))
         else:
             raise ValueError(f"不支持的计算任务类型：{job.get('kind')}")
-        store.execute("UPDATE jobs SET status='succeeded',result=?,finished=? "
-                      "WHERE id=? AND status='running'",
-                      (json.dumps(result, ensure_ascii=False, allow_nan=False), time.time(), args.job))
+        persist_success(store, job, result)
         return 0
     except Exception as exc:
         traceback.print_exc()
         persist_failure(store, job, exc)
         return 1
-    finally:
-        faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == "__main__":
+    # Periodic dumps walk other threads while their frames can change.
+    # Keep crash diagnostics for the faulting thread only (CPython #158200).
+    faulthandler.enable(all_threads=False)
     raise SystemExit(main())

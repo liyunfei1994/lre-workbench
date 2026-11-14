@@ -64,6 +64,19 @@ def source_fixture(cycle='ffsc',dual=True):
 
 
 class TransientPhysicsTests(unittest.TestCase):
+    def test_setup_requires_ideal_eos_at_preburner_even_with_ideal_chamber(self):
+        source = source_fixture()
+        c = source['result']['calculation']
+        c['inputs'].update(gas_eos='ideal-gas', gas_species_policy='pr_supported_v1')
+        c['states']['main_chamber']['metadata'] = {'model': {'eos': 'ideal-gas'}}
+        self.assertTrue(transient_setup(source)['ready'])
+        c['states']['ox_preburner_outlet']['metadata'] = {'model': {'eos': 'Peng-Robinson'}}
+        setup = transient_setup(source)
+        self.assertFalse(setup['ready'])
+        self.assertIn('仅支持理想燃气', setup['issues'][0])
+        with self.assertRaisesRegex(ValueError, '仅支持理想燃气'):
+            normalize_request({'source_job_id': source['id']}, source)
+
     def test_all_topologies_start_at_a_true_fixed_point(self):
         for cycle,dual,shafts in [('ffsc',True,2)]:
             with self.subTest(cycle=cycle,dual=dual):

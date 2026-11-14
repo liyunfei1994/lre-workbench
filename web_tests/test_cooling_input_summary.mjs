@@ -149,3 +149,55 @@ test("all source and record strings are escaped", () => {
   assert.match(html,/&lt;dataset&gt;/);
   assert.match(html,/&lt;b&gt;test/);
 });
+
+function valveFixture(topology="paper_split_before_cooling_v1") {
+  const value=fixture(), {inputs,record,profile}=value;
+  const paper=topology==="paper_split_before_cooling_v1", mass=paper?70:90;
+  const config={schema_version:1,enabled:true,topology_id:topology,mode:"requirement_sizing",valves:{
+    MFV:{id:"MFV",fluid:"CH4",upstream_node:"fuel_after_pump",downstream_node:"cooling_inlet"},
+    OPFV:{id:"OPFV",fluid:"CH4",upstream_node:paper?"fuel_after_pump":"fuel_after_cooling",downstream_node:"opfv_outlet"},
+    FPOV:{id:"FPOV",fluid:"O2",upstream_node:"lox_after_pump",downstream_node:"fpov_outlet"}}};
+  inputs.valve_configuration_json=JSON.stringify(config);
+  record.result.calculation.steady_closure={valve_design:{configuration:config}};
+  Object.assign(record.result.calculation.states,{cooling_inlet:{mass_flow:mass,pressure:45e6,temperature:118,enthalpy:-100000},
+    fuel_after_cooling:{mass_flow:mass},branch_fuel_to_fpb:{mass_flow:70}});
+  Object.assign(profile.nodes[0],{p_Pa:45e6,T_K:118});
+  Object.assign(profile.nodes[1],{rho_kgm3:500,velocity_ms:mass/5,A_flow_m2:.01});
+  return value;
+}
+
+test("explicit valve summaries use post-MFV state and actual coolant flow for both layouts",()=>{
+  for(const topology of ["paper_split_before_cooling_v1","all_fuel_cooled_then_split_valves_v1"]){
+    const {inputs,record}=valveFixture(topology), before=JSON.stringify(record);
+    const state=coolingInputSummaryState(inputs,{record});
+    assert.equal(state.status,"current");
+    assert.equal(state.boundary.mdot,topology==="paper_split_before_cooling_v1"?70:90);
+    assert.equal(state.boundary.pressure,45e6);assert.equal(state.boundary.temperature,118);
+    const html=renderCoolingInputSummary(inputs,{record});
+    assert.match(html,/MFV 出口 \/ 冷却入口/);assert.match(html,/冷却支路质量流量/);
+    assert.doesNotMatch(html,/甲烷总质量流量|已保存入口条件 · 燃料主泵出口/);
+    if(topology==="paper_split_before_cooling_v1")assert.match(html,/OPFV 旁路直接供给富氧预燃室/);
+    assert.equal(JSON.stringify(record),before);
+  }
+});
+
+test("missing valve port and conflicting saved coolant boundary never fall back to total pump flow",()=>{
+  const mutations=[r=>delete r.result.calculation.states.cooling_inlet,
+    r=>r.result.calculation.components.cooling_channel.profile.nodes[0].p_Pa=50e6,
+    r=>r.result.calculation.components.cooling_channel.profile.nodes[1].velocity_ms=18,
+    r=>r.result.calculation.states.cooling_inlet.mass_flow=90,
+    r=>delete r.result.calculation.steady_closure.valve_design];
+  for(const mutate of mutations){
+    const {inputs,record}=valveFixture();mutate(record);
+    const state=coolingInputSummaryState(inputs,{record});
+    assert.equal(state.isCurrent,false);assert.equal(state.boundary,null);
+    assert.doesNotMatch(renderCoolingInputSummary(inputs,{record}),/<table/);
+  }
+});
+
+test("disabled default configuration preserves legacy identity while unknown valves cannot infer a port",()=>{
+  const {inputs,record}=fixture();
+  assert.equal(coolingInputSummaryState({...inputs,valve_configuration_json:""},{record}).status,"current");
+  inputs.valve_configuration_json=JSON.stringify({schema_version:1,enabled:true,topology_id:"unknown",valves:{}});
+  assert.equal(coolingInputSummaryState(inputs,{record}).status,"valve_mismatch");
+});

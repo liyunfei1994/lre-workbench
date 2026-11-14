@@ -224,9 +224,13 @@ class NozzleGeometryViewTests(unittest.TestCase):
 
     def test_geometry_inputs_have_one_editor_owner(self):
         schema = design_ui_schema()
-        for key in ("nozzle_contour_method", "nozzle_initial_angle_deg", "nozzle_exit_angle_deg", "expansion_ratio"):
+        expected_owners = {"nozzle_contour_method": "thermal_geometry",
+                           "nozzle_initial_angle_deg": "thermal_geometry",
+                           "nozzle_exit_angle_deg": "thermal_geometry",
+                           "expansion_ratio": "nozzle_performance"}
+        for key, owner in expected_owners.items():
             owners = [g["id"] for g in schema["system_groups"] if any(f["key"] == key for f in g["fields"])]
-            self.assertEqual(owners, ["chamber_contour"])
+            self.assertEqual(owners, [owner])
 
 
 class NozzleGeometryAPITests(unittest.TestCase):

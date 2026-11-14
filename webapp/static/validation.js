@@ -4,13 +4,20 @@ import {renderThermoStations,verifiedCeaComposition} from "./thermo-stations.js"
 import {renderThermoCharts, buildThermoChartSvg} from "./validation-charts.js";
 import {renderPropertyComparison, buildPropertyComparisonSvg, buildPropertyComparisonCsv} from "./property-comparison.js";
 import {renderGasHandoff} from "./gas-handoff.js";
+import {renderGasEosComparison} from "./gas-eos-comparison.js";
+import {recordModelValidity,renderModelValidity} from "./model-validity.js";
 const escape = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const copy = value => JSON.parse(JSON.stringify(value));
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? value.toLocaleString("zh-CN", {maximumSignificantDigits:7}) : "—";
 const date = value => value ? new Date(value * 1000).toLocaleString("zh-CN", {hour12:false}) : "—";
 const running = record => ["queued","running"].includes(record?.status);
-const tabs = {gas_handoff:"燃气交接与筛查",thermochemistry:"纯推进剂理论基线 · CEA–Cantera",conservation:"系统守恒",properties:"真实流体 / REFPROP",experiment:"试验验证"};
+const isEosRecord = record => record?.request?.gas_eos_comparison?.enabled===true || !!record?.result?.gas_eos_comparison;
+const eosCandidates = {
+  "Peng-Robinson":"Peng–Robinson 状态方程（PR，预燃室与涡轮）",
+  "Peng-Robinson-Boston-Mathias":"Peng–Robinson / Boston–Mathias 修正（PR–BM，全燃气流程）",
+};
+const tabs = {gas_handoff:"燃气交接与筛查",gas_eos_comparison:"理想气体 / PR",thermochemistry:"纯推进剂理论基线 · CEA–Cantera",conservation:"系统守恒",properties:"真实流体 / REFPROP",experiment:"试验验证"};
 const statusNames = {queued:"排队中",running:"运行中",succeeded:"任务已完成",failed:"执行失败",cancelled:"已取消",timed_out:"超时",interrupted:"服务中断",pass:"通过",fail:"未通过",ok:"有结果",error:"计算错误",unavailable:"不可用",not_provided:"未提供",partial:"部分结果",skipped:"未执行",warning:"需复核",calibration:"标定数据",holdout:"独立验证数据",not_comparable:"产物范围不同"};
 const metricLabels = {Tc_K:["燃烧温度","K"],Cstar_m_s:["特征速度 c*","m/s"],Isp_vac_s:["真空比冲","s"],Cf_vac:["真空推力系数","1"],MW_chamber_kg_kmol:["燃气分子量","kg/kmol"],gamma_chamber:["燃烧室等熵指数 a²ρ/p","1"]};
 const badge = status => `<span class="validation-badge validation-${["pass","fail","error","unavailable","running","queued"].includes(status)?status:"neutral"}">${escape(statusNames[status]||status||"待校核")}</span>`;
@@ -27,6 +34,11 @@ function sourceRecord(context){
   return record?.status==="succeeded"&&record.result&&record.id&&record.project_id===context.project?.id ? record : null;
 }
 function sourceInputs(context){const record=sourceRecord(context);return record?.inputs||record?.result?.submitted_inputs||record?.result?.calculation?.inputs||record?.result?.inputs||{};}
+function defaultEosCandidate(inputs){return inputs.gas_eos==="Peng-Robinson-Boston-Mathias"?"Peng-Robinson-Boston-Mathias":"Peng-Robinson";}
+function eosSourceIssue(context){
+  if(!sourceRecord(context)||sourceInputs(context).combustion_loss_model==="adiabatic")return "";
+  return "来源记录包含旧版本温升折减，或未记录温度修正方式。请先采用当前设计模型，确认保存并生成新的设计点记录，再执行本项校核。历史校核结果仍可查看。";
+}
 function positive(value,label){const n=Number(value);if(String(value).trim()===""||!Number.isFinite(n)||n<=0)throw Error(`${label}必须为正的有限数值。`);return n;}
 function nonnegative(value,label){const n=Number(value);if(String(value).trim()===""||!Number.isFinite(n)||n<0)throw Error(`${label}必须为非负有限数值。`);return n;}
 function values(text,label){const output=String(text).split(/[,，;；\s]+/).filter(Boolean).map(value=>positive(value,label));if(!output.length||output.length>20)throw Error(`${label}须提供 1–20 个点。`);return output;}
@@ -96,10 +108,11 @@ export function createValidationForm(context){
   const nozzleMode=record?.result?.calculation?.thermodynamic_applicability?.nozzle?.id;
   const inlet=(side,stateKey,tankKey,temperature)=>{
     const state=[states[stateKey],states[tankKey]].find(value=>finite(value?.pressure)&&value.pressure>0&&finite(value?.temperature));
-    const pressure=state?.pressure??p[`${side}_tank_pressure`]??p.tank_pressure_pa??p.inlet_pressure;
+    const pressure=state?.pressure??p[`${side}_tank_pressure_pa`]??p[`${side}_tank_pressure`]??p.tank_pressure_pa??p.inlet_pressure;
     return `${state?.temperature??temperature??""}, ${finite(pressure)?pressure/1e6:""}`;
   };
   return {propellant_pair:p.propellant_pair||"lox_methane",product_policy:(p.propellant_pair||"lox_methane")==="lox_methane"?"matched_cho_gas":"native_databases",cantera_dataset:"production",
+    candidate_eos:defaultEosCandidate(p),
     pc_MPa:p.pc?String(p.pc/1e6):"",of_values:p.of_ratio?String(p.of_ratio):"",eps_values:p.expansion_ratio?String(p.expansion_ratio):"",
     scan_mode:"range",of_start:p.of_ratio?String(Number(Math.max(.05,p.of_ratio*.75).toPrecision(6))):"",of_end:p.of_ratio?String(Number(Math.min(20,p.of_ratio*1.25).toPrecision(6))):"",of_count:"8",
     T_fuel_K:p.fuel_inlet_temp==null?"":String(p.fuel_inlet_temp),T_ox_K:p.ox_inlet_temp==null?"":String(p.ox_inlet_temp),mode:["equilibrium","frozen_chamber","frozen_throat"].includes(nozzleMode)?nozzleMode:"equilibrium",
@@ -115,6 +128,8 @@ export function createValidationForm(context){
 }
 
 export function buildValidationRequest(context,form,tab){
+  const validity=recordModelValidity(context?.record);
+  if(validity.reuse_blocked)throw Error(validity.reason);
   const record=sourceRecord(context);
   if(!record)throw Error("请先在计算记录中选择本项目已完成的设计点，再运行校核。");
   const p=sourceInputs(context),request={source_job_id:record.id};
@@ -133,6 +148,12 @@ export function buildValidationRequest(context,form,tab){
       product_policy:productPolicy,cantera_dataset:dataset,methane_thermo_dataset:p.methane_thermo_dataset||"gri30"};
   }else if(tab==="gas_handoff"){
     request.gas_screening={enabled:true};
+  }else if(tab==="gas_eos_comparison"){
+    const sourceIssue=eosSourceIssue(context);
+    if(sourceIssue)throw Error(sourceIssue);
+    const candidate=form.candidate_eos===undefined?defaultEosCandidate(p):form.candidate_eos;
+    if(typeof candidate!=="string"||!Object.hasOwn(eosCandidates,candidate))throw Error("请选择有效的 PR 候选模型。");
+    request.gas_eos_comparison={enabled:true,candidate_eos:candidate};
   }else if(tab==="properties"){
     request.properties={points:propertyPoints(form),compare_refprop:!!form.compare_refprop};
   }else if(tab==="experiment"){
@@ -256,14 +277,41 @@ function checkResults(section,kind){
   return `<div class="validation-result-summary">${badge(section.status)}<span>${title}</span></div>`+
     notes(section.notes)+table(headers,rows);
 }
-export function renderValidationResult(result,tab,metric="Isp_vac_s",propertySelection={},thermoSelection={}){
+export function renderValidationResult(result,tab,metric="Isp_vac_s",propertySelection={},thermoSelection={},eosActive=false){
   if(!Object.hasOwn(tabs,tab))return message("未知校核类型。","error");
   if(tab==="gas_handoff")return renderGasHandoff(result?.gas_handoff,result?.gas_screening,result?.chamber_handoff_comparison);
+  if(tab==="gas_eos_comparison")return renderGasEosComparison(result?.gas_eos_comparison,eosActive);
   if(tab==="properties")return renderPropertyComparison(result?.properties,propertySelection);
   return tab==="thermochemistry"?thermochemistryResult(result?.thermochemistry,metric,thermoSelection):checkResults(result?.[tab],tab);
 }
 
+export function renderEosProgress(record){
+  const progress=record?.progress;
+  if(record?.status!=="running"||progress?.phase!=="整循环燃气 EOS 对比")return "";
+  if(progress.stage==="reviewed")return '<span aria-live="polite">正在汇总校核结果</span>';
+  const model=progress.eos==="ideal-gas" ? "全理想方案"
+    : progress.eos==="Peng-Robinson" ? "PR 前段方案"
+    : progress.eos==="Peng-Robinson-Boston-Mathias" ? "PR–BM 全燃气方案" : null;
+  if(!model)return "";
+  const current=progress.solver_iteration,maximum=progress.solver_maximum;
+  let phase="等待首个求解进度";
+  if(finite(current)&&finite(maximum)&&maximum>0){
+    phase=current<maximum ? `当前阶段进度 ${number(current)} / ${number(maximum)}` : "正在核对收敛与守恒";
+  }
+  const residual=finite(progress.residual)?` · 验收残差 ${number(progress.residual)}`:"";
+  return `<span aria-live="polite">${model} · ${phase}${residual}</span>`;
+}
+
 function controls(form,tab){
+  if(tab==="gas_eos_comparison"){
+    const candidate=form.candidate_eos,bm=candidate==="Peng-Robinson-Boston-Mathias";
+    const scope=bm?"候选模型范围：预燃室、涡轮、主燃烧室、冷却燃气侧与喷管均采用 PR–BM。两侧统一冻结组成准一维热侧算法、单元中心取值及实际总温／静温比修正，并核对实际模型记录。":"候选模型范围：预燃室与涡轮采用 PR；主燃烧室、冷却燃气侧与喷管采用理想气体。";
+    return `<label>真实气体候选模型<select data-validation-field="candidate_eos" aria-describedby="validation-eos-scope">${Object.entries(eosCandidates).map(([key,label])=>`<option value="${key}"${candidate===key?" selected":""}>${label}</option>`).join("")}</select></label>`+
+      `<div id="validation-eos-scope" data-validation-eos-scope>${message(scope)}</div>`+
+      message("使用所选设计记录的输入，在相同受限物种集合（16 种）下分别重算全理想方案与所选候选模型。原记录采用完整物种时，另算共同 16 种的理想气体基线；两侧按实际涡轮排气的组成与焓重新匹配整机。")+
+      message("16 种是当前实现的参数覆盖范围，不是 PR 状态方程的理论物种数上限。当前集合缺少 H、O、OH 等解离物种；对比差异不等于高压预测误差。")+
+      message("候选模型仅用于本次独立校核，不修改方案输入。当前未保存设置不参与计算；校核结果单独保存并关联来源记录。两侧均需重算整机，PR–BM 计算可能明显更耗时。");
+  }
   if(tab==="gas_handoff")return message("读取所选设计记录各燃气端口的完整组成、元素流、焓基准和总／静态定义，并运行独立 EOS／凝聚相筛查及实际主室入口复核。不会使用当前草稿补全历史记录，不会把候选物性模型替换进生产循环。")+message("主室复核沿用该记录真实涡轮排气的质量流量、元素和焓；这里没有可覆盖这些条件的温度或氧燃质量比输入。缺少数据、后端不可用或超出模型范围时保留原因。","note");
   if(tab==="thermochemistry")return message("纯推进剂一次燃烧是独立理论性能基线，用于对齐入口焓、产物集合和喷管假设后检查 Cantera／CEA 的差异。它不是 FFSC 实际主燃烧室复核；实际两股涡轮排气请到“燃气交接与筛查”查看。")+`<div class="validation-scan-fields"><label>计算方式<select data-validation-field="scan_mode">${[["range","氧燃质量比 等间隔扫描"],["point","单点校核"],["list","自定义 氧燃质量比 点"]].map(([key,label])=>`<option value="${key}" ${form.scan_mode===key?"selected":""}>${label}</option>`).join("")}</select></label>${input("pc_MPa","燃烧室压力 / MPa",form.pc_MPa,'type="number" min="0" step="any"')}${form.scan_mode==="range"?`${input("of_start","氧燃质量比 起始值",form.of_start,'type="number" min="0.05" max="20" step="any"')}${input("of_end","氧燃质量比 终止值",form.of_end,'type="number" min="0.05" max="20" step="any"')}${input("of_count","氧燃质量比 点数",form.of_count,'type="number" min="2" max="20" step="1"')}`:input("of_values",form.scan_mode==="point"?"氧燃质量比":"氧燃质量比 点（逗号分隔）",form.of_values)}${input("eps_values","膨胀比 ε（可填多个）",form.eps_values,'placeholder="如 40,80,120"')}${input("T_fuel_K","纯燃料入口温度 / K",form.T_fuel_K,'type="number" min="0" step="any"')}${input("T_ox_K","纯氧化剂入口温度 / K",form.T_ox_K,'type="number" min="0" step="any"')}<label>喷管膨胀假设<select data-validation-field="mode">${[["equilibrium","平衡流"],["frozen_chamber","燃烧室冻结"],["frozen_throat","喉部冻结"]].map(([key,label])=>`<option value="${key}" ${form.mode===key?"selected":""}>${label}</option>`).join("")}</select></label></div>${comparisonControls(form)}<div class="validation-scan-summary" data-validation-scan-summary>${scanSummary(form)}</div><details class="validation-scope-help"><summary>扫描条件说明</summary><p>扫描初值以来源设计点的 氧燃质量比 为中心展开，可自行修改；膨胀比、压力和纯推进剂入口温度复制自来源记录，不复制涡轮排气温度；常用液氧甲烷基线是甲烷 110 K、氧 90 K，实际以本次输入为准。若要复现原桌面的 24 点扫描，可填 氧燃质量比 2.5–5.0、8 点，膨胀比 40,80,120。</p><p>用于独立的推进剂燃烧与喷管基准；不等同于 FFSC 预燃室排气。每次最多 60 个 氧燃质量比 × ε 组合。</p></details>`;
   if(tab==="conservation")return message("按所选已完成设计记录检查质量流量与轴功率闭合。仅检查系统数值一致性，不替代热化学模型检查或试验验证；当前草稿不参与本次校核。");
@@ -296,11 +344,14 @@ export function mountValidation(container,{api,getContext,notify=()=>{}}){
   }
   function render(){
     const context=syncContext(),source=sourceRecord(context),hasSource=!!source,activeCount=records.filter(running).length;
+    const invalidSource=recordModelValidity(source).reuse_blocked;
+    const eosBlocked=tab==="gas_eos_comparison"?eosSourceIssue(context):"";
     const sourceName=source?`方案 v${source.revision} · 设计记录 ${source.id} · ${date(source.created)}`:"未选择已完成的设计记录";
     const stale=source&&(context.dirty||source.revision!==context.project.revision);
     const selectedSource=selected?.source_job_id||selected?.request?.source_job_id||selected?.result?.source?.job_id;
     const shownResult=tab==="gas_handoff"&&!selected?{gas_handoff:source?.result?.gas_handoff??source?.result?.calculation?.gas_handoff}:selected?.result;
-    container.innerHTML=`<section class="validation-workspace" aria-label="热力学与系统校核"><div class="validation-heading"><div><span class="validation-kicker">MODEL VERIFICATION</span><h2>热力学与系统校核</h2><p>独立基准 · 守恒审计 · 物性边界 · 试验证据</p></div><button data-validation-action="refresh" ${busy?"disabled":""}>重新读取记录</button></div>${capabilityCards(capabilities)}<div class="validation-source"><b>输入来源</b><span>${escape(sourceName)}</span></div>${!hasSource?message("先选择本项目已完成的设计点。校核不会保存草稿，也不会覆盖系统计算结果。","warning"):stale?message("当前草稿或方案版本与该设计记录不同。本次校核使用上述已保存的计算快照；不会将新草稿混入旧结果。","warning"):""}${hasSource ? `<details class="validation-diagnostics"><summary>设计点的热力学适用性与假设</summary>${renderThermodynamicApplicability(source.result)}</details>` : ""}<div class="validation-tabs" role="tablist" aria-label="校核类别">${Object.entries(tabs).map(([key,label])=>`<button role="tab" aria-selected="${tab===key}" data-validation-tab="${key}" class="${tab===key?"is-active":""}">${label}</button>`).join("")}</div><div class="validation-layout ${["thermochemistry","properties","gas_handoff"].includes(tab)?"validation-thermo-layout":""}"><section class="validation-settings"><h3>${["thermochemistry","properties"].includes(tab)?"分析条件":"校核条件"}</h3><fieldset ${busy?"disabled":""}>${controls(form,tab)}</fieldset><div class="validation-actions"><button class="primary" data-validation-action="run" ${!hasSource||busy||activeCount>=2?"disabled":""}>${busy?"正在提交…":tab==="gas_handoff"?"运行燃气交接与筛查":(tab==="thermochemistry"&&form.scan_mode!=="point")||(tab==="properties"&&form.property_mode!=="points")?"运行扫描对比":"运行本项校核"}</button>${activeCount>=2?'<span class="validation-help">已有两个校核任务等待或运行，请稍后提交。</span>':""}</div></section><section class="validation-output"><div class="validation-record-toolbar"><label>校核记录<select data-validation-record ${busy?"disabled":""}><option value="">选择记录</option>${records.map(record=>`<option value="${escape(record.id)}" ${selected?.id===record.id?"selected":""}>v${escape(record.revision)} · ${escape(date(record.created))} · ${escape(statusNames[record.status]||record.status)}</option>`).join("")}</select></label><button data-validation-action="export" ${selected?"":"disabled"}>导出 JSON</button><button data-validation-action="cancel" ${running(selected)&&!busy?"":"disabled"}>取消任务</button></div>${error?message(error,"error"):""}${selected?`<div class="validation-run-status">${badge(selected.status)}<span>校核记录 ${escape(selected.id)} · 方案 v${escape(selected.revision)}</span></div><p class="validation-help">刷新页面或“重新读取记录”只更新显示。更新校核结果请点击上方“运行扫描对比／运行本项校核”；“运行设计点”只生成新的系统设计记录。</p>`:""}${selected?.error?message(typeof selected.error==="string"?selected.error:JSON.stringify(selected.error),"error"):""}${selectedSource&&selectedSource!==source?.id?message("当前展示的是另一设计记录的校核结果；更改校核条件不会改写该历史记录。","warning"):""}${renderValidationResult(shownResult,tab,metric,propertySelection,thermoSelection)}${selected?.result?.source?sourceProvenancePanel(selected.result.source):""}</section></div></section>`;
+    const eosActive=selected?.status==="running" && selected?.request?.gas_eos_comparison?.enabled===true;
+    container.innerHTML=`<section class="validation-workspace" aria-label="热力学与系统校核"><div class="validation-heading"><div><span class="validation-kicker">MODEL VERIFICATION</span><h2>热力学与系统校核</h2><p>独立基准 · 守恒审计 · 物性边界 · 试验证据</p></div><button data-validation-action="refresh" ${busy?"disabled":""}>重新读取记录</button></div>${capabilityCards(capabilities)}${renderModelValidity(source)}<div class="validation-source"><b>输入来源</b><span>${escape(sourceName)}</span></div>${!hasSource?message("先选择本项目已完成的设计点。校核不会保存草稿，也不会覆盖系统计算结果。","warning"):stale?message("当前草稿或方案版本与该设计记录不同。本次校核使用上述已保存的计算快照；不会将新草稿混入旧结果。","warning"):""}${hasSource ? `<details class="validation-diagnostics"><summary>设计点的热力学适用性与假设</summary>${renderThermodynamicApplicability(source.result)}</details>` : ""}<div class="validation-tabs" role="tablist" aria-label="校核类别">${Object.entries(tabs).map(([key,label])=>`<button role="tab" aria-selected="${tab===key}" data-validation-tab="${key}" class="${tab===key?"is-active":""}">${label}</button>`).join("")}</div><div class="validation-layout ${["thermochemistry","properties","gas_handoff","gas_eos_comparison"].includes(tab)?"validation-thermo-layout":""}"><section class="validation-settings"><h3>${["thermochemistry","properties"].includes(tab)?"分析条件":"校核条件"}</h3><fieldset ${busy?"disabled":""}>${controls(form,tab)}</fieldset>${eosBlocked?message(eosBlocked,"warning"):""}<div class="validation-actions"><button class="primary" data-validation-action="run" ${!hasSource||invalidSource||eosBlocked||busy||activeCount>=2?"disabled":""}>${busy?"正在提交…":tab==="gas_eos_comparison"?"运行理想气体 / PR 整机对比":tab==="gas_handoff"?"运行燃气交接与筛查":(tab==="thermochemistry"&&form.scan_mode!=="point")||(tab==="properties"&&form.property_mode!=="points")?"运行扫描对比":"运行本项校核"}</button>${activeCount>=2?'<span class="validation-help">已有两个校核任务等待或运行，请稍后提交。</span>':""}</div></section><section class="validation-output"><div class="validation-record-toolbar"><label>校核记录<select data-validation-record ${busy?"disabled":""}><option value="">选择记录</option>${records.map(record=>`<option value="${escape(record.id)}" ${selected?.id===record.id?"selected":""}>v${escape(record.revision)} · ${escape(date(record.created))} · ${escape(statusNames[record.status]||record.status)}</option>`).join("")}</select></label><button data-validation-action="export" ${selected?"":"disabled"}>导出 JSON</button><button data-validation-action="cancel" ${running(selected)&&!busy?"":"disabled"}>取消任务</button></div>${error?message(error,"error"):""}${selected?`<div class="validation-run-status">${badge(selected.status)}<span>校核记录 ${escape(selected.id)} · 方案 v${escape(selected.revision)}</span>${renderEosProgress(selected)}</div><p class="validation-help">刷新页面或“重新读取记录”只更新显示。更新校核结果请点击上方“运行扫描对比／运行本项校核”；“运行设计点”只生成新的系统设计记录。</p>`:""}${selected?.error?message(typeof selected.error==="string"?selected.error:JSON.stringify(selected.error),"error"):""}${selectedSource&&selectedSource!==source?.id?message("当前展示的是另一设计记录的校核结果；更改校核条件不会改写该历史记录。","warning"):""}${renderModelValidity(selected)}${renderValidationResult(shownResult,tab,metric,propertySelection,thermoSelection,eosActive)}${selected?.result?.source?sourceProvenancePanel(selected.result.source):""}</section></div></section>`;
   }
   function schedule(){stop();if(live&&records.some(running))timer=setTimeout(()=>{refresh().catch(()=>{});},1800);}
   async function refresh(){
@@ -313,7 +364,7 @@ export function mountValidation(container,{api,getContext,notify=()=>{}}){
     if(results[1].status==="fulfilled")records=Array.isArray(results[1].value)?results[1].value:[];else error=results[1].reason?.message||"无法读取校核记录。";
     const next=records.find(record=>record.id===selected?.id)||records[0];
     if(next){
-      try{const detail=await api(`/validations/${encodeURIComponent(next.id)}`);if(!live||token!==sequence||getContext()?.project?.id!==id)return;selected=detail;}
+      try{const detail=await api(`/validations/${encodeURIComponent(next.id)}`);if(!live||token!==sequence||getContext()?.project?.id!==id)return;const changed=selected?.id!==detail.id;selected=detail;if(changed&&isEosRecord(detail))tab="gas_eos_comparison";}
       catch(problem){if(!live||token!==sequence)return;error=problem.message;}
     }
     render();schedule();
@@ -322,7 +373,7 @@ export function mountValidation(container,{api,getContext,notify=()=>{}}){
     thermoSelection={};
     const token=++sequence,project=projectId;stop();
     if(!id){selected=null;render();return;}
-    try{const detail=await api(`/validations/${encodeURIComponent(id)}`);if(live&&token===sequence&&projectId===project&&getContext()?.project?.id===project){selected=detail;error="";render();schedule();}}
+    try{const detail=await api(`/validations/${encodeURIComponent(id)}`);if(live&&token===sequence&&projectId===project&&getContext()?.project?.id===project){selected=detail;if(isEosRecord(detail))tab="gas_eos_comparison";error="";render();schedule();}}
     catch(problem){if(live&&token===sequence){error=problem.message;render();}}
   }
   async function run(){
@@ -358,7 +409,7 @@ export function mountValidation(container,{api,getContext,notify=()=>{}}){
     }catch(problem){if(live){error=problem.message;render();}}
   }
   container.addEventListener("input",event=>{const target=event.target;if(target.dataset?.validationField){form[target.dataset.validationField]=target.type==="checkbox"?target.checked:target.value;const summary=container.querySelector?.("[data-validation-scan-summary]");if(summary)summary.innerHTML=scanSummary(form);const propertyScan=container.querySelector?.("[data-property-scan-summary]");if(propertyScan)propertyScan.innerHTML=propertySummary(form);}});
-  container.addEventListener("change",event=>{const target=event.target;if(target.hasAttribute?.("data-validation-record"))chooseRecord(target.value);if(target.hasAttribute?.("data-validation-metric")&&Object.hasOwn(metricLabels,target.value)){metric=target.value;render();}if(["product_policy","cantera_dataset"].includes(target.dataset?.validationField)){form[target.dataset.validationField]=target.value;if(form.product_policy!=="matched_cho_gas")form.cantera_dataset="production";render();}if(target.dataset?.validationField==="scan_mode"){form.scan_mode=target.value;render();}if(["property_mode","property_fluid"].includes(target.dataset?.validationField)){form[target.dataset.validationField]=target.value;if(form.property_mode!=="points")resetPropertySweep(form);render();}if(target.hasAttribute?.("data-thermo-point")){thermoSelection={...thermoSelection,pointIndex:Number(target.value),open:true};render();}if(target.hasAttribute?.("data-thermo-station")){thermoSelection={...thermoSelection,station:target.value,open:true};render();}if(target.hasAttribute?.("data-property-group")){propertySelection={group:target.value};render();}});
+  container.addEventListener("change",event=>{const target=event.target;if(target.hasAttribute?.("data-validation-record"))chooseRecord(target.value);if(target.hasAttribute?.("data-validation-metric")&&Object.hasOwn(metricLabels,target.value)){metric=target.value;render();}if(["product_policy","cantera_dataset"].includes(target.dataset?.validationField)){form[target.dataset.validationField]=target.value;if(form.product_policy!=="matched_cho_gas")form.cantera_dataset="production";render();}if(target.dataset?.validationField==="candidate_eos"){form.candidate_eos=target.value;render();}if(target.dataset?.validationField==="scan_mode"){form.scan_mode=target.value;render();}if(["property_mode","property_fluid"].includes(target.dataset?.validationField)){form[target.dataset.validationField]=target.value;if(form.property_mode!=="points")resetPropertySweep(form);render();}if(target.hasAttribute?.("data-thermo-point")){thermoSelection={...thermoSelection,pointIndex:Number(target.value),open:true};render();}if(target.hasAttribute?.("data-thermo-station")){thermoSelection={...thermoSelection,station:target.value,open:true};render();}if(target.hasAttribute?.("data-property-group")){propertySelection={group:target.value};render();}});
   container.addEventListener("click",event=>{const button=event.target.closest?.("button");if(!button||button.disabled)return;const next=button.dataset.validationTab;if(Object.hasOwn(tabs,next)){tab=next;error="";render();return;}const action=button.dataset.validationAction;if(action==="run")run();if(action==="refresh")refresh();if(action==="cancel")cancel();if(action==="export")exportRecord();if(action==="export-png")exportCharts("png");if(action==="export-svg")exportCharts("svg");if(action==="export-property-png")exportCharts("png","properties");if(action==="export-property-svg")exportCharts("svg","properties");if(action==="export-property-csv")exportCharts("csv","properties");});
   render();
   return {refresh,sync(){if(live)render();},onLeave(){live=false;++sequence;stop();}};

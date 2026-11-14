@@ -42,6 +42,7 @@ GG 混合比：默认温度目标模式（use_target_gg_temp=1），外环反求
 from __future__ import annotations
 
 from lre_workbench.runtime.tasks import checkpoint
+from lre_workbench.domain.models import supply_conditions, supply_summary
 
 import copy
 import math
@@ -214,18 +215,18 @@ class GGCycleModel:
         components: dict[str, object] = {}
 
         # ── 增压输送系统（与 FFSC 同一套三节点链）──────────────
-        p_tank = self.inputs.tank_pressure_pa
-        p_boost_out = self.inputs.inlet_pressure
-        feed_dp = float(getattr(self.inputs, "feed_line_dp_pa", 0.5e5))
-        p_pump_inlet = p_boost_out - feed_dp
-        if p_pump_inlet <= 0 or p_boost_out < p_tank:
-            raise ValueError("增压输送链要求出口压力不低于贮箱，且扣除管损后的主泵入口压力为正；不截压。")
-        eta_boost = float(getattr(self.inputs, "boost_pump_efficiency", 0.70))
-        dp_boost = p_boost_out - p_tank
+        supplies = {side: supply_conditions(self.inputs, side) for side in ("fuel", "ox")}
         boost_powers = {}
         for prefix, species, temperature, mdot in (
             ("lox", "O2", self.inputs.ox_inlet_temp, mdot_ox),
             ("fuel", self.propellant.fuel_species, self.inputs.fuel_inlet_temp, mdot_fuel)):
+            supply = supplies["ox" if prefix == "lox" else "fuel"]
+            p_tank = supply["tank_pressure_pa"]
+            p_boost_out = supply["boost_outlet_pressure_pa"]
+            p_pump_inlet = supply["pump_inlet_pressure_pa"]
+            eta_boost = supply["boost_pump_efficiency"]
+            if p_pump_inlet <= 0 or p_boost_out < p_tank:
+                raise ValueError(f"{prefix} 供给链压力无效；不截压。")
             try:
                 tank = state_tp(species, temperature, p_tank, require_liquid=True)
             except ValueError as exc:
@@ -291,8 +292,8 @@ class GGCycleModel:
         # ── 涡轮泵转速 ────────────────────────────────────
         rho_lox_inlet = states["lox_pump_inlet"].density
         rho_fuel_inlet = states["fuel_pump_inlet"].density
-        dp_lox = p_lox_pump_out - p_pump_inlet
-        dp_fuel = p_fuel_pump_out - p_pump_inlet
+        dp_lox = p_lox_pump_out - states["lox_pump_inlet"].pressure
+        dp_fuel = p_fuel_pump_out - states["fuel_pump_inlet"].pressure
         if self._dual_shaft():
             n_lox_rpm = _resolve_pump_speed(
                 override_rpm=self.inputs.lox_pump_speed_rpm_override,
@@ -327,7 +328,7 @@ class GGCycleModel:
         npshA_fuel = npsh_pressure(self.propellant.fuel_species, states["fuel_pump_inlet"])
 
         lox_pump = Pump("ox_pump", "LOX", mdot_ox,
-                        p_pump_inlet, p_lox_pump_out,
+                        states["lox_pump_inlet"].pressure, p_lox_pump_out,
                         states["lox_pump_inlet"].temperature, self.inputs.pump_efficiency_ox,
                         nr_rpm=n_lox_rpm,
                         n_stages=self.inputs.lox_pump_n_stages,
@@ -337,7 +338,7 @@ class GGCycleModel:
                         impeller_material=getattr(self.inputs, "lox_pump_impeller_material", None),
                         side="ox")
         fuel_pump = Pump("fuel_pump", self.propellant.fuel_species, mdot_fuel,
-                         p_pump_inlet, p_fuel_pump_out,
+                         states["fuel_pump_inlet"].pressure, p_fuel_pump_out,
                          states["fuel_pump_inlet"].temperature, self.inputs.pump_efficiency_fuel,
                          nr_rpm=n_fuel_rpm,
                          n_stages=self.inputs.fuel_pump_n_stages,
@@ -802,14 +803,10 @@ class GGCycleModel:
             "cooling_dp_MPa": dp_cooling / 1e6,
             "valve_line_dp_MPa": dp_valve / 1e6,
             # 增压输送系统（与 FFSC 同键）
-            "tank_pressure_bar": p_tank / 1e5,
-            "boost_out_pressure_bar": p_boost_out / 1e5,
-            "main_pump_inlet_pressure_bar": p_pump_inlet / 1e5,
-            "boost_pump_dp_bar": dp_boost / 1e5,
+            **supply_summary(self.inputs),
             "boost_pump_ox_power_MW": p_boost_lox / 1e6,
             "boost_pump_fuel_power_MW": p_boost_fuel / 1e6,
             "boost_pump_total_power_MW": (p_boost_lox + p_boost_fuel) / 1e6,
-            "boost_pump_efficiency": eta_boost,
             "boost_npsha_ox_m": npshA_boost_lox,
             "boost_npsha_fuel_m": npshA_boost_fuel,
             "boost_nss_ox_eu": nss_boost_lox_eu,
@@ -818,8 +815,7 @@ class GGCycleModel:
             "boost_npsh_fuel_applicable": float(npshA_boost_fuel is not None),
             "boost_pump_speed_assumed_rpm": n_boost,
             "pressure_network_note": (
-                f"贮箱 {p_tank/1e5:.1f} bar → 增压泵 → {p_boost_out/1e5:.1f} bar "
-                f"→ 短管 −{feed_dp/1e5:.1f} bar → 主泵入口 {p_pump_inlet/1e5:.1f} bar；"
+                supply_summary(self.inputs)["supply_pressure_note"] + "；" +
                 f"GG 供应压力 {p_gg/1e6:.2f} MPa（派生自泵出口），"
                 f"涡轮压比 π_t={pi_t_gg:.1f}（开式大压比）。"
             ),
@@ -1045,16 +1041,16 @@ class GGCycleModel:
         # Fixed boundary conditions cannot be repaired by numerical retries.
         # Reject invalid tank/feed phases before entering continuation, while
         # retaining bounded recovery for failures of changing trial states.
-        feed_dp = float(getattr(self.inputs, "feed_line_dp_pa", .5e5))
-        for label, species, temperature in (
-            ("燃料贮箱", self.propellant.fuel_species, self.inputs.fuel_inlet_temp),
-            ("液氧贮箱", "O2", self.inputs.ox_inlet_temp)):
+        for side, label, species, temperature in (
+            ("fuel", "燃料贮箱", self.propellant.fuel_species, self.inputs.fuel_inlet_temp),
+            ("ox", "液氧贮箱", "O2", self.inputs.ox_inlet_temp)):
+            supply = supply_conditions(self.inputs, side)
             try:
-                state_tp(species, temperature, self.inputs.tank_pressure_pa, require_liquid=True)
+                state_tp(species, temperature, supply["tank_pressure_pa"], require_liquid=True)
             except ValueError as exc:
                 raise ValueError(f"{label} → 增压泵入口状态无效：{exc}") from exc
-        if self.inputs.inlet_pressure - feed_dp <= 0 or self.inputs.inlet_pressure < self.inputs.tank_pressure_pa:
-            raise ValueError("增压输送链的指定压力无效；不截压或用贮箱温度代替后续节点温度。")
+            if supply["pump_inlet_pressure_pa"] <= 0 or supply["boost_outlet_pressure_pa"] < supply["tank_pressure_pa"]:
+                raise ValueError(f"{side} 增压输送链的指定压力无效；不截压或用贮箱温度代替后续节点温度。")
         if self._temp_target_mode():
             results = self._evaluate_temp_targeted(progress_callback)
         else:

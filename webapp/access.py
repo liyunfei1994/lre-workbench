@@ -62,7 +62,7 @@ def authorize_resource(request, user, store):
             if not job:
                 raise HTTPException(404, "记录不存在或无权访问。")
             project_id = job["project_id"]
-        elif name not in {"project_id", "revision", "candidate_id"}:
+        elif name not in {"project_id", "revision", "candidate_id", "baseline_id"}:
             raise HTTPException(403, "此资源尚未开放给试用账号。")
     if params and project_id is None:
         raise HTTPException(403, "此资源尚未开放给试用账号。")

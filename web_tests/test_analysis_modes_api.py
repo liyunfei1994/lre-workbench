@@ -23,6 +23,9 @@ class AnalysisModesAPITests(unittest.TestCase):
             "username": "admin", "display_name": "模式测试管理员", "password": TEST_PASSWORD})
         self.assertEqual(response.status_code, 200, response.text)
         self.source = source_fixture()
+        # This fixture exercises current task contracts, not withdrawn-model reuse.
+        self.source["inputs"]["combustion_loss_model"] = "adiabatic"
+        self.source["result"]["calculation"]["inputs"]["combustion_loss_model"] = "adiabatic"
         response = self.admin.post("/api/projects", json={
             "name": "独立任务测试", "inputs": self.source["inputs"]})
         self.assertEqual(response.status_code, 200, response.text)
@@ -82,7 +85,7 @@ class AnalysisModesAPITests(unittest.TestCase):
         self.assertEqual(record["task"]["mode"], "fixed_hardware_steady")
         self.assertEqual(record["task"]["schema_version"], 2)
         self.assertEqual(set(record["task"]["operating_conditions"]["boundaries"]),
-                         {"ambient_pressure", "tank_pressure_pa", "fuel_inlet_temp", "ox_inlet_temp"})
+                         {"ambient_pressure", "fuel_tank_pressure_pa", "ox_tank_pressure_pa", "fuel_inlet_temp", "ox_inlet_temp"})
         self.assertFalse(record["task"]["readiness"]["can_run"])
         self.assertTrue(record["task"]["readiness"]["blockers"])
         url = self.tasks + "/" + record["id"]

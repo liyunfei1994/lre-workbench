@@ -26,7 +26,7 @@ class PressureBudgetContractTests(unittest.TestCase):
     def test_full_flow_pressure_inputs_share_one_workspace_without_duplicate_editors(self):
         schema = design_ui_schema()
         # Scope and field removal is versioned so stale reviews are rechecked.
-        self.assertEqual(schema["version"], 18)
+        self.assertEqual(schema["version"], 21)
         group = next(group for group in schema["system_groups"] if group["id"] == "pressure_ffsc")
         self.assertEqual(group["title"], "压力分配与压降预算")
         self.assertTrue(group["pressure_workspace"])

@@ -179,6 +179,20 @@ class CaseIntegrationTests(unittest.TestCase):
         self.assertEqual(window._case_path, path)
         self.assertFalse(window._case_recovery_store.path.exists())
 
+    def test_cooling_estimate_basis_roundtrips_as_optional_text(self):
+        window = self.window()
+        path = self.directory / "冷却估算依据.json"
+        for basis in ("", "概略型面估算，压降依据待补充"):
+            with self.subTest(basis=basis):
+                window.input_edits["cooling_estimate_basis"].setText(basis)
+                document = window.case_document()
+                self.assertEqual(document["inputs"]["cooling_estimate_basis"], basis)
+                path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+                window.input_edits["cooling_estimate_basis"].setText("另一方案的依据")
+                window.load_case_path(path)
+                self.assertEqual(window.input_edits["cooling_estimate_basis"].text(), basis)
+                self.assertFalse(window._has_unsaved_changes())
+
     def test_invalid_analysis_structure_rejects_case_before_any_input_changes(self):
         window = self.window()
         window.input_edits["pc"].setText("34")

@@ -9,7 +9,7 @@ import math
 
 from lre_workbench.domain.analysis_contract import FIXED_HARDWARE_STEADY
 from lre_workbench.domain.analysis_roles import analysis_parameter_roles
-from lre_workbench.domain.models import preburner_temperature_constraint, wall_temperature_constraint
+from lre_workbench.domain.models import preburner_temperature_constraint, wall_temperature_constraint, supply_conditions
 from webapp.throttle import source_baseline
 from webapp.validation import fingerprint
 from webapp.steady_model_contract import model_data_manifest
@@ -17,7 +17,7 @@ from webapp.valve_requirements import valve_requirements_view
 
 
 BOUNDARY_FIELDS = frozenset({
-    "ambient_pressure", "tank_pressure_pa",
+    "ambient_pressure", "fuel_tank_pressure_pa", "ox_tank_pressure_pa",
     "fuel_inlet_temp", "ox_inlet_temp",
 })
 # Only actual, named output quantities may seed an operating-point task. Legacy
@@ -96,7 +96,9 @@ def configuration(source):
             except ValueError:
                 # An absent/unusable output is not replaced by a design target.
                 pass
-    boundaries = {key: _number(values[key], key, nonnegative=key == "ambient_pressure")
+    supply = {side: supply_conditions(values, side) for side in ("fuel", "ox")}
+    boundary_values = values | {f"{side}_tank_pressure_pa": row["tank_pressure_pa"] for side, row in supply.items()}
+    boundaries = {key: _number(boundary_values[key], key, nonnegative=key == "ambient_pressure")
                   for key in sorted(BOUNDARY_FIELDS)}
     hardware = {"schema_version": 2, "id": fingerprint(payload), "payload": payload}
     return {
@@ -113,6 +115,12 @@ def configuration(source):
             "control_targets": {},
         },
         "legacy_design_assumptions": {
+            **{f"{side}_{key}": {"value": row[key], "unit": "—" if key == "boost_pump_efficiency" else "Pa",
+                                "role": "design_target" if key == "boost_outlet_pressure_pa" else "model_assumption",
+                                "adopted_as_boundary": False,
+                                "description": "来源分路设计假设；未采纳为固定硬件运行边界或部件特性。"}
+               for side, row in supply.items()
+               for key in ("boost_outlet_pressure_pa", "feed_line_dp_pa", "boost_pump_efficiency")},
             "inlet_pressure": {"value": values["inlet_pressure"], "unit": "Pa", "role": "design_target",
                                "adopted_as_boundary": False,
                                "description": "来源前置增压泵出口设计要求；未作为固定硬件运行边界。"},
@@ -137,7 +145,12 @@ def normalize_request(value, source):
         raise ValueError("来源计算记录不匹配。")
     task = configuration(source)
     conditions = _object(value.get("operating_conditions", {}), {"boundaries", "controls", "control_targets"}, "运行工况")
-    boundaries = _object(conditions.get("boundaries", {}), BOUNDARY_FIELDS, "运行边界")
+    boundaries = dict(_object(conditions.get("boundaries", {}), BOUNDARY_FIELDS | {"tank_pressure_pa"}, "运行边界"))
+    if "tank_pressure_pa" in boundaries:
+        if {"fuel_tank_pressure_pa", "ox_tank_pressure_pa"} & boundaries.keys():
+            raise ValueError("请分别设置两路压力，不能同时提交历史共用贮箱压力和分路压力。")
+        pressure = _number(boundaries.pop("tank_pressure_pa"), "tank_pressure_pa")
+        boundaries.update(fuel_tank_pressure_pa=pressure, ox_tank_pressure_pa=pressure)
     for key, number in boundaries.items():
         task["operating_conditions"]["boundaries"][key] = _number(
             number, key, nonnegative=key == "ambient_pressure")

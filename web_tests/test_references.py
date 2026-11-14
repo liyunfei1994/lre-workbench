@@ -53,15 +53,16 @@ class ReferenceEngineTests(unittest.TestCase):
         first["of_ratio"] = 999
         self.assertEqual(preset_input_values("raptor3_ffsc")["of_ratio"], 3.6)
 
-    def test_raptor_example_explicitly_sets_thrust_loss_model_and_provisional_limits(self):
+    def test_raptor_example_sets_current_gas_model_and_leaves_limits_inactive(self):
         generic = asdict(EngineInputs())
         raptor = preset_input_values("raptor3_ffsc")
         self.assertEqual(generic["thrust"], 2450000.0)
         self.assertEqual(raptor["thrust"], 250 * 1000 * 9.80665)
         self.assertEqual({key: value for key, value in raptor.items() if value != generic[key]},
                          {"thrust": 2451662.5, "combustion_loss_model": "adiabatic",
-                          "ox_preburner_temp_limit_status": "provisional",
-                          "fuel_preburner_temp_limit_status": "provisional"})
+                          "gas_species_policy": "full"})
+        for side in ("ox", "fuel"):
+            self.assertEqual(raptor[f"{side}_preburner_temp_limit_status"], "unset")
         self.assertEqual(generic["methane_thermo_dataset"],"gri30_highT")
         self.assertEqual(raptor["methane_thermo_dataset"],"gri30_highT")
         self.assertEqual(generic["combustion_loss_model"], "legacy_temperature_rise")
@@ -87,8 +88,9 @@ class ReferenceEngineTests(unittest.TestCase):
                 self.assertIn(name, item["source_path"])
         for name in ("ox_preburner_mr_target", "fuel_preburner_mr_target", "cooling_dp_pa"):
             self.assertEqual(evidence[name]["classification"], "numerical_initial_guess")
-        self.assertIn("暂定", evidence["ox_preburner_temp_limit"]["note"])
-        self.assertIn("设计暂定", evidence["fuel_preburner_temp_limit"]["note"])
+        for side in ("ox", "fuel"):
+            self.assertIn("新载入示例时限值停用", evidence[f"{side}_preburner_temp_limit"]["note"])
+            self.assertIn("仅在工程限值页明确启用后参与校核", evidence[f"{side}_preburner_temp_limit"]["note"])
         self.assertIn("不是通用工程上限或材料允许温度", evidence["fuel_preburner_temp_limit"]["note"])
         facts = reference["reference_facts"]
         self.assertTrue(any("海平面" in fact["label"] and "250 tf" in fact["value"] for fact in facts))

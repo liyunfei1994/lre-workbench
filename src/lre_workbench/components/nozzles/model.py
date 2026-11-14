@@ -124,6 +124,10 @@ class Nozzle:
             self.chamber_state is not None
             and self.chamber_state.source == "cantera"
         )
+        declared_real_gas = (self.chamber_state is not None and
+                            self.chamber_state.model.get("eos") not in (None, "ideal-gas"))
+        if declared_real_gas and not use_cantera:
+            raise ValueError("真实气体喷管缺少完整物性状态；不能套用理想气体喷管公式。")
 
         # ── 理想气体公式（始终计算，用于 c* / Cf / Me 等输出）───
         Gamma_func = (2.0 / (gamma + 1.0)) ** ((gamma + 1.0) / (2.0 * (gamma - 1.0)))
@@ -193,7 +197,7 @@ class Nozzle:
                         "Cf_pressure"     : cf_pressure_real,
                         "At_m2"           : At_real,
                         "Ae_m2"           : Ae_real,
-                        "mach_exit"       : ve / sqrt(exit_state.gamma * R_UNIVERSAL / exit_state.molar_mass * exit_state.temperature),
+                        "mach_exit"       : ve / exit_state.sound_speed,
                         "p_exit_Pa"       : pe_real,
                         "p_amb_Pa"        : self.p_amb,
                         "expansion_ratio" : self.expansion_ratio,
@@ -206,7 +210,7 @@ class Nozzle:
                         "flow_model"      : 0.0,           # 0=冻结流, 1=平衡流
                     },
                     notes=[
-                        "热力学来源: cantera 冻结流膨胀(出口压力按面积比自洽求解)",
+                        f"热力学模型: {self.chamber_state.gas_model} 冻结流膨胀(出口压力按面积比自洽求解)",
                         f"Ve = {ve:.1f} m/s, T_exit = {Te:.0f} K, pe = {pe_real/1e3:.1f} kPa",
                         f"真空比冲 Isp_vac = {isp_vac:.1f} s(发动机内禀属性)",
                         f"海平面比冲 Isp_sl = {isp_sl:.1f} s(p_amb={self.p_amb/1e3:.1f} kPa 下测试)",
@@ -216,8 +220,14 @@ class Nozzle:
                             "欠膨胀" if pe_real > self.p_amb else "完全膨胀"
                         ),
                     ],
+                    profile={"model_id": "adiabatic_frozen_same_eos_v1",
+                             "gas_model": dict(self.chamber_state.model),
+                             "composition_assumption": "frozen_chamber",
+                             "sound_speed_definition": "dp_drho_at_constant_entropy_and_composition"},
                 )
 
+        if declared_real_gas:
+            raise ValueError("真实气体喷管未获得有效膨胀解；不回退理想气体公式。")
         # ── 理想气体 Fallback ────────────────────────────
         # 海平面 Cf 含背压项;真空 Cf 去掉 p_amb(用 pe 全量压力项)
         thrust = self.mdot * c_star * cf            # 海平面推力

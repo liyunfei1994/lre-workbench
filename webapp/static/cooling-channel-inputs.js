@@ -246,7 +246,7 @@ export function renderCoolingChannelGeometrySummary(profile, profileCurrent = fa
 }
 
 export function renderCoolingChannelInputs(inputs, options = {}) {
-  if (!(inputs.cooling_bartz_mode > 0)) return "";
+  if (Number(inputs.cooling_bartz_mode) !== 1 && !options.componentDraft) return "";
   const editor = baseEditor(inputs,options.editor);
   const raw = rawOf(inputs), inspected = inspectCoolingChannelTable(raw), pending = editor.candidate;
   const tableMode = Boolean(raw.trim() || pending);

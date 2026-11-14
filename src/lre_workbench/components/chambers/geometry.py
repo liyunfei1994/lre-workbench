@@ -70,16 +70,17 @@ def compute_chamber(
     # second sizing pass. Chamber scalars represent its injector-end section;
     # the full axial distribution remains in the saved profile.
     profile_geometry = None
+    concept = isinstance(cooling_profile, dict) and cooling_profile.get("model_id") == "regen_concept_heat_v1"
     if cooling_profile is not None:
         if not isinstance(cooling_profile, dict):
             raise ValueError("已给冷却剖面必须为包含实际几何的记录。")
         profile_geometry = cooling_profile.get("geometry")
-        if (cooling_profile.get("model_id") != "regen_quasi1d_ph_v1"
+        if (cooling_profile.get("model_id") not in ("regen_quasi1d_ph_v1", "regen_concept_heat_v1")
                 or not isinstance(profile_geometry, dict)
                 or not profile_geometry.get("nodes")):
             raise ValueError("已给冷却剖面缺少可识别的实际几何，不能回退重建。")
         node = min(profile_geometry["nodes"], key=lambda row: row["x_m"])
-        for key in ("width_m", "height_m", "wall_thickness_m", "n_channels"):
+        for key in (() if concept else ("width_m", "height_m", "wall_thickness_m", "n_channels")):
             if not math.isfinite(node[key]) or node[key] <= 0:
                 raise ValueError(f"冷却剖面的实际通道几何 {key} 无效，不能回退估算。")
         for key in ("r_t_m", "r_c_m", "L_cyl_m"):
@@ -90,10 +91,11 @@ def compute_chamber(
         if contraction_ratio <= 1:
             raise ValueError("冷却剖面的燃烧室半径必须大于喉部半径。")
         conv_half_angle_deg = float(profile_geometry.get("conv_half_angle_deg", conv_half_angle_deg))
-        n_channels = node["n_channels"]
-        channel_width_mm = 1000 * node["width_m"]
-        channel_height_mm = 1000 * node["height_m"]
-        liner_thickness_mm = 1000 * node["wall_thickness_m"]
+        if not concept:
+            n_channels = node["n_channels"]
+            channel_width_mm = 1000 * node["width_m"]
+            channel_height_mm = 1000 * node["height_m"]
+            liner_thickness_mm = 1000 * node["wall_thickness_m"]
 
     Ac = contraction_ratio * At
     rc = math.sqrt(Ac / pi)
@@ -112,6 +114,15 @@ def compute_chamber(
         if Vc <= V_conv:
             raise ValueError("指定特征容积不足以容纳收缩段，不能将圆筒长度裁成零。")
         Lc = (Vc - V_conv) / Ac
+
+    if concept:
+        return ChamberGeometry(diameter_m=2*rc, radius_m=rc, length_m=Lc, volume_m3=Vc,
+            l_star_m=l_star, contraction_ratio=contraction_ratio,
+            cylindrical_section_length_m=Lc, inner_surface_area_m2=2*pi*rc*Lc,
+            dome_radius_m=rc, chamber_to_convergent_blend_radius_m=_cg.get("R1_m", 0.),
+            geometry_scope="concept_hot_surface", wall_thickness_mm=None,
+            inner_wall_thickness_mm=None, cooling_channel_height_mm=None,
+            cooling_channel_width_mm=None, outer_wall_thickness_mm=None, num_cooling_channels=None)
 
     # 内衬与通道保持已给几何；只有缺少几何时才使用历史概念设计估算。
     if liner_thickness_mm is not None:

@@ -415,7 +415,7 @@ class Pump:
                     else ("  ✓ 输入效率与Ns曲线吻合，偏差=%+.3f(<5%%)" % eta_diff))
 
         notes = [
-            "dP=%.2f MPa (%.1f bar)，温升 dT=%.2f K" % (dp/1e6, dp/1e5, delta_t),
+            "dP=%.2f MPa，温升 dT=%.2f K" % (dp/1e6, delta_t),
             "  dT_isentropic=%.2f K, dT_loss=%.2f K（HEOS 等熵与实际焓升反算）"
                 % (delta_t_isentropic, delta_t_loss),
             "ρ_in=%.1f kg/m³ → ρ_out=%.1f kg/m³（压缩率修正 %+.2f%%）"

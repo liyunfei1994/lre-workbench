@@ -15,12 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import lre_workbench.properties.thermochemistry as thermo
 from lre_workbench.domain.models import FlowState
 from lre_workbench.components.turbines.model import Turbine
-from webapp.turbine_design import capture_turbine_gas_properties, turbine_design_view, _hash
+from webapp.turbine_design import capture_turbine_gas_properties, turbine_design_view, _hash, BM_EOS, BM_SOURCE
 from webapp.turbine_geometry import turbine_geometry_view
 
 
-def fixture(*, basis="total_to_total", layout="ffsc", capture=True):
-    gas = thermo._get_gas("CH4", methane_dataset="gri30")
+def fixture(*, basis="total_to_total", layout="ffsc", capture=True, eos="ideal-gas"):
+    gas = thermo._get_gas("CH4", methane_dataset="gri30", gas_eos=eos, species_policy="auto")
     before = gas.state.copy()
     try:
         gas.TPY = 950., 5e6, {"O2": .8, "H2O": .2}
@@ -28,6 +28,8 @@ def fixture(*, basis="total_to_total", layout="ffsc", capture=True):
         inputs = {"cycle_type": "ffsc" if layout == "ffsc" else "gg", "methane_thermo_dataset": "gri30",
                   "propellant_pair": "lox_methane", "turbine_boundary_basis": basis,
                   "turbine_meanline_mode": "disabled"}
+        if eos == BM_EOS:
+            inputs.update(gas_eos=eos, gas_species_policy="pr_supported_v1")
         if layout != "ffsc":
             inputs.update(gg_layout=layout, gg_mech_efficiency=.96)
         for side in ("ox", "fuel"):
@@ -48,7 +50,8 @@ def fixture(*, basis="total_to_total", layout="ffsc", capture=True):
             components[component] = asdict(turbine)
             states[inlet_key] = asdict(FlowState(inlet_key, state.pressure, state.temperature,
                 20. if layout == "dual_shaft" else mdot, enthalpy=state.enthalpy,
-                composition=deepcopy(state.composition), metadata={"thermo_source": 1.0}))
+                composition=deepcopy(state.composition), metadata={"thermo_source": 1.0,
+                    **(thermo.gas_flow_metadata(state) if eos == BM_EOS else {})}))
             states[outlet_key] = asdict(outlet)
             delivered = turbine.outputs["turbine_power_W"] * (1 if layout == "ffsc" else .96)
             if side == "shared":
@@ -61,6 +64,10 @@ def fixture(*, basis="total_to_total", layout="ffsc", capture=True):
                        "mechanism_sha256": hashlib.sha256((Path(thermo.ct.__file__).parent / "data" / mechanism).read_bytes()).hexdigest(),
                        "dependencies": {"cantera": thermo.ct.__version__},
                        "thermodynamic_scope": {"gas_eos": "ideal-gas", "high_pressure_mixture_validation": "not_validated"}}
+        if eos == BM_EOS:
+            environment["physics"]["chemistry"] = BM_SOURCE
+            environment["thermodynamic_scope"]["gas_eos"] = eos
+            environment["gas_model"] = thermo.gas_model_identity(gas)
         result = {"calculation": {"inputs": inputs, "components": components, "states": states}, "environment": environment}
         # Complete, internally consistent four-layer evidence for this fixture;
         # individual turbine evaluation alone is deliberately not acceptance.
@@ -90,6 +97,48 @@ def field(turbine, key, group="global_fields"):
 
 
 class TurbineDesignTests(unittest.TestCase):
+    def test_bm_solve_time_capture_uses_actual_model_and_is_read_without_recomputation(self):
+        result = fixture(eos=BM_EOS, capture=False)
+        before = deepcopy(result)
+        gas = thermo._get_gas("CH4", methane_dataset="gri30", gas_eos=BM_EOS, species_policy="pr_supported_v1")
+        saved_state = gas.state.copy()
+        captured = capture_turbine_gas_properties(result, thermo)
+        self.assertEqual(captured["capture_method"], "solve_time_frozen_composition_pr_bm_v1")
+        for item in captured["turbines"].values():
+            self.assertEqual(item["status"], "saved", item.get("reason"))
+            self.assertEqual(item["model"]["source"], BM_SOURCE)
+            self.assertEqual(item["model"]["gas_eos"], BM_EOS)
+            self.assertEqual(item["model"]["gas_model_identity"], result["environment"]["gas_model"])
+        self.assertTrue(all(math.isclose(a, b, rel_tol=1e-13, abs_tol=1e-14) for a, b in zip(gas.state, saved_state)))
+        self.assertEqual(result, before)
+        result["turbine_gas_properties"] = captured
+        with patch.object(thermo, "_get_gas", side_effect=AssertionError("GET must not resample")):
+            view = first(result)
+        self.assertEqual(view["gas"]["status"], "saved", view["checks"])
+        self.assertEqual(view["gas"]["model"]["gas_eos"], BM_EOS)
+
+    def test_bm_capture_rejects_missing_or_conflicting_port_and_environment_model_hashes(self):
+        original = fixture(eos=BM_EOS, capture=False)
+        for location, key in (("inlet", "eos_model_sha256"), ("outlet", "eos_parameter_sha256"),
+                              ("environment", "species_policy_sha256")):
+            result = deepcopy(original)
+            model = (result["environment"]["gas_model"] if location == "environment" else
+                     result["calculation"]["states"]["ox_preburner_outlet" if location == "inlet" else "ox_turbine_exhaust"]["metadata"]["model"])
+            model.pop(key)
+            with self.subTest(location=location, key=key):
+                captured = capture_turbine_gas_properties(result, thermo)
+                self.assertEqual(captured["turbines"]["ox"]["status"], "conflict")
+                self.assertIn(key, captured["turbines"]["ox"]["reason"])
+
+    def test_bm_saved_capture_cannot_replace_model_hash_even_with_rehashed_capture(self):
+        result = fixture(eos=BM_EOS)
+        capture = result["turbine_gas_properties"]["turbines"]["ox"]
+        capture["model"]["gas_model_identity"]["eos_model_sha256"] = "a" * 64
+        capture["capture_sha256"] = _hash({key: value for key, value in capture.items() if key != "capture_sha256"})
+        view = first(result)
+        self.assertEqual(view["gas"]["status"], "conflict")
+        self.assertTrue(any("eos_model_sha256" in check["note"] for check in view["checks"]))
+
     def test_explicit_total_interface_and_saved_real_properties_make_global_data_ready(self):
         result = fixture()
         original = deepcopy(result)

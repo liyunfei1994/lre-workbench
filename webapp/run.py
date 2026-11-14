@@ -49,6 +49,8 @@ def main():
                     (args.personal_workspace and existing.get("workspace_access") != "personal")):
                 parser.error("This workspace is running with different access settings. Stop it before changing the entry point.")
             print("Workspace already running: " + browser_url)
+            print("The existing service continues separately; this window only opens its webpage.")
+            print("Use stop_web_windows.bat to stop that service, then start again for a live console.")
             if args.open_browser:
                 webbrowser.open(browser_url)
             return

@@ -1009,7 +1009,7 @@ _MATERIALS_LIST: List[TurbineMaterial] = [
         poisson_ratio=0.30,
         spec_heat_J_kgK=460.0,
         notes="SpaceX 自研、Inconel 改良超合金,用于 Raptor 富氧涡轮/高压歧管。"
-              "成分未公开;此处为工程量级占位值。抗氧化、高强,>800 bar 富氧环境。",
+              "成分未公开;此处为工程量级占位值。抗氧化、高强,>80 MPa 富氧环境。",
     ),
 
     TurbineMaterial(

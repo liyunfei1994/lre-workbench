@@ -16,6 +16,87 @@ DIMENSIONS = {
 }
 
 
+def valve_cooling_boundary_checks(calculation):
+    """Audit saved coolant ports for the explicit valve topology, without solving.
+
+    The inlet profile uses native fluid enthalpy while cycle ports use a chemical
+    reference, so this check deliberately compares pressure, temperature and
+    flow, never subtracts those different enthalpy conventions.
+    """
+    def mapping(value):
+        return value if isinstance(value, dict) else {}
+
+    calc = mapping(calculation)
+    closure = mapping(calc.get("steady_closure"))
+    saved = mapping(closure.get("valve_design"))
+    network = mapping(closure.get("feed_network"))
+    raw = mapping(calc.get("inputs")).get("valve_configuration_json")
+    from lre_workbench.components.valves import parse_configuration, topology_hash
+    checks = []
+    try:
+        config = parse_configuration(raw)
+        if not config["enabled"] and not saved and network.get("mode") != "valve_constrained_concept_design":
+            return []
+        if not config["enabled"] or config != parse_configuration(saved.get("configuration")):
+            raise ValueError("保存的实体阀配置与计算输入不一致。")
+        if saved.get("topology_hash") != topology_hash(config):
+            raise ValueError("保存的实体阀拓扑指纹不一致。")
+    except (ValueError, TypeError, KeyError) as exc:
+        return [{"id": "cooling.valve_topology", "label": "实体阀冷却来源拓扑", "status": "conflict",
+                 "source_paths": ["calculation.inputs.valve_configuration_json", "calculation.steady_closure.valve_design"],
+                 "values": [], "note": str(exc)}]
+    states = mapping(calc.get("states"))
+    inlet, outlet = mapping(states.get("cooling_inlet")), mapping(states.get("fuel_after_cooling"))
+    profile = mapping(mapping(mapping(calc.get("components")).get("cooling_channel")).get("profile"))
+    nodes = profile.get("nodes") if isinstance(profile.get("nodes"), list) else []
+    port = mapping(nodes[0]) if nodes else {}
+    channels = [(index, node) for index, node in enumerate(nodes) if isinstance(node, dict) and node.get("kind") == "channel"]
+    channel_index, channel = channels[0] if channels else (0, {})
+    mfv = mapping(mapping(saved.get("valves")).get("MFV"))
+    paper = config["topology_id"] == "paper_split_before_cooling_v1"
+    flow_state = "branch_fuel_to_fpb" if paper else "fuel_after_pump"
+
+    def compare(key, label, observations, unit):
+        valid = []
+        missing = False
+        values = []
+        for path, value in observations:
+            try:
+                ok = isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+            except OverflowError:
+                ok = False
+            missing |= not ok
+            if ok:
+                valid.append(value)
+            values.append({"path": path, "value": value if ok else None,
+                           "normalized_value": value if ok else None, "unit": unit})
+        conflict = len(valid) >= 2 and any(not math.isclose(valid[0], value, rel_tol=2e-7, abs_tol=1e-7) for value in valid[1:])
+        checks.append({"id": "cooling.valve_boundary." + key, "label": label,
+                       "status": "conflict" if conflict else "partial" if missing else "pass",
+                       "source_paths": [row["path"] for row in values], "values": values,
+                       "note": "按本记录实体阀拓扑核对 MFV 后冷却入口；不以总燃料或泵出口状态替代。"})
+
+    profile_base = "calculation.components.cooling_channel.profile.nodes"
+    for key, state_key, profile_key, label, unit in (("pressure", "pressure", "p_Pa", "冷却入口压力", "Pa"),
+                                                   ("temperature", "temperature", "T_K", "冷却入口温度", "K")):
+        if profile.get("model_id") == "regen_quasi1d_ph_v1":
+            compare(key, label, [("calculation.states.cooling_inlet." + state_key, inlet.get(state_key)),
+                                 (profile_base + "[0]." + profile_key, port.get(profile_key))], unit)
+    observations = [("calculation.states.cooling_inlet.mass_flow", inlet.get("mass_flow")),
+                    ("calculation.states.fuel_after_cooling.mass_flow", outlet.get("mass_flow")),
+                    ("calculation.states." + flow_state + ".mass_flow", mapping(states.get(flow_state)).get("mass_flow")),
+                    ("calculation.steady_closure.feed_network.cooling_mass_flow_kg_s", network.get("cooling_mass_flow_kg_s")),
+                    ("calculation.steady_closure.valve_design.valves.MFV.mass_flow_kg_s", mfv.get("mass_flow_kg_s"))]
+    if profile.get("model_id") == "regen_quasi1d_ph_v1":
+        try:
+            profile_mass = channel["rho_kgm3"] * channel["velocity_ms"] * channel["A_flow_m2"]
+        except (KeyError, TypeError, OverflowError):
+            profile_mass = None
+        observations.append((profile_base + f"[{channel_index}].rho_kgm3*velocity_ms*A_flow_m2", profile_mass))
+    compare("mass_flow", "冷却支路质量流量", observations, "kg/s")
+    return checks
+
+
 def number(value, label, low=0, high=float("inf"), integer=False):
     try:
         valid = not isinstance(value, bool) and isinstance(value, (float, int)) and math.isfinite(value)
@@ -29,11 +110,16 @@ def number(value, label, low=0, high=float("inf"), integer=False):
 
 
 def source_data(source):
+    from webapp.model_validity import require_reusable_model
+    require_reusable_model(source)
     from webapp.solver import input_values, ValidationError
     if source.get("status") != "succeeded" or source.get("kind", "design") != "design":
         raise ValueError("请选择已完成的稳态设计记录")
     result = source.get("result") or {}
     calc = result.get("calculation") or {}
+    for check in valve_cooling_boundary_checks(calc):
+        if check["status"] != "pass":
+            raise ValueError("实体阀冷却边界缺失或不一致：" + check["label"] + "；不能退回全部燃料冷却假设。")
     try:
         values, _ = input_values(calc.get("inputs") or source["inputs"], saved_snapshot=True)
     except ValidationError as exc:
@@ -41,7 +127,9 @@ def source_data(source):
     component = (calc.get("components") or {}).get("cooling_channel") or {}
     profile = component.get("profile") or {}
     geom = profile.get("geometry") or {}
-    if (values["propellant_pair"] != "lox_methane" or not values["cooling_bartz_mode"]
+    if values["cooling_bartz_mode"] == 2:
+        raise ValueError("当前记录为概略热负荷估算。请先定义通道与材料、切换详细耦合并复算，再开展通道方案筛选。")
+    if (values["propellant_pair"] != "lox_methane" or values["cooling_bartz_mode"] != 1
             or profile.get("model_id") != "regen_quasi1d_ph_v1" or geom.get("version") != 3):
         raise ValueError("通道筛选需要含规范几何和沿程热侧状态的甲烷准一维设计记录")
     if values.get("cooling_channel_table_json", "").strip():

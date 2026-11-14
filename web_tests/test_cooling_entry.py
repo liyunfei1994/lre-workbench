@@ -40,7 +40,7 @@ class CoolingEntryContractTests(unittest.TestCase):
         self.assertEqual(saved, before)
         self.assertEqual(asdict(EngineInputs.from_dict(saved)), before)
 
-    def test_read_only_mode_only_affects_routine_editor_not_api_contract(self):
+    def test_explicit_model_choice_preserves_the_legacy_api_contract(self):
         schema = design_ui_schema()
         self.assertGreaterEqual(schema["version"], 13)
         complete = {field["key"]: field for group in schema["groups"]
@@ -48,17 +48,29 @@ class CoolingEntryContractTests(unittest.TestCase):
         self.assertEqual(set(complete), set(platform_defaults()))
         cooling = next(group for group in schema["system_groups"] if group["id"] == "cooling")
         fields = {field["key"]: field for field in cooling["fields"]}
-        self.assertTrue(fields["cooling_bartz_mode"]["read_only"])
-        self.assertNotIn("choices", fields["cooling_bartz_mode"])
+        self.assertFalse(fields["cooling_bartz_mode"]["read_only"])
+        self.assertEqual([choice["value"] for choice in fields["cooling_bartz_mode"]["choices"]], [2, 1, 0])
         self.assertEqual(complete["cooling_bartz_mode"]["type"], "number")
         for key in ("cooling_heat_load", "cooling_dp_pa"):
             with self.subTest(field=key):
                 owners = [group["id"] for group in schema["system_groups"]
                           if any(field["key"] == key for field in group["fields"])]
                 self.assertEqual(owners, ["cooling"])
-                self.assertTrue(fields[key]["advanced"])
+                self.assertFalse(fields[key]["advanced"])
                 self.assertEqual(fields[key]["visibility"], {
                     "all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]})
+
+    def test_component_drafts_remain_editable_before_enabling_coupled_cooling(self):
+        schema = design_ui_schema()
+        component_groups = [group for group in schema["system_groups"] if group.get("component_owner") == "cooling"]
+        self.assertEqual({group["id"] for group in component_groups}, {"chamber_cooling_layout", "chamber_channels", "wall_thermal"})
+        for group in component_groups:
+            self.assertEqual(group["design_dependency"], "cooling")
+            for field in group["fields"]:
+                self.assertNotIn("cooling_bartz_mode", [rule["key"] for rule in field.get("visibility", {}).get("all", [])])
+        fields = {field["key"]: field for group in component_groups for field in group["fields"]}
+        self.assertIn({"key": "cooling_channel_table_json", "op": "empty"}, fields["cooling_channel_width_m"]["visibility"]["all"])
+        self.assertIn({"key": "cooling_channel_auto_size", "op": "gt", "value": 0}, fields["cooling_target_velocity_ms"]["visibility"]["all"])
 
 
 class CoolingEntryAPITests(unittest.TestCase):
@@ -87,7 +99,7 @@ class CoolingEntryAPITests(unittest.TestCase):
     def test_budget_save_and_explicit_spatial_revision_keep_old_record_unchanged(self):
         budget = ffsc_input_values(asdict(EngineInputs(cooling_bartz_mode=0, cooling_heat_load=22e6,
                                     cooling_dp_pa=2.5e6, coolant_cp=2800,
-                                    methane_thermo_dataset="gri30")))
+                                    methane_thermo_dataset="gri30", combustion_loss_model="adiabatic")))
         original = self.project(budget)
         self.assertEqual(original["inputs"], budget)
         submitted = self.api.post(f"/api/projects/{original['id']}/jobs", json={"revision": 1})

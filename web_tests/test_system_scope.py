@@ -17,7 +17,7 @@ from web_tests.convergence_fixture import converged_evidence
 
 
 def example_result():
-    inputs = EngineInputs(turb_ox_rotor_material="sx500",
+    inputs = EngineInputs(combustion_loss_model="adiabatic", turb_ox_rotor_material="sx500",
                           ox_preburner_temp_limit_status="provisional",
                           fuel_preburner_temp_limit_status="provisional")
     summary = {
@@ -117,14 +117,15 @@ class SystemExecutionTests(unittest.TestCase):
 
     def test_scope_records_coupled_cooling_and_excludes_cfd_fea(self):
         scope = system_calculation_scope()
-        self.assertEqual(scope["version"], 4)
+        self.assertEqual(scope["version"], 5)
         self.assertEqual(scope["disabled_postprocessing"], ["cfd", "fea"])
         self.assertFalse(scope["independent_cooling_postprocessing"])
         self.assertEqual(scope["cooling_profile_source"], "calculation.components.cooling_channel.profile")
         description = " ".join(scope["limitations"])
-        self.assertIn("沿程模型参与循环", description)
-        self.assertIn("预算模式不生成沿程解", description)
-        self.assertIn("最大热面壁温作为系统热设计限值", description)
+        self.assertIn("概略模型按受热面与参考壁温估算热流并参与循环闭合", description)
+        self.assertIn("详细通道耦合模型求解沿程换热与水力状态", description)
+        self.assertIn("外部指定热量/压降模式不生成沿程解", description)
+        self.assertIn("最大热面壁温独立校核", description)
         self.assertNotIn("沿程冷却详细后处理未执行", description)
 
     def test_web_snapshot_records_scope_and_retains_saved_cooling(self):
@@ -148,7 +149,7 @@ class SystemExecutionTests(unittest.TestCase):
         self.assertEqual(record["calculation"]["inputs"], input_values(submitted)[0])
         self.assertEqual(submitted["cooling_marching_enable"], 1.0)
         self.assertEqual(record["calculation_scope"]["id"], "engine_system")
-        self.assertEqual(record["calculation_scope"]["version"], 4)
+        self.assertEqual(record["calculation_scope"]["version"], 5)
         self.assertEqual(record["calculation_scope"]["disabled_postprocessing"], ["cfd", "fea"])
         self.assertFalse(record["calculation_scope"]["independent_cooling_postprocessing"])
         self.assertEqual(record["assessment"]["scope"], "system")

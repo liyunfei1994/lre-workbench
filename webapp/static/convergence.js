@@ -5,7 +5,7 @@ const list = value => Array.isArray(value) ? value : [];
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
 const fmt = value => !finite(value) ? "—" : value !== 0 && (Math.abs(value) < .001 || Math.abs(value) >= 1e6) ? value.toExponential(3) : value.toLocaleString("zh-CN",{maximumSignificantDigits:6});
 const LAYERS = [["inner","内层非线性求解"],["thermal","主室热力反馈"],["preburner","预燃室温度外环"],["continuation","延续法目标工况"]];
-const COUPLED_SOURCE="regen_quasi1d_ph_v1";
+const COUPLED_SOURCES=["regen_quasi1d_ph_v1","regen_concept_heat_v1"];
 // Versioned protocol mirrors regen_coupling.COUPLING_CRITERIA. A saved larger
 // tolerance cannot relax the six physical criteria of this source version.
 const COUPLED_CHECKS=[
@@ -16,7 +16,7 @@ const COUPLED_CHECKS=[
   ["hot_side_relative_residual","热气状态向量相对残差",5e-7,"1"],
   ["cell_heat_relative_residual","逐单元热量相对残差",5e-7,"1"],
 ];
-const coupled=layer=>layer?.source === COUPLED_SOURCE;
+const coupled=layer=>COUPLED_SOURCES.includes(layer?.source);
 const backendName = name => name === "trf" ? "TRF 有界信赖域" : name === "broyden" ? "Broyden 雅可比近似更新" : name === "newton" || !name ? "Newton" : String(name);
 const REASONS = {
   converged:"达到全部容差", tolerance_met:"达到容差", residual_tolerance:"残差达到容差",

@@ -100,6 +100,7 @@ class PumpDesignHandoffTests(unittest.TestCase):
         frozen = deepcopy(result["pump_geometry"]["pumps"]["ox"])
         result["calculation"]["components"]["ox_pump"]["outputs"]["nr_rpm"] *= 2
         view = pump_geometry_view(result, "saved-record")
+        frozen["export_allowed"] = False
         self.assertEqual(view["pumps"]["ox"], frozen)
         design = view["design_handoff"]["pumps"]["ox"]
         self.assertEqual(design["status"], "conflict")

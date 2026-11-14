@@ -17,6 +17,8 @@ from webapp.turbine_geometry import R_UNIVERSAL, _specs, turbine_geometry_view
 SCHEMA_VERSION = 1
 METHOD = "saved_turbine_design_handoff_v1"
 SOURCE_FINGERPRINT_VERSION = 1
+BM_EOS = "Peng-Robinson-Boston-Mathias"
+BM_SOURCE = "PR-BM nonideal equilibrium with Cantera NASA reference"
 REFERENCES = [
     {"title": "CFturbo · Global setup", "url": "https://manual.cfturbo.com/en/global_setup.html"},
     {"title": "CFturbo · Axial turbine parameters and efficiencies", "url": "https://manual.cfturbo.com/en/md_parameter_axturbine.html"},
@@ -134,6 +136,27 @@ def _gas_row(gas, temperature, pressure, composition):
     return row
 
 
+def _verify_bm_identity(identity, environment, inputs, inlet, outlet):
+    """Verify saved BM evidence without filling missing identities or computing."""
+    if inputs.get("gas_eos") != BM_EOS or _dict(environment.get("thermodynamic_scope")).get("gas_eos") != BM_EOS:
+        raise ValueError("PR–BM 输入与求解环境的 EOS 身份不一致。")
+    if _dict(environment.get("physics")).get("chemistry") != BM_SOURCE:
+        raise ValueError("PR–BM 求解来源未明确记录。")
+    models = [_dict(environment.get("gas_model")), _dict(_dict(inlet.get("metadata")).get("model")),
+              _dict(_dict(outlet.get("metadata")).get("model"))]
+    keys = ("mechanism", "phase", "mechanism_sha256", "eos", "species_policy", "species_policy_sha256",
+            "eos_parameter_sha256", "eos_model_sha256", "enthalpy_reference_id")
+    for key in keys:
+        value = identity.get(key)
+        if not value or any(model.get(key) != value for model in models):
+            raise ValueError(f"PR–BM 采样、环境或涡轮端口模型身份缺失／冲突：{key}。")
+        if key.endswith("sha256") and (not isinstance(value, str) or len(value) != 64
+                                      or any(c not in "0123456789abcdef" for c in value)):
+            raise ValueError(f"PR–BM 模型指纹无效：{key}。")
+    if identity.get("eos") != BM_EOS or identity.get("species_policy") != "pr_supported_v1":
+        raise ValueError("PR–BM 采样需要明确的 BM EOS 与受限物种身份。")
+
+
 def capture_turbine_gas_properties(result, thermo):
     """Capture properties during the new solve using its selected actual model.
 
@@ -148,6 +171,8 @@ def capture_turbine_gas_properties(result, thermo):
     answer = {"schema_version": SCHEMA_VERSION, "capture_method": "solve_time_frozen_composition_cantera_v1", "turbines": {}}
     try:
         specs, _, inputs = _specs(result)
+        if inputs.get("gas_eos") == BM_EOS:
+            answer["capture_method"] = "solve_time_frozen_composition_pr_bm_v1"
     except Exception as exc:
         answer["reason"] = str(exc)
         return answer
@@ -166,8 +191,9 @@ def capture_turbine_gas_properties(result, thermo):
             expected_hash = environment.get("mechanism_sha256")
             if not all(isinstance(v, str) and v for v in (mechanism, phase, fuel_species, expected_hash)):
                 raise ValueError("未保存机制、相名称、燃料物种或机制 SHA256，不能改用当前默认热力学模型。")
-            if not getattr(thermo, "CANTERA_AVAILABLE", False) or physics.get("chemistry") != "Cantera":
-                raise ValueError("本次求解未声明使用 Cantera，不能事后替换热力学来源。")
+            expected_source = BM_SOURCE if inputs.get("gas_eos") == BM_EOS else "Cantera"
+            if not getattr(thermo, "CANTERA_AVAILABLE", False) or physics.get("chemistry") != expected_source:
+                raise ValueError("本次求解未声明所选燃气模型的计算来源，不能事后替换。")
             if _dict(environment.get("dependencies")).get("cantera") != str(thermo.ct.__version__):
                 capture["status"] = "conflict"
                 raise ValueError("实际 Cantera 版本与保存的求解环境不一致。")
@@ -183,10 +209,17 @@ def capture_turbine_gas_properties(result, thermo):
             dataset = inputs.get("methane_thermo_dataset")
             if fuel_species == "CH4" and not isinstance(dataset, str):
                 raise ValueError("未保存甲烷热力学数据集选择。")
-            gas = thermo._get_gas(fuel_species, methane_dataset=dataset)
+            gas = thermo._get_gas(fuel_species, methane_dataset=dataset,
+                                  gas_eos=inputs.get("gas_eos", "ideal-gas"),
+                                  species_policy=inputs.get("gas_species_policy", "full"))
             if gas.name != phase or thermo.gas_data_filename(gas) != mechanism:
                 capture["status"] = "conflict"
                 raise ValueError("实际热力学相或机制与本次求解环境身份不一致。")
+            identity = thermo.gas_model_identity(gas)
+            if inputs.get("gas_eos") == BM_EOS:
+                capture["status"] = "conflict"
+                _verify_bm_identity(identity, environment, inputs, inlet, outlet)
+                capture["status"] = "missing"
             saved_state = gas.state.copy()
             for key in ("T_in_K", "T_exhaust_K", "p_in_Pa", "p_out_Pa"):
                 if _num(outputs.get(key), positive=True) is None:
@@ -200,12 +233,13 @@ def capture_turbine_gas_properties(result, thermo):
             low, high = sorted((outputs["T_exhaust_K"], outputs["T_in_K"]))
             temperatures = [low + (high - low) * i / 10 for i in range(11)] if low != high else [low]
             rows = [_gas_row(gas, temperature, outputs["p_in_Pa"], composition) for temperature in temperatures]
-            model = {"source": "Cantera", "mechanism": mechanism, "mechanism_sha256": actual_hash,
+            model = {"source": physics["chemistry"], "mechanism": mechanism, "mechanism_sha256": actual_hash,
                      "phase": gas.name, "gas_eos": gas.thermo_model, "transport_model": gas.transport_model,
                      "cantera_version": str(thermo.ct.__version__), "composition_policy": "frozen_saved_inlet",
                      "enthalpy_entropy_reference": "selected_mechanism_species_thermochemistry",
                      "common_min_temperature_k": float(gas.min_temp), "common_max_temperature_k": float(gas.max_temp),
                      "environment": deepcopy(environment)}
+            model["gas_model_identity"] = identity
             species_models = []
             for species in composition:
                 if composition[species] <= 0:
@@ -429,6 +463,12 @@ def _gas_view(result, side, component_key, point, inlet, checks):
         if composition != capture.get("composition_mass_fractions"):
             raise ValueError("物性采样组成与入口保存组成不一致。")
         model = _dict(capture.get("model"))
+        if model.get("gas_eos") == BM_EOS or _dict(raw_model.get("thermodynamic_scope")).get("gas_eos") == BM_EOS:
+            inputs = _dict(_dict(result.get("calculation")).get("inputs"))
+            _, _, outlet, _, _ = _context(result, component_key)
+            _verify_bm_identity(_dict(model.get("gas_model_identity")), raw_model, inputs, inlet, outlet)
+            if model.get("gas_eos") != BM_EOS or model.get("source") != BM_SOURCE:
+                raise ValueError("保存的 PR–BM 物性采样来源与模型身份不一致。")
         if model.get("mechanism_sha256") != raw_model.get("mechanism_sha256") or model.get("mechanism") != physics.get("mechanism") or model.get("phase") != physics.get("phase"):
             raise ValueError("物性采样机制与保存求解环境不一致。")
         if model.get("cantera_version") != _dict(raw_model.get("dependencies")).get("cantera"):

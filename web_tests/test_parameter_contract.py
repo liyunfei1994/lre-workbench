@@ -167,15 +167,15 @@ class ParameterContractTests(unittest.TestCase):
         self.assertIn("贮箱出口", fields["fuel_inlet_temp"]["label"])
         self.assertIn("温升折减", fields["combustion_efficiency"]["label"])
         self.assertNotEqual(fields["lox_pump_specific_speed_target"]["unit"], "—")
-        solver = next(g for g in schema["system_groups"] if g["id"] == "solver")
-        self.assertIn("启动估计", solver["initials_title"])
+        initialization = next(g for g in schema["system_groups"] if g["id"] == "initialization")
+        self.assertIn("燃气状态迭代初值", [s["title"] for s in initialization["sections"]])
 
     def test_design_targets_conditions_and_seeds_keep_distinct_roles(self):
         schema = design_ui_schema()
         fields = {f["key"]: f for g in schema["groups"] for f in g["fields"]}
         for key in ("thrust", "pc", "of_ratio"):
             self.assertEqual(fields[key]["role"], "design_input")
-        self.assertIn("环境压力", fields["thrust"]["label"])
+        self.assertIn("设计环境", fields["thrust"]["label"])
         self.assertIn("指定", fields["pc"]["label"])
         self.assertIn("指定整机氧燃质量比", fields["of_ratio"]["label"])
         self.assertEqual(fields["ambient_pressure"]["role"], "boundary")
@@ -212,14 +212,27 @@ class ParameterContractTests(unittest.TestCase):
         self.assertEqual(normalized, ffsc_input_values(before))
         self.assertEqual(values, before)
 
-    def test_combustion_loss_selector_is_explicit_and_hides_inactive_legacy_factor(self):
+    def test_thermochemistry_has_one_model_choice_and_preserves_historical_identity(self):
         schema = design_ui_schema()
         fields = {f["key"]: f for g in schema["groups"] for f in g["fields"]}
         self.assertEqual([choice["value"] for choice in fields["combustion_loss_model"]["choices"]],
                          ["adiabatic", "legacy_temperature_rise"])
         self.assertEqual(fields["combustion_efficiency"]["visibility"],
                          {"all": [{"key": "combustion_loss_model", "op": "eq", "value": "legacy_temperature_rise"}]})
-        self.assertEqual(schema["defaults"]["combustion_loss_model"], "legacy_temperature_rise")
+        self.assertEqual(schema["defaults"]["combustion_loss_model"], "adiabatic")
+        group = next(g for g in schema["system_groups"] if g["id"] == "chamber_chemistry")
+        self.assertTrue(group["requires_review"])
+        self.assertEqual({f["key"] for f in group["fields"]},
+                         {"gas_eos", "gas_species_policy", "combustion_loss_model", "combustion_efficiency"})
+        self.assertEqual({f["key"] for f in group["fields"] if not f["read_only"]}, {"gas_eos"})
+        self.assertEqual({item["key"] for item in group["configuration_context"]}, {"methane_thermo_dataset"})
+        historical = asdict(EngineInputs(gas_eos="Peng-Robinson", gas_species_policy="pr_supported_v1",
+                                         combustion_loss_model="legacy_temperature_rise", combustion_efficiency=0.97))
+        before = deepcopy(historical)
+        normalized, _ = input_values(historical)
+        for key in ("gas_eos", "gas_species_policy", "combustion_loss_model", "combustion_efficiency"):
+            self.assertEqual(normalized[key], before[key])
+        self.assertEqual(historical, before)
 
     def test_pressure_budget_roles_are_separate_from_initial_guesses_and_valve_results(self):
         schema = design_ui_schema()
@@ -228,7 +241,7 @@ class ParameterContractTests(unittest.TestCase):
                     "fuel_turbine_exhaust_dp_ratio", "valve_line_dp_ratio", "cooling_dp_pa"):
             with self.subTest(key=key):
                 self.assertEqual(fields[key]["role"], "model_assumption")
-                self.assertIn("预算", fields[key]["label"])
+                self.assertIn("外部指定" if key == "cooling_dp_pa" else "预算", fields[key]["label"])
                 source = fields[key]["provenance"]["label"]
                 self.assertIn("压降", source)
                 self.assertTrue("非已核实实机数据" in source or "待部件数据校核" in source)

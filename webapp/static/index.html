@@ -13,9 +13,11 @@
   <link rel="stylesheet" href="/static/gas-handoff.css">
   <link rel="stylesheet" href="/static/validation-charts.css">
   <link rel="stylesheet" href="/static/property-comparison.css">
+  <link rel="stylesheet" href="/static/property-library.css">
   <link rel="stylesheet" href="/static/throttle.css">
   <link rel="stylesheet" href="/static/fixed-steady.css">
   <link rel="stylesheet" href="/static/convergence.css">
+  <link rel="stylesheet" href="/static/solver-monitor.css">
   <link rel="stylesheet" href="/static/steady-closure.css">
   <link rel="stylesheet" href="/static/thermo-applicability.css">
   <link rel="stylesheet" href="/static/cooling.css">
@@ -37,22 +39,203 @@
   <link rel="stylesheet" href="/static/navigation.css">
   <link rel="stylesheet" href="/static/partitioned-workspace.css">
   <link rel="stylesheet" href="/static/pressure-design.css">
+  <link rel="stylesheet" href="/static/project-overview.css">
+  <link rel="stylesheet" href="/static/help-manual.css">
+  <link rel="stylesheet" href="/static/engineering-view.css">
+  <link rel="stylesheet" href="/static/engineering-lifecycle.css">
+  <link rel="stylesheet" href="/static/thermochemistry-model.css">
   <script defer crossorigin="use-credentials" src="/static/bootstrap.js"></script>
 </head>
 <body>
   <div id="toast" role="status" aria-live="polite" hidden></div>
   <section id="auth" class="auth-layout">
     <div class="auth-story">
-      <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>LRE WORKBENCH / WEB</small></div></div>
-      <span class="eyebrow">可重复使用火箭发动机数字化平台</span>
-      <h1>从系统设计，<br>到运行仿真。</h1>
-      <p>建立稳态设计点、匹配循环，并开展适用范围内的瞬态研究。<br>各分析页说明模型边界，每次计算保留可追溯记录。</p>
-      <div class="story-flow"><span>01<br><b>设计参数</b></span><i>→</i><span>02<br><b>稳态匹配</b></span><i>→</i><span>03<br><b>运行研究</b></span></div>
-      <div class="local-note"><span class="dot"></span><span id="auth-scope-note">正在连接计算服务</span></div>
+      <div class="brand"><span class="auth-brand-mark" aria-hidden="true"><svg viewBox="0 0 40 44" fill="none"><path d="M20 3 31 15v13l5 10-16-6-16 6 5-10V15Z" stroke="currentColor" stroke-width="1.5"/><path d="M20 10v20M15 19h10M15 38l5-3 5 3M20 37v5" stroke="currentColor" stroke-width="1.5"/></svg></span><div>火箭动力工作台<small>LRE WORKBENCH</small></div></div>
+      <div class="auth-intro">
+        <span class="eyebrow">可重复使用火箭发动机数字化平台</span>
+        <h1>火箭发动机<br><span>系统设计与仿真</span></h1>
+        <p>液氧甲烷 <span aria-hidden="true">/</span> 全流量补燃循环</p>
+      </div>
+      <div class="auth-visual" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="850" height="630" viewBox="245 80 850 630" fill="none" role="img" aria-labelledby="auth-art-title auth-art-desc">
+  <title id="auth-art-title">液体火箭发动机与运载火箭工程意象</title>
+  <desc id="auth-art-desc">用于登录页面的装饰性工程线稿。双侧泵与管路环绕燃烧室，钟形喷管向下展开，左侧以细线连接运载火箭轮廓。不代表特定型号或可制造结构。</desc>
+  <defs>
+    <linearGradient id="auth-art-metal" x1="633" y1="260" x2="899" y2="638" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a6d4e2" stop-opacity=".10"/>
+      <stop offset=".36" stop-color="#7daec0" stop-opacity=".025"/>
+      <stop offset=".76" stop-color="#a1d3e1" stop-opacity=".07"/>
+      <stop offset="1" stop-color="#e3f2f4" stop-opacity=".025"/>
+    </linearGradient>
+    <linearGradient id="auth-art-stroke" x1="651" y1="136" x2="905" y2="651" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#79aebf"/>
+      <stop offset=".45" stop-color="#d4edf2"/>
+      <stop offset="1" stop-color="#a6d3df"/>
+    </linearGradient>
+    <linearGradient id="auth-art-rocket-stroke" x1="348" y1="117" x2="348" y2="568" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a6ccd7" stop-opacity=".25"/>
+      <stop offset=".3" stop-color="#b0d6df" stop-opacity=".7"/>
+      <stop offset="1" stop-color="#8ab8ca" stop-opacity=".42"/>
+    </linearGradient>
+    <linearGradient id="auth-art-accent" x1="706" y1="650" x2="826" y2="650" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#da9864" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#dfa272" stop-opacity=".7"/>
+      <stop offset="1" stop-color="#da9864" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="auth-art-wash" cx="0" cy="0" r="1" gradientTransform="translate(770 407) rotate(90) scale(300 300)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7aaec1" stop-opacity=".065"/>
+      <stop offset="1" stop-color="#7aaec1" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="auth-art-bell-clip">
+      <path d="M740 403C740 414 735 422 729 430C678 498 646 558 624 641Q766 676 908 641C886 558 854 498 803 430C797 422 792 414 792 403Z"/>
+    </clipPath>
+  </defs>
+
+  <ellipse cx="770" cy="407" rx="320" ry="304" fill="url(#auth-art-wash)"/>
+
+  <!-- A few construction datums give the illustration scale without instrument readouts. -->
+  <g stroke="#78a8bb" stroke-width="1" opacity=".2" stroke-linecap="round">
+    <path d="M766 73V104M766 116V673M766 686V704" stroke-dasharray="4 9"/>
+    <path d="M532 226H561M576 226H983M999 226H1025" stroke-dasharray="4 9"/>
+    <path d="M562 643H607M925 643H979"/>
+    <path d="M571 637V649M970 637V649"/>
+    <path d="M567 673H965M590 668V678M942 668V678"/>
+    <path d="M493 112H522M507 98V126M1011 594H1037M1024 581V607"/>
+  </g>
+
+  <!-- The launch vehicle is a restrained secondary silhouette, not a second focal point. -->
+  <g stroke="url(#auth-art-rocket-stroke)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M348 116C340 132 330 151 330 174V508L324 532V544H372V532L366 508V174C366 151 356 132 348 116Z" stroke-width="1.7" fill="#b5d7e0" fill-opacity=".018"/>
+    <path d="M330 176Q348 181 366 176M330 187H366M330 251H366M330 263H366M330 392H366M330 403H366M330 505H366" stroke-width="1"/>
+    <path d="M340 200V383M356 200V383M340 416V492M356 416V492" stroke-width=".8" opacity=".4"/>
+    <path d="M330 462L314 501V530L330 517M366 462L382 501V530L366 517" stroke-width="1.3"/>
+    <path d="M330 542L328 557H340L339 542M344 542L342 561H354L352 542M357 542L356 557H368L366 542" stroke-width="1.1"/>
+    <path d="M348 92V107M348 573V597" stroke-width=".8" stroke-dasharray="3 6" opacity=".5"/>
+    <path d="M315 212H299V366H315M302 212H294M302 366H294" stroke-width=".8" opacity=".36"/>
+  </g>
+  <g stroke="#83b6c7" stroke-width="1" stroke-linecap="round" opacity=".36">
+    <path d="M382 530H442L500 588H573L620 635"/>
+    <circle cx="382" cy="530" r="3" fill="#0e2233"/>
+    <circle cx="620" cy="635" r="3" fill="#0e2233"/>
+    <path d="M443 537L496 590" opacity=".35"/>
+  </g>
+  <path d="M342 565H354" stroke="#d29a6b" stroke-width="1.8" stroke-linecap="round" opacity=".65"/>
+
+  <!-- Rear feed runs and structural stays. -->
+  <g stroke="#79a9ba" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke-width="1.5" opacity=".72">
+      <path d="M575 106V169Q575 193 598 206L604 209M590 106V167Q590 183 609 193L615 197"/>
+      <path d="M942 106V167Q942 183 923 193L917 197M957 106V169Q957 193 934 206L928 209"/>
+      <path d="M620 271V304Q620 333 650 333H699M635 274V300Q635 318 654 318H699"/>
+      <path d="M897 274V300Q897 318 878 318H833M912 271V304Q912 333 882 333H833"/>
+      <path d="M647 271V369Q647 386 667 386H733M660 271V363Q660 373 674 373H728"/>
+      <path d="M885 271V369Q885 386 865 386H799M872 271V363Q872 373 858 373H804"/>
+      <path d="M678 196H691Q703 196 703 180V151Q703 129 726 129H750M679 210H697Q717 210 717 185V157Q717 143 731 143H750"/>
+      <path d="M854 196H841Q829 196 829 180V151Q829 129 806 129H782M853 210H835Q815 210 815 185V157Q815 143 801 143H782"/>
+    </g>
+    <g stroke-width="1" opacity=".43">
+      <path d="M680 252L707 298M852 252L825 298M654 278L700 350M878 278L832 350"/>
+      <path d="M646 287H661M871 287H886M647 342H660M872 342H885"/>
+      <path d="M570 120H595M570 126H595M937 120H962M937 126H962"/>
+      <path d="M617 293H638M617 299H638M894 293H915M894 299H915"/>
+      <path d="M704 152H716M816 152H828"/>
+    </g>
+    <path d="M571 102H594V110H571ZM938 102H961V110H938Z" fill="#123044" stroke-width="1.4"/>
+  </g>
+
+  <!-- Double-sided turbopump assemblies, rendered as conceptual housings. -->
+  <g stroke="url(#auth-art-stroke)" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke-width="1.7">
+      <path d="M682 220C682 194 663 175 638 175C610 175 588 196 588 224C588 250 610 273 637 273H653V261C671 256 682 240 682 220Z" fill="#153448" fill-opacity=".38"/>
+      <path d="M850 220C850 194 869 175 894 175C922 175 944 196 944 224C944 250 922 273 895 273H879V261C861 256 850 240 850 220Z" fill="#153448" fill-opacity=".38"/>
+      <circle cx="636" cy="222" r="33"/>
+      <circle cx="896" cy="222" r="33"/>
+      <circle cx="636" cy="222" r="12" fill="#102a3d"/>
+      <circle cx="896" cy="222" r="12" fill="#102a3d"/>
+      <path d="M682 214H710V234H681M822 214H850M822 234H851"/>
+      <path d="M692 214V234M700 214V234M832 214V234M840 214V234" stroke-width=".9" opacity=".65"/>
+    </g>
+    <g stroke-width=".9" opacity=".58">
+      <circle cx="636" cy="222" r="25"/>
+      <circle cx="896" cy="222" r="25"/>
+      <path d="M625 217L615 208M638 210L641 197M648 221L661 218M640 233L645 245M626 229L617 238"/>
+      <path d="M907 217L917 208M894 210L891 197M884 221L871 218M892 233L887 245M906 229L915 238"/>
+      <path d="M594 225C594 204 612 181 637 181M938 225C938 204 920 181 895 181"/>
+    </g>
+    <g fill="#a6d0dc" stroke="none" opacity=".7">
+      <circle cx="609" cy="187" r="1.6"/><circle cx="665" cy="189" r="1.6"/><circle cx="605" cy="254" r="1.6"/><circle cx="668" cy="251" r="1.6"/>
+      <circle cx="923" cy="187" r="1.6"/><circle cx="867" cy="189" r="1.6"/><circle cx="927" cy="254" r="1.6"/><circle cx="864" cy="251" r="1.6"/>
+    </g>
+  </g>
+
+  <!-- Injector head and chamber envelope. -->
+  <g stroke="url(#auth-art-stroke)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M750 124H782V151H750Z" fill="#15374b" fill-opacity=".65" stroke-width="1.6"/>
+    <path d="M756 124V113H776V124M757 151V167H775V151" stroke-width="1.2"/>
+    <path d="M710 206Q766 187 822 206V254H710Z" fill="#143246" fill-opacity=".38" stroke-width="1.7"/>
+    <ellipse cx="766" cy="207" rx="56" ry="15" stroke-width="1.4"/>
+    <ellipse cx="766" cy="207" rx="44" ry="9" stroke-width=".8" opacity=".5"/>
+    <path d="M722 211V243M738 216V246M754 220V248M778 220V248M794 216V246M810 211V243" stroke-width=".8" opacity=".45"/>
+    <path d="M758 167H746Q733 167 733 181V194M774 167H786Q799 167 799 181V194" stroke-width="1.8"/>
+    <path d="M703 251Q766 232 829 251L833 265Q766 285 699 265Z" fill="#17394c" fill-opacity=".7" stroke-width="1.8"/>
+    <path d="M700 259Q766 279 832 259" stroke-width="1" opacity=".6"/>
+    <path d="M703 269V320C703 350 740 373 740 403H792C792 373 829 350 829 320V269" fill="url(#auth-art-metal)" stroke-width="2.2"/>
+    <path d="M708 288Q766 306 824 288M707 301Q766 319 825 301M706 315Q766 333 826 315M709 330Q766 347 823 330M718 347Q766 362 814 347M730 366Q766 377 802 366M738 386Q766 394 794 386" stroke-width=".9" opacity=".46"/>
+    <path d="M719 276V320C719 349 751 374 751 402M813 276V320C813 349 781 374 781 402" stroke-width=".85" opacity=".44"/>
+    <path d="M731 279V321C731 349 757 374 757 402M801 279V321C801 349 775 374 775 402" stroke-width=".7" opacity=".26"/>
+    <path d="M738 401Q766 409 794 401M738 410Q766 419 794 410" stroke-width="1.5"/>
+  </g>
+
+  <!-- Rounded throat transition followed by a bell contour that straightens toward the exit. -->
+  <g stroke="url(#auth-art-stroke)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M740 403C740 414 735 422 729 430C678 498 646 558 624 641Q766 676 908 641C886 558 854 498 803 430C797 422 792 414 792 403" fill="url(#auth-art-metal)" stroke-width="2.5"/>
+    <g clip-path="url(#auth-art-bell-clip)" stroke-width=".85" opacity=".38">
+      <path d="M743.6 403.8C743.6 414.8 739.3 423 734.2 431.2C690.3 500.8 662.8 561.9 643.9 645.6M750.4 405.1C750.4 416.1 747.4 424.4 743.8 432.9C713.2 504.9 694 567.5 680.8 652.2M757.7 405.9C757.7 416.9 756.1 425.4 754.2 434.1C737.8 507.7 727.6 571.3 720.6 656.7M766 406.2C766 417.2 766 425.8 766 434.6C766 508.8 766 572.8 766 658.5M774.3 405.9C774.3 416.9 775.9 425.4 777.8 434.1C794.2 507.7 804.4 571.3 811.4 656.7M781.6 405.1C781.6 416.1 784.6 424.4 788.2 432.9C818.8 504.9 838 567.5 851.2 652.2M788.4 403.8C788.4 414.8 792.7 423 797.8 431.2C841.7 500.8 869.2 561.9 888.1 645.6"/>
+      <path d="M722.3 439Q766 449.8 809.7 439M700 471Q766 487.3 832 471M679 505Q766 526.4 853 505M660.2 541Q766 567.1 871.8 541M643.5 580Q766 610.2 888.5 580M630.8 617Q766 650.3 901.2 617"/>
+    </g>
+    <path d="M624 641V650Q766 685 908 650V641" stroke-width="1.8"/>
+    <path d="M632 645Q766 677 900 645" stroke-width=".9" opacity=".6"/>
+    <path d="M642 651V658M662 656V663M684 660V667M708 664V671M733 667V674M759 669V676M785 668V675M811 666V673M836 663V670M860 658V665M882 654V661" stroke-width=".85" opacity=".45"/>
+  </g>
+
+  <!-- Small fittings provide a second scale of detail and restrained warm accents. -->
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#96c2cf" stroke-width="1.1" opacity=".83">
+      <path d="M698 298H686V284H672M834 298H846V284H860"/>
+      <rect x="665" y="278" width="11" height="12" rx="2"/>
+      <rect x="856" y="278" width="11" height="12" rx="2"/>
+      <path d="M724 359L706 371L707 391M808 359L826 371L825 391"/>
+      <path d="M700 390H714V399H700ZM818 390H832V399H818Z" fill="#102e40"/>
+      <path d="M659 336V354M653 345H665M873 336V354M867 345H879"/>
+      <path d="M731 125V115H723M801 125V115H809"/>
+    </g>
+    <g stroke="#d49b6e" stroke-width="1.5" opacity=".85">
+      <path d="M750 132H782"/>
+      <path d="M653 343L659 337L665 343L659 349Z" fill="#d49b6e" fill-opacity=".1"/>
+      <path d="M867 343L873 337L879 343L873 349Z" fill="#d49b6e" fill-opacity=".1"/>
+      <path d="M704 394H710M822 394H828"/>
+    </g>
+    <path d="M690 670Q766 685 842 670" stroke="url(#auth-art-accent)" stroke-width="1.2"/>
+  </g>
+
+  <!-- Short, unlabelled leaders suggest a larger design workspace. -->
+  <g stroke="#7caabb" stroke-width=".9" stroke-linecap="round" opacity=".32">
+    <path d="M946 222H1000L1024 198H1082M837 306H969L997 334H1068M898 582H963L991 554H1070"/>
+    <circle cx="946" cy="222" r="2.4" fill="#102a3c"/>
+    <circle cx="837" cy="306" r="2.4" fill="#102a3c"/>
+    <circle cx="898" cy="582" r="2.4" fill="#102a3c"/>
+    <path d="M1082 194V202M1068 330V338M1070 550V558"/>
+    <path d="M543 462H601L635 428H728" opacity=".5"/>
+  </g>
+</svg></div>
+      <div class="auth-story-footer">
+        <div class="story-flow"><span><small>01</small><b>概念设计</b></span><i aria-hidden="true">→</i><span><small>02</small><b>稳态匹配</b></span><i aria-hidden="true">→</i><span><small>03</small><b>瞬态分析</b></span></div>
+        <p class="auth-drawing-note">推进系统概念示意 <span>PROPULSION SYSTEM STUDY</span></p>
+      </div>
     </div>
     <div class="auth-panel">
+      <div class="auth-access-context"><span id="auth-scope-note">正在连接计算服务</span></div>
       <div class="auth-card">
-        <span class="eyebrow">你的工程工作区</span>
+        <span class="eyebrow">ENGINEERING WORKSPACE</span>
         <h2 id="auth-title">正在连接工作台…</h2>
         <p id="auth-description" class="muted">正在读取服务状态。</p>
         <button id="auth-retry" hidden>重新连接</button>
@@ -66,71 +249,65 @@
         </form>
         <p id="auth-storage-note" class="fine">请使用管理员提供的账号登录。</p>
       </div>
+      <p class="auth-panel-footer">设计 · 求解 · 迭代 · 验证</p>
     </div>
   </section>
   <div id="workspace" class="workspace" hidden>
     <header class="app-header">
       <button id="toggle-navigation" type="button" aria-label="打开工作区导航" aria-controls="workspace-sidebar" aria-expanded="false">☰</button>
       <div class="brand"><span class="brand-mark">L</span><div>火箭动力工作台<small>液氧甲烷 · 全流量补燃</small></div></div>
-      <div class="document-heading"><b id="document-title">工作区</b><span id="document-meta"></span></div>
+      <div class="document-heading"><div class="document-title-row"><b id="document-title">工作区</b><button id="open-project-summary" type="button" class="text-btn" data-workspace-view="project_overview" hidden>方案摘要</button></div><span id="document-meta"></span></div>
       <div class="actions header-actions"><button data-nav="projects">打开方案</button><button id="header-save" form="project-form" type="submit" hidden>保存方案</button><button id="header-run" class="primary" hidden>运行设计点</button><button id="header-cancel" hidden>取消计算</button></div>
       <div class="user-area"><span id="user-label"></span><button class="text-btn" id="change-password">修改密码</button><button class="text-btn" id="logout">退出</button></div>
     </header>
     <div id="connection-banner" class="connection-banner" role="status" hidden><span id="connection-message"></span><button id="retry-connection">重新连接</button></div>
     <button id="navigation-backdrop" type="button" aria-label="关闭工作区导航" hidden></button>
     <aside class="sidebar" id="workspace-sidebar">
-      <div class="nav-intro"><b>系统工作台</b><span>模型 · 配置 · 运行 · 验证</span></div>
-      <nav class="design-nav" aria-label="系统设计与运行仿真">
+      <div class="nav-intro"><b>当前发动机方案</b><span>设置 · 求解 · 迭代 · 验证</span></div>
+      <div class="setup-tree-tools" id="setup-tree-tools" hidden>
+        <button type="button" id="find-parameter" aria-haspopup="dialog" aria-controls="parameter-finder" aria-expanded="false"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>查找参数</button>
+        <p id="setup-tree-progress" aria-live="polite"></p>
+        <div class="setup-tree-actions"><button type="button" data-setup-expand="true">展开设置</button><button type="button" data-setup-expand="false">收起设置</button></div>
+      </div>
+      <nav class="design-nav" aria-label="当前方案的设计任务树">
+        <details class="nav-group" data-nav-group="concept" open>
+          <summary><span class="nav-group-number">01</span><span class="nav-group-title">总体方案与循环设计</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><div data-setup-branch="configuration"></div><div data-setup-branch="requirements"></div><details class="nav-subgroup" data-setup-section="models" open><summary>总体模型与假设 <small data-setup-summary="models"></small></summary><div data-setup-branch="models"></div></details><details class="nav-subgroup" data-setup-section="design_point" open><summary>循环匹配条件 <small data-setup-summary="design_point"></small></summary><div data-setup-branch="design_point"></div></details><details class="nav-subgroup" data-setup-section="solution"><summary>总体设计点计算 <small data-setup-summary="solution"></small></summary><div data-setup-branch="solution"></div><button type="button" data-view="design_run"><span class="nav-item-label">输入检查与运行</span></button><button type="button" data-view="design_monitor"><span class="nav-item-label">收敛监视</span></button></details><details class="nav-subgroup"><summary>总体结果与部件要求</summary><button type="button" data-view="results_overview"><span class="nav-item-label">总体性能与约束</span></button><button type="button" data-view="design_requirements"><span class="nav-item-label">部件设计要求</span></button><button type="button" data-view="solver_diagnostics"><span class="nav-item-label">收敛诊断</span></button><button type="button" data-view="states"><span class="nav-item-label">流路状态</span></button><button type="button" data-view="components"><span class="nav-item-label">部件性能</span></button><button type="button" data-view="topology"><span class="nav-item-label">保存记录的系统图</span></button></details></div>
+        </details>
+        <details class="nav-group" data-nav-group="components">
+          <summary><span class="nav-group-number">02</span><span class="nav-group-title">部件设计与特性建模</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><details class="nav-subgroup" data-setup-section="chamber"><summary>推力室与喷管 <small data-setup-summary="chamber"></small></summary><div data-setup-branch="chamber"></div><button type="button" data-view="geometry"><span class="nav-item-label">内型面与几何交接</span></button><button type="button" data-view="chamber_design"><span class="nav-item-label">推力室结果与校核</span></button><button type="button" data-view="nozzle_design"><span class="nav-item-label">喷管性能与校核</span></button></details><details class="nav-subgroup" data-setup-section="cooling_component"><summary>再生冷却系统 <small data-setup-summary="cooling_component"></small></summary><div data-setup-branch="cooling_component"></div><button type="button" data-view="cooling_workspace"><span class="nav-item-label">冷却结果与局部设计</span></button></details><details class="nav-subgroup" data-setup-section="pumps"><summary>泵与轴系 <small data-setup-summary="pumps"></small></summary><div data-setup-branch="pumps"></div><button type="button" data-view="pump_geometry"><span class="nav-item-label">泵结果与建模交接</span></button></details><details class="nav-subgroup" data-setup-section="turbines"><summary>涡轮 <small data-setup-summary="turbines"></small></summary><div data-setup-branch="turbines"></div><button type="button" data-view="turbine_geometry"><span class="nav-item-label">涡轮结果与局部设计</span></button></details><button type="button" data-view="injector_design"><span class="nav-item-label">预燃室与喷注器交接</span></button><details class="nav-subgroup" data-setup-section="valves"><summary>阀门、管路与供给部件 <small data-setup-summary="valves"></small></summary><div data-setup-branch="valves"></div><button type="button" data-view="valve_design"><span class="nav-item-label">阀门结果与选型</span></button></details></div>
+        </details>
+        <details class="nav-group" data-nav-group="integration">
+          <summary><span class="nav-group-number">03</span><span class="nav-group-title">整机集成与基准确认</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><button type="button" data-view="integration"><span class="nav-item-label">部件反馈、整机复核与候选基准</span></button></div>
+        </details>
+        <details class="nav-group" data-nav-group="steady">
+          <summary><span class="nav-group-number">04</span><span class="nav-group-title">固定硬件稳态分析</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><button type="button" data-view="steady_operations"><span class="nav-item-label">稳态任务与适用范围</span></button><button type="button" data-view="fixed_steady"><span class="nav-item-label">整机工作点任务定义</span></button><button type="button" data-view="operating_throttle"><span class="nav-item-label">固定几何局部节流研究</span></button></div>
+        </details>
+        <details class="nav-group" data-nav-group="transient">
+          <summary><span class="nav-group-number">05</span><span class="nav-group-title">瞬态运行分析</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><button type="button" data-view="transient_operations"><span class="nav-item-label">瞬态任务与适用范围</span></button><button type="button" data-view="chilldown"><span class="nav-item-label">预冷与充填</span></button><button type="button" data-view="ignition"><span class="nav-item-label">点火事件与建压</span></button><button type="button" data-view="transient"><span class="nav-item-label">热态响应研究</span></button><button type="button" data-view="feed"><span class="nav-item-label">供给网络动态</span></button><button type="button" data-view="shutdown"><span class="nav-item-label">关机与再启动</span></button></div>
+        </details>
+      </nav>
+      <div class="workspace-label">资料与帮助</div>
+      <nav class="design-nav auxiliary-nav" aria-label="模型资料与帮助"><details class="nav-group" data-nav-group="results"><summary><span class="nav-group-title">校核与记录</span></summary><div class="nav-children"><div data-setup-branch="constraints"></div><button type="button" data-view="validation"><span class="nav-item-label">热力学校核</span></button><button type="button" data-view="log"><span class="nav-item-label">日志与警告</span></button><button type="button" data-view="history"><span class="nav-item-label">方案与计算记录</span></button><button type="button" data-view="throttle"><span class="nav-item-label">设计匹配扫描历史</span></button></div></details>
         <details class="nav-group" data-nav-group="library">
-          <summary><span class="nav-group-number">01</span><span class="nav-group-title">模型与数据</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
-          <div class="nav-children"><button data-view="model_library"><span class="nav-item-label">模型资源与数据索引</span></button></div>
-        </details>
-        <details class="nav-group" data-nav-group="design" open>
-          <summary><span class="nav-group-number">02</span><span class="nav-group-title">设计与配置</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
-          <div class="nav-children">
-            <button data-view="overview"><span class="nav-item-label">概念设计</span></button>
-            <button data-view="topology"><span class="nav-item-label">循环原理图</span><small class="nav-item-badge">只读</small></button>
-            <div class="nav-subheading">部件初步设计</div>
-            <button data-view="geometry"><span class="nav-item-label">推力室内型面</span></button>
-            <button data-view="chamber_design"><span class="nav-item-label">主燃烧室设计与分析</span></button>
-            <button data-view="nozzle_design"><span class="nav-item-label">喷管设计与性能</span></button>
-            <button data-view="pump_geometry"><span class="nav-item-label">泵设计与建模交接</span></button>
-            <button data-view="injector_design"><span class="nav-item-label">喷注器初步设计</span></button>
-            <button data-view="turbine_geometry"><span class="nav-item-label">涡轮设计与建模交接</span></button>
-          </div>
-        </details>
-        <details class="nav-group" data-nav-group="simulation">
-          <summary><span class="nav-group-number">03</span><span class="nav-group-title">工况与运行</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
-          <div class="nav-children">
-            <button data-view="simulation_home"><span class="nav-item-label">运行任务总览</span></button>
-            <button data-view="operating_throttle"><span class="nav-item-label">发动机节流分析</span><small class="nav-item-badge">局部</small></button>
-            <button data-view="fixed_steady"><span class="nav-item-label">固定硬件稳态</span><small class="nav-item-badge">待接入</small></button>
-            <button data-view="transient"><span class="nav-item-label">瞬态响应研究</span><small class="nav-item-badge">局部</small></button>
-            <button type="button" disabled title="线性化模型尚未接入"><span class="nav-item-label">线性化分析</span><small class="nav-item-badge">未开放</small></button>
-            <div class="nav-subheading">专项运行研究</div>
-            <button data-view="feed"><span class="nav-item-label">供给网络动态</span></button>
-            <button data-view="chilldown"><span class="nav-item-label">预冷与充填</span></button>
-            <button data-view="ignition"><span class="nav-item-label">点火事件与建压</span></button>
-            <button data-view="shutdown"><span class="nav-item-label">关机与再启动</span></button>
-          </div>
-        </details>
-        <details class="nav-group" data-nav-group="results">
-          <summary><span class="nav-group-number">04</span><span class="nav-group-title">结果与诊断</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
-          <div class="nav-children">
-            <button data-view="results_overview"><span class="nav-item-label">计算结果总览</span></button>
-            <button data-view="solver_diagnostics"><span class="nav-item-label">收敛诊断</span></button>
-            <button data-view="states"><span class="nav-item-label">流路状态分析</span></button>
-            <button data-view="components"><span class="nav-item-label">部件性能分析</span></button>
-            <button data-view="validation"><span class="nav-item-label">热力学校核</span></button>
-            <button data-view="log"><span class="nav-item-label">日志与警告</span></button>
-            <div class="nav-subheading">历史记录</div>
-            <button data-view="history"><span class="nav-item-label">方案与计算记录</span></button>
-            <button data-view="throttle"><span class="nav-item-label">设计匹配扫描历史</span><small class="nav-item-badge">只读</small></button>
-          </div>
+          <summary><span class="nav-group-title">模型与资料库</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children"><button type="button" data-view="model_library"><span class="nav-item-label">资料与能力索引</span></button><button type="button" data-view="property_library"><span class="nav-item-label">热物性与材料数据</span></button><button type="button" data-view="engineering_examples"><span class="nav-item-label">工程示例与来源</span></button></div>
         </details>
         <details class="nav-group" data-nav-group="guide">
-          <summary><span class="nav-group-number">05</span><span class="nav-group-title">文档与维护</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
-          <div class="nav-children"><button data-view="guide"><span class="nav-item-label">使用说明与维护</span></button></div>
+          <summary><span class="nav-group-title">帮助文档</span><span class="nav-group-chevron" aria-hidden="true">›</span></summary>
+          <div class="nav-children">
+            <button type="button" data-help-chapter="workflow"><span class="nav-item-label">用户手册</span></button>
+            <button type="button" data-help-chapter="theory"><span class="nav-item-label">理论与模型说明</span></button>
+            <button type="button" data-help-chapter="parameters"><span class="nav-item-label">参数参考</span></button>
+            <button type="button" data-help-chapter="modes"><span class="nav-item-label">分析模式参数对照</span></button>
+            <button type="button" data-help-chapter="properties"><span class="nav-item-label">物性数据与参考态</span></button>
+            <button type="button" data-help-chapter="examples"><span class="nav-item-label">示例教程</span></button>
+            <button type="button" data-help-chapter="troubleshooting"><span class="nav-item-label">版本与故障排查</span></button>
+          </div>
         </details>
       </nav>
       <div class="workspace-label">工作区 <span id="workspace-location">本机</span></div>
@@ -141,6 +318,7 @@
       </nav>
       <div class="sidebar-bottom">系统设计与运行仿真<br><span id="sidebar-location">本机工作区</span></div>
     </aside>
+    <div id="navigation-resizer" class="navigation-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="workspace-sidebar" aria-label="调整左侧导航宽度" aria-valuemin="280" aria-valuemax="560" aria-valuenow="340" title="拖动调整宽度；方向键微调，双击恢复默认"></div>
     <div class="main-wrap">
       <main>
         <section id="projects-page">
@@ -149,44 +327,87 @@
           <div id="projects-list" class="project-grid"></div>
         </section>
         <section id="project-page" hidden>
+          <div id="project-context" aria-label="当前输入与所选计算记录"></div>
           <div class="workbench-layout partitioned-workbench">
             <div class="analysis-pane">
               <div id="analysis-breadcrumb" class="workbench-breadcrumb" aria-label="当前位置"></div>
-              <div class="analysis-heading"><div><h1 id="analysis-title">概念设计</h1><p class="muted" id="analysis-subtitle">设计点循环匹配 · 部件需求与尺寸初估</p></div><button id="toggle-parameters" hidden>编辑相关参数</button></div>
+              <div class="analysis-heading"><div><h1 id="analysis-title">概念设计</h1><p class="muted" id="analysis-subtitle">设计点循环匹配 · 部件需求与尺寸初估</p></div><div class="analysis-heading-actions"><button id="parameter-help" type="button">本页帮助</button><button id="toggle-parameters" hidden>编辑相关参数</button></div></div>
               <p id="workspace-error" class="error" role="alert" hidden></p>
               <p id="project-scope-note" class="fine" role="status" hidden></p>
+              <div id="help-content" hidden></div>
+              <div id="workbench-content">
+<div id="component-workflow-context" hidden></div>
+<div id="integration-content" hidden></div>
+
               <div id="concept-navigation" role="tablist" aria-label="概念设计工作区">
                 <button id="concept-tab-settings" data-concept-section="settings" role="tab" aria-selected="true" aria-controls="concept-settings-host">设计输入</button>
                 <button id="concept-tab-results" data-concept-section="results" role="tab" aria-selected="false" tabindex="-1" aria-controls="concept-section-content">计算结果</button>
                 <button id="concept-tab-diagnostics" data-concept-section="diagnostics" role="tab" aria-selected="false" tabindex="-1" aria-controls="concept-section-content">收敛诊断</button>
               </div>
-              <div id="concept-settings-host" role="tabpanel" aria-labelledby="concept-tab-settings">
+              <div id="concept-settings-host" class="engineering-split" role="region" aria-labelledby="analysis-title">
             <section class="editor parameter-pane" id="parameter-pane" aria-label="参数设置">
-              <div class="parameter-heading"><div class="panel-heading"><h2>概念设计参数</h2><span id="dirty-label" class="badge">已保存</span></div><p class="fine">推力 kN · 压力 MPa · 温度 K</p>
-              <input id="parameter-search" type="search" placeholder="搜索参数或单位…" aria-label="搜索参数或单位">
-              <select id="parameter-group" aria-label="参数分组"></select></div>
+              <div class="parameter-heading"><div class="panel-heading"><h2 id="parameter-panel-title">参数设置</h2><span id="dirty-label" class="badge">已保存</span></div><p id="parameter-panel-note" class="fine">从左侧选择设置项；各项状态随输入检查更新。</p>
+              <select id="parameter-group" hidden tabindex="-1" aria-hidden="true"></select></div>
               <form id="project-form" novalidate>
                 <div class="parameter-scroll">
+                  <div id="parameter-fields"></div><p id="parameter-empty" class="small-empty" hidden>当前设置组没有适用参数。</p>
                   <div id="design-readiness" hidden></div>
-                  <details class="concept-reference"><summary>设计示例与物性模型</summary>
-                  <div class="preset-box"><label>概念设计示例<select id="project-preset" aria-label="概念设计示例"></select></label><p class="fine">载入示例会替换整套草稿，可撤销。自定义方案沿用当前值，需逐组确认。</p><p id="preset-context" class="field-help"></p><div class="preset-actions"><button id="apply-preset" type="button">重新载入示例参数</button><button id="open-references" type="button">参数来源与建模假设</button></div><button id="undo-preset" type="button" class="wide" hidden>撤销本次示例载入</button></div>
-                  <div class="propellant-context" aria-label="当前物性与热力学模型"><b>当前物性与热力学模型</b><p id="propellant-model-label" class="fine"></p><div id="propellant-model-note" class="fine"></div><details id="propellant-model-details"><summary>数据来源、温区与模型说明</summary><div id="propellant-model-limits" class="fine"></div><button id="upgrade-methane-dataset" type="button" hidden>使用 high-T 建立新版草稿</button></details><p id="propellant-model-error" class="error" role="alert"></p></div>
-                  </details>
-                  <div id="concept-design-scope"></div>
-                  <div id="concept-parameter-roles"></div>
-                  <div id="parameter-fields"></div><p id="parameter-empty" class="small-empty" hidden>没有匹配的参数。</p>
+
                 </div>
                 <div class="parameter-footer">
                 <p id="editor-error" class="error" role="alert"></p>
-                <div class="editor-actions"><button id="submit-job" class="primary" type="button" hidden>运行设计点</button><button type="submit">保存方案</button></div>
-                <p class="fine">运行时自动保存修改，并保留版本快照。</p><p id="run-progress" class="fine" aria-live="polite">请选择设计工况。</p>
+                <div id="parameter-edit-actions"><div class="editor-actions"><button class="primary" type="submit">保存方案</button><button id="open-design-run" type="button">前往输入检查</button></div>
+                <p class="fine" id="parameter-edit-note">本页用于参数定义与确认。完成设置后，在“输入检查与运行”中检查整机输入并启动设计点计算。</p></div>
+                <div id="configuration-actions" hidden><button type="button" class="primary" data-setup-group="design">前往发动机定义与设计工况</button></div>
                 </div>
               </form>
             </section>
+                <div id="engineering-resizer" role="separator" aria-label="调整参数区与工程视图区宽度" aria-orientation="vertical" aria-controls="parameter-pane engineering-view" tabindex="0" title="拖动调整宽度；方向键微调，双击恢复默认宽度"></div>
+                <aside id="engineering-view" aria-label="工程视图"></aside>
               </div>
+<section id="concept-reference-panel" class="panel concept-reference-panel" hidden aria-label="工程示例与来源">
+<h2>工程示例与来源</h2><p>示例用于开始一个方案。选择条目只查看说明与参数来源；它不是总体设计流程的必经步骤。</p>
+<div class="preset-box"><label>浏览工程示例<select id="project-preset" aria-label="浏览工程示例"></select></label><p id="preset-context" class="field-help"></p>
+<div class="preset-actions"><button id="new-from-example" type="button" class="primary">从此示例新建方案</button><button id="open-references" type="button">参数来源与建模假设</button></div>
+<details id="concept-preset-reference"><summary>替换当前草稿</summary><p>将整套输入替换为所选示例，原计算记录保留。此操作先形成未保存草稿，可撤销；保存后生成新版本。</p>
+<button id="apply-preset" type="button">用此示例替换当前草稿</button><button id="undo-preset" type="button" hidden>撤销本次示例载入</button></details></div>
+<div class="editor-actions"><button id="concept-reference-back" type="button">返回参数设置</button><button type="button" data-help-chapter="examples">查看示例使用说明</button></div>
+</section>
+<section id="design-run-panel" class="design-run-panel panel" hidden aria-labelledby="design-run-title">
+                <div class="design-run-layout">
+                <section class="design-run-controls">
+                <h2 id="design-run-title">设计点计算</h2>
+                <p class="fine">汇总概念设计输入与分组确认状态。检查通过并完成参数确认后，可在本页提交计算。</p>
+                <div class="design-run-context" aria-label="本次计算输入">
+                  <div><span>当前方案</span><strong id="design-run-project"></strong></div>
+                  <div><span>计算输入</span><strong id="design-run-version"></strong><p id="design-run-draft-note" class="fine"></p></div>
+                  <div><span>求解配置</span><button id="design-run-solver" type="button">查看求解设置</button><button type="button" data-setup-group="initialization">查看初始化</button><p class="fine">当前设计点独立使用本方案中的数值配置。</p></div>
+                </div>
+                <div id="design-run-task-summary"></div>
+                <div id="design-run-readiness"></div>
+                <p id="design-run-progress" class="fine" role="status"></p>
+                <p id="design-run-error" class="error" role="alert"></p>
+                <div class="design-run-actions"><button id="design-run-submit" type="button" class="primary" aria-describedby="design-run-progress">运行设计点</button><button id="design-run-back" type="button">返回参数设置</button><button type="button" data-workspace-view="results_overview">查看设计点结果</button></div>
+                <p class="fine">计算前自动保存当前修改，并为计算记录保留输入版本快照。后续修改不会覆盖已保存的计算结果。</p>
+                </section>
+                <button type="button" data-view="design_monitor">查看收敛监视 →</button>
+                </div>
+              </section>
+              <section id="design-monitor-panel" hidden aria-label="设计点收敛监视">
+                <nav class="solver-task-actions"><button type="button" data-view="design_run">返回输入检查与运行</button><button type="button" data-view="solver_diagnostics">查看所选记录的收敛诊断</button></nav>
+                <aside id="solver-monitor" class="solver-monitor" aria-label="设计点收敛监控"></aside>
+              </section>
+              <section id="valve-design-inputs" class="panel" hidden aria-labelledby="valve-input-title">
+                <div class="panel-heading"><h2 id="valve-input-title">当前方案 · 阀门设计输入</h2><span id="valve-dirty-label" class="badge">已保存</span></div>
+                <p class="fine">与概念设计共用当前方案。修改流路或阀门参数后，确认并保存；在“输入检查与运行”中重新计算，再核对下方保存记录中的阀门结果。</p>
+                <div id="valve-parameter-fields"></div>
+                <div id="valve-group-readiness" hidden></div>
+                <div class="editor-actions"><button id="valve-save" type="button">保存方案</button><button id="valve-review" type="button" class="primary">确认并保存阀门参数</button><button id="valve-open-design-run" type="button">前往输入检查</button></div>
+                <button id="valve-readiness" type="button">编辑阀门与流路参数</button>
+              </section>
               <div id="concept-section-content" hidden>
               <div id="result-toolbar" class="result-toolbar"><label>计算记录<select id="result-selector" aria-label="选择计算记录"><option value="">尚无计算记录</option></select></label><button id="export-current-result" hidden>导出结果</button></div>
-              <div id="result-context" class="banner" role="status">尚无计算结果。选择参考工况后运行设计点。</div>
+              <div id="result-context" class="banner" role="status">尚无计算结果。请完成概念设计设置，在“输入检查与运行”中提交计算。</div>
               <div id="analysis-content"></div>
               <div id="result-consistency" hidden></div>
               </div>
@@ -212,7 +433,9 @@
                 </details>
               </section>
               <section class="panel"><div class="panel-heading"><h2>计算记录</h2><span class="muted">每次提交保留输入快照</span></div><div id="project-jobs"></div></section>
+              <section class="panel"><label>查看记录来源<select id="history-record-selector" aria-label="选择模型来源的计算记录"></select></label><div id="record-provenance" aria-label="所选记录的模型与数据来源"></div></section>
               <section class="panel"><div class="panel-heading"><h2>方案版本</h2><span class="muted">保存时自动记录</span></div><div id="project-revisions"></div></section>
+              </div>
               </div>
             </div>
           </div>
@@ -223,6 +446,13 @@
     </div>
     <footer class="status-bar"><span id="connection-status">正在连接服务…</span><span id="page-name">共享项目</span><span id="runtime-version"></span></footer>
   </div>
+  <dialog id="parameter-finder" aria-labelledby="parameter-finder-title" aria-describedby="parameter-finder-help">
+    <div class="panel-heading"><h2 id="parameter-finder-title">查找参数</h2><button type="button" id="close-parameter-finder" class="text-btn" aria-label="关闭参数查找">×</button></div>
+    <p id="parameter-finder-help">查找当前方案的总体与部件设计参数，选择结果进入对应设置。</p>
+    <label for="parameter-search">参数名称<input id="parameter-search" type="search" placeholder="例如：燃烧室压力、比冲" autocomplete="off" aria-controls="parameter-matches"></label>
+    <p id="parameter-match-status" role="status" aria-live="polite" aria-atomic="true"></p>
+    <div id="parameter-matches"></div>
+  </dialog>
   <dialog id="password-dialog" aria-labelledby="password-title"><form id="password-form">
     <div class="panel-heading"><h2 id="password-title">修改我的密码</h2><button type="button" class="text-btn" id="password-close" aria-label="关闭">×</button></div>
     <label>当前密码<input id="password-current" type="password" required maxlength="128" autocomplete="current-password"></label>
@@ -232,7 +462,21 @@
     <p class="error" id="password-error" role="alert"></p>
     <div class="dialog-footer"><button type="button" id="password-cancel">取消</button><button type="submit" class="primary" id="password-submit">修改密码</button></div>
   </form></dialog>
-  <dialog id="new-dialog"><form id="new-form"><div class="panel-heading"><h2 id="new-project-title">新建项目</h2><button type="button" class="text-btn" data-close="new-dialog" aria-label="关闭">×</button></div><label>项目名称<input name="name" required maxlength="80" placeholder="例如：方案对比研究"></label><label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="说明本项目的目的，便于成员理解"></textarea></label><label>起始工程示例<select name="preset" id="new-preset"></select></label><p class="fine">本平台专用于液氧甲烷全流量补燃循环（FFSC）发动机的系统设计与运行研究。起始示例包含工程假设，不代表厂商完整设计或实测性能。</p><p class="error" id="new-error"></p><button type="submit" class="primary wide">创建项目</button></form></dialog>
+  <dialog id="new-dialog">
+    <form id="new-form">
+      <div class="panel-heading"><h2 id="new-project-title">新建项目</h2><button type="button" class="text-btn" data-close="new-dialog" aria-label="关闭">×</button></div>
+      <label>项目名称<input name="name" required maxlength="80" placeholder="例如：方案对比研究"></label>
+      <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="说明本项目的目的，便于成员理解"></textarea></label>
+      <label>起始工程示例<select name="preset" id="new-preset"></select></label><p id="new-preset-description" class="fine"></p><button id="new-preset-reference" type="button">查看所选示例的来源与假设</button>
+      <label>设计起点<select name="design_start" id="new-design-start">
+        <option value="concept_heat">概略热负荷估算 · 先匹配循环，再校核部件</option>
+        <option value="preset_geometry">沿用示例模型与几何 · 开展耦合设计</option>
+      </select></label>
+      <p class="fine">概略模式按当前工况、概略型面与冷却范围估算热负荷。新建后核对参考壁温及压降估计的依据；它们不代表实际壁温与水力校核结果。完成部件设计后，可在“冷却与循环耦合模型”中启用详细通道计算并复算。</p>
+      <p class="fine">本平台专用于液氧甲烷全流量补燃循环（FFSC）发动机的系统设计与运行研究。起始示例包含工程假设，不代表厂商完整设计或实测性能。</p>
+      <p class="error" id="new-error"></p><button type="submit" class="primary wide">创建项目</button>
+    </form>
+  </dialog>
   <dialog id="reference-dialog"><div class="panel-heading"><h2>参数来源与建模假设</h2><button class="text-btn" data-close="reference-dialog" aria-label="关闭">×</button></div><label>参考对象<select id="reference-engine" aria-label="查看参考对象资料"></select></label><div id="reference-content"></div><div class="dialog-footer"><button data-close="reference-dialog">关闭</button></div></dialog>
   <dialog id="result-dialog" class="result-dialog"><div class="panel-heading"><div><span class="eyebrow">CALCULATION RECORD</span><h2 id="result-title">计算结果</h2></div><button class="text-btn" data-close="result-dialog" aria-label="关闭">×</button></div><div id="result-content"></div><div class="dialog-footer"><button id="download-result">导出完整结果 JSON</button><button data-close="result-dialog" class="primary">关闭</button></div></dialog>
 </body>

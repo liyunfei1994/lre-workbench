@@ -14,7 +14,8 @@ def fingerprint(value):
 def capabilities():
     from webapp.thermo_compare import comparison_capabilities
     from webapp.validation_checks import property_capabilities
-    return comparison_capabilities() | property_capabilities()
+    from webapp.eos_comparison import capabilities as eos_capabilities
+    return comparison_capabilities() | property_capabilities() | {"gas_eos_comparison": eos_capabilities()}
 
 
 def normalize_request(value, source):
@@ -22,15 +23,34 @@ def normalize_request(value, source):
     require_supported_source(source)
     if not isinstance(value, dict):
         raise ValueError("校核请求必须是对象。")
-    allowed = {"source_job_id", "thermochemistry", "properties", "experiment", "gas_screening"}
+    allowed = {"source_job_id", "thermochemistry", "properties", "experiment", "gas_screening", "gas_eos_comparison"}
     if set(value) - allowed:
         raise ValueError("校核请求含未知字段。")
+    if value.get("source_job_id", source["id"]) != source["id"]:
+        raise ValueError("来源设计记录与校核请求不一致。")
     normalized = {"source_job_id": source["id"]}
     if value.get("gas_screening") is not None:
         screening = value["gas_screening"]
         if not isinstance(screening, dict) or set(screening) != {"enabled"} or screening["enabled"] is not True:
             raise ValueError("燃气筛查请求仅接受 enabled: true；状态和组成必须来自保存记录。")
         normalized["gas_screening"] = {"enabled": True}
+    if value.get("gas_eos_comparison") is not None:
+        comparison = value["gas_eos_comparison"]
+        if (not isinstance(comparison, dict) or set(comparison) - {"enabled", "candidate_eos"}
+                or comparison.get("enabled") is not True):
+            raise ValueError("整循环燃气 EOS 对比接受 enabled: true 及可选 candidate_eos；两侧使用同一保存记录的设计输入。")
+        from lre_workbench.domain.models import ValidationError
+        from webapp.solver import input_values
+        from webapp.eos_comparison import require_comparison_combustion_model, validate_candidate_eos
+        candidate = validate_candidate_eos(comparison.get("candidate_eos"))
+        try:
+            values, _ = input_values(source["inputs"], saved_snapshot=True)
+            require_comparison_combustion_model(values)
+        except ValidationError as exc:
+            raise ValueError(f"来源设计输入无法用于整循环燃气 EOS 对比。{exc}") from exc
+        normalized["gas_eos_comparison"] = {"enabled": True}
+        if candidate is not None:
+            normalized["gas_eos_comparison"]["candidate_eos"] = candidate
     if value.get("thermochemistry") is not None:
         from webapp.thermo_compare import normalize_request as normalize_thermo
         submitted = value["thermochemistry"]
@@ -71,6 +91,7 @@ def calculate_validation(request, source, progress=None):
     }, "request": deepcopy(request), "conservation": conservation_checks(original),
         "thermochemistry": None, "properties": None,
         "gas_handoff": None, "gas_screening": None, "chamber_handoff_comparison": None,
+        "gas_eos_comparison": None,
         "experiment": experiment_checks(original, request.get("experiment"))}
     if request.get("thermochemistry") is not None:
         from webapp.thermo_compare import compare_thermochemistry
@@ -84,6 +105,11 @@ def calculate_validation(request, source, progress=None):
         result["gas_handoff"] = capture_gas_handoff(original)
         result["chamber_handoff_comparison"] = compare_chamber_handoff(original, result["gas_handoff"], progress)
         result["gas_screening"] = screen_gas_record(original, progress=progress)
+    if request.get("gas_eos_comparison") is not None:
+        from webapp.eos_comparison import compare_gas_eos
+        candidate = request["gas_eos_comparison"].get("candidate_eos")
+        result["gas_eos_comparison"] = compare_gas_eos(
+            source, progress, **({"candidate_eos": candidate} if candidate is not None else {}))
     missing = []
     result = plain(result, missing)
     result["nonfinite_fields"] = missing

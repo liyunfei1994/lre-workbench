@@ -146,6 +146,8 @@ class CancellationTests(unittest.TestCase):
     def test_native_thermo_equilibrium_cancel_bypasses_fallback(self):
         token = CancellationToken()
         class Gas:
+            thermo_model = "ideal-gas"
+
             def equilibrate(self, mode):
                 token.cancel()  # Simulate cancellation while a native call was running.
         with cancellation_scope(token):

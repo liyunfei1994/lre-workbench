@@ -20,7 +20,7 @@ def _source_fixture():
     This fixture is not a full-engine validation result. It supplies the saved
     data contract needed to test the one-way thermal-boundary study itself.
     """
-    inputs = EngineInputs(cooling_grid_points=40, cooling_channel_auto_size=0.,
+    inputs = EngineInputs(combustion_loss_model="adiabatic", cooling_grid_points=40, cooling_channel_auto_size=0.,
         cooling_channel_height_m=.008, cooling_wall_temp_limit_status="unset")
     _, component = CoolingChannel(mdot_fuel=166.3, t_inlet=122.35, p_inlet=74.89e6,
         mdot_total=765., pc=33e6, t_chamber=3773.34, gamma_c=1.189,

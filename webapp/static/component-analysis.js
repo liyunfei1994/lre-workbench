@@ -27,6 +27,7 @@ const getField = (item, keys) => {
 const SYMBOLS = {
   p_in_Pa:"pᵢₙ",p_in_MPa:"pᵢₙ",p_in_bar:"pᵢₙ",P_in_Pa:"pᵢₙ",
   p_out_Pa:"pₒᵤₜ",p_out_MPa:"pₒᵤₜ",p_out_bar:"pₒᵤₜ",P_out_Pa:"pₒᵤₜ",
+  delta_p_bar:"Δp",
   delta_p_Pa:"Δp",delta_p_MPa:"Δp",delta_P_MPa:"Δp",T_in_K:"Tᵢₙ",T_out_K:"Tₒᵤₜ",T_exhaust_K:"Tₒᵤₜ",
   delta_T_K:"ΔT",delta_T_isentropic_K:"ΔTₛ",delta_T_loss_K:"ΔTₗ",rho_in_kgm3:"ρᵢₙ",rho_out_kgm3:"ρₒᵤₜ",rho_kgm3:"ρ",
   power_W:"P",power_MW:"P",power_hydraulic_W:"Pinc",eta:"ηₚ",head_m:"H",volume_flow_m3s:"Qᵥ",nr_rpm:"n",npsh_available_m:"NPSHₐ",

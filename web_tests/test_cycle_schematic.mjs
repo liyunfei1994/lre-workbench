@@ -17,6 +17,22 @@ test('every declared branch has visible endpoint objects in the FFSC layout',()=
   }
 });
 
+test('both saved valve layouts include each real valve and only their registered split path',()=>{
+  for(const valveTopology of ['paper_split_before_cooling_v1','all_fuel_cooled_then_split_valves_v1']){
+    const model={kind:'ffsc',valveTopology,notes:[],summary:[],fuel:{name:'甲烷'}};
+    const layout=cycleLayout(model);
+    model.nodes=Object.keys(layout.positions).map(id=>({id,title:id,type:['MFV','OPFV','FPOV'].includes(id)?'valve':'pump',tone:'fuel',states:[],metrics:[]}));
+    model.connections=Object.keys(layout.paths).map(key=>{const [source,target]=key.split('>');return {source,target,tone:'fuel'};});
+    model.shafts=layout.shafts;
+    const html=renderCycleWorkspace(model);
+    for(const {source,target} of model.connections){assert(layout.positions[source]);assert(layout.positions[target]);assert(html.includes(`data-cy-from="${source}" data-cy-to="${target}"`));}
+    assert.equal(Boolean(layout.paths['fuel_pump>OPFV']),valveTopology==='paper_split_before_cooling_v1');
+    assert.equal(Boolean(layout.paths['cooling_channel>OPFV']),valveTopology==='all_fuel_cooled_then_split_valves_v1');
+    assert.equal(layout.positions.main_chamber[1]+45,layout.positions.nozzle[1]-80);
+    assert(!/NaN|Infinity|undefined/.test(html));
+  }
+});
+
 const bezier=(points,t)=>[0,1].map(axis=>(1-t)**3*points[0][axis]+3*(1-t)**2*t*points[1][axis]+3*(1-t)*t*t*points[2][axis]+t**3*points[3][axis]);
 const tangent=(points,t)=>[0,1].map(axis=>3*((1-t)**2*(points[1][axis]-points[0][axis])+2*(1-t)*t*(points[2][axis]-points[1][axis])+t*t*(points[3][axis]-points[2][axis])));
 

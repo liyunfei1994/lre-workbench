@@ -6,7 +6,9 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 from web_tests.test_workspace import client, TEST_PASSWORD
 from webapp.app import create_app
@@ -39,6 +41,125 @@ class ValidationAPITests(unittest.TestCase):
 
     def submit(self, **parts):
         return self.admin.post(self.endpoint, json={"source_job_id": self.source_id, **parts})
+
+    def run_worker(self, key):
+        from webapp import worker
+
+        self.app.state.store.execute("UPDATE jobs SET status='running' WHERE id=?", (key,))
+        with (patch.object(worker, "threading", SimpleNamespace(Thread=Mock())),
+              patch.object(worker, "science_environment", return_value={}),
+              patch.object(worker.traceback, "print_exc"),
+              patch.object(worker.sys, "argv", ["worker", "--database", str(self.db), "--job", key])):
+            return worker.main()
+
+    def test_gas_eos_comparison_worker_preserves_scope_and_source(self):
+        source_row = self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,))
+        eos_request = {"source_job_id": self.source_id, "gas_eos_comparison": {"enabled": True}}
+        other = self.admin.post("/api/projects", json={"name": "其他方案", "inputs": self.project["inputs"]}).json()["project"]
+        other_endpoint = f"/api/projects/{other['id']}/validations"
+        self.assertEqual(self.admin.post(other_endpoint, json=eos_request).status_code, 422)
+        self.assertEqual(self.submit(gas_eos_comparison={"enabled": True, "pc": 1e6}).status_code, 422)
+
+        response = self.admin.post(self.endpoint, json=eos_request)
+        self.assertEqual(response.status_code, 200, response.text)
+        job_id = response.json()["id"]
+        forged_id = self.admin.post(self.endpoint, json=eos_request).json()["id"]
+        self.app.state.store.execute("UPDATE jobs SET project_id=? WHERE id=?", (other["id"], forged_id))
+        wrong_revision = self.admin.post(self.endpoint, json=eos_request).json()["id"]
+        self.app.state.store.execute("UPDATE jobs SET revision=revision+1 WHERE id=?", (wrong_revision,))
+
+        def calculate(source, progress):
+            self.assertEqual(source["id"], self.source_id)
+            self.assertEqual(source["inputs"], json.loads(source_row["inputs"]))
+            self.assertEqual(source["result"], self.source)
+            event = {"phase": "整循环燃气 EOS 对比", "stage": "solving", "eos": "Peng-Robinson",
+                     "solver_iteration": 17, "solver_maximum": 100, "residual": .031}
+            progress(1, 2, event)
+            running_row = self.app.state.store.one("SELECT status,progress,result FROM jobs WHERE id=?", (job_id,))
+            self.assertEqual(running_row["status"], "running")
+            self.assertIsNone(running_row["result"])
+            self.assertEqual(json.loads(running_row["progress"]), {"iteration": 1, "maximum": 2, **event})
+            progress(2, 2, {"phase": "整循环燃气 EOS 对比", "stage": "reviewed"})
+            return {"status": "complete"}
+
+        with patch("webapp.eos_comparison.compare_gas_eos", side_effect=calculate) as compare:
+            for key, expected in ((job_id, 0), (forged_id, 1), (wrong_revision, 1)):
+                self.assertEqual(self.run_worker(key), expected)
+            compare.assert_called_once()
+
+        record = self.admin.get(f"/api/validations/{job_id}").json()
+        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(record["request"], eos_request)
+        self.assertEqual(record["progress"], {"iteration": 2, "maximum": 2, "phase": "整循环燃气 EOS 对比",
+                                              "stage": "reviewed"})
+        self.assertEqual(record["result"]["source"]["project_id"], self.project["id"])
+        self.assertEqual(record["result"]["source"]["inputs_sha256"], fingerprint(json.loads(source_row["inputs"])))
+        self.assertEqual(record["result"]["gas_eos_comparison"]["status"], "complete")
+        for key in (forged_id, wrong_revision):
+            rejected = self.admin.get(f"/api/validations/{key}").json()
+            self.assertEqual(rejected["status"], "failed")
+            self.assertIsNone(rejected["result"])
+        self.assertEqual(self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,)), source_row)
+
+    def test_gas_eos_comparison_rejects_invalid_saved_input_before_queueing(self):
+        values = self.project["inputs"] | {"pc": -1.}
+        self.app.state.store.execute("UPDATE jobs SET inputs=? WHERE id=?", (json.dumps(values), self.source_id))
+        response = self.submit(gas_eos_comparison={"enabled": True})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("pc", response.json()["detail"])
+        self.assertEqual(self.admin.get(self.endpoint).json(), [])
+
+    def test_explicit_bm_candidate_survives_queue_worker_and_result_identity(self):
+        candidate = "Peng-Robinson-Boston-Mathias"
+        before = self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,))
+        submitted = self.submit(gas_eos_comparison={"enabled": True, "candidate_eos": candidate})
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        key = submitted.json()["id"]
+        with patch("webapp.eos_comparison.compare_gas_eos", return_value={
+                "status": "complete", "candidate_eos": candidate, "candidate_selection": "explicit"}) as compare:
+            self.assertEqual(self.run_worker(key), 0)
+        self.assertEqual(compare.call_args.kwargs, {"candidate_eos": candidate})
+        record = self.admin.get(f"/api/validations/{key}").json()
+        self.assertEqual(record["request"]["gas_eos_comparison"], {"enabled": True, "candidate_eos": candidate})
+        self.assertEqual(record["result"]["gas_eos_comparison"]["candidate_eos"], candidate)
+        self.assertEqual(self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,)), before)
+
+    def test_legacy_correction_source_is_readable_but_cannot_queue_eos_recalculation(self):
+        for missing in (False, True):
+            values = self.project["inputs"].copy()
+            if missing:
+                del values["combustion_loss_model"]
+            else:
+                values["combustion_loss_model"] = "legacy_temperature_rise"
+            self.app.state.store.execute("UPDATE jobs SET inputs=? WHERE id=?", (json.dumps(values), self.source_id))
+            before = self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,))
+            response = self.submit(gas_eos_comparison={"enabled": True, "candidate_eos": "Peng-Robinson-Boston-Mathias"})
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertIn("旧版本温升折减", response.json()["detail"])
+            saved = self.admin.get(f"/api/jobs/{self.source_id}")
+            self.assertEqual(saved.status_code, 200, saved.text)
+            self.assertEqual(saved.json()["inputs"], values)
+            self.assertEqual(self.app.state.store.one("SELECT * FROM jobs WHERE id=?", (self.source_id,)), before)
+        self.assertEqual(self.admin.get(self.endpoint).json(), [])
+
+    def test_cancelled_gas_eos_comparison_cannot_publish_late_result(self):
+        key = self.submit(gas_eos_comparison={"enabled": True}).json()["id"]
+        endpoint = f"/api/validations/{key}"
+        event = {"phase": "整循环燃气 EOS 对比", "stage": "initializing", "eos": "Peng-Robinson"}
+
+        def calculate(_source, progress):
+            progress(1, 2, event)
+            cancelled = self.admin.post(endpoint + "/cancel", json={})
+            self.assertEqual(cancelled.status_code, 200, cancelled.text)
+            progress(2, 2, {"phase": "整循环燃气 EOS 对比", "stage": "reviewed"})
+            return {"status": "complete"}
+
+        with patch("webapp.eos_comparison.compare_gas_eos", side_effect=calculate):
+            self.assertEqual(self.run_worker(key), 0)
+        record = self.admin.get(endpoint).json()
+        self.assertEqual(record["status"], "cancelled")
+        self.assertEqual(record["progress"], {"iteration": 1, "maximum": 2, **event})
+        self.assertIsNone(record["result"])
 
     def test_design_basis_projection_is_record_bound_and_does_not_write_history(self):
         source = deepcopy(self.source)

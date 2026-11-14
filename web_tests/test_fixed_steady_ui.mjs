@@ -24,7 +24,7 @@ test("boundary request uses explicit fields and units without inheriting design 
   const request=buildFixedSteadyRequest("design-1",form);
   assert.deepEqual(Object.keys(request),["source_job_id","operating_conditions"]);
   assert.deepEqual(Object.keys(request.operating_conditions.boundaries),FIXED_BOUNDARIES.map(field=>field.key));
-  assert.equal(request.operating_conditions.boundaries.tank_pressure_pa,800000);
+  assert.equal(request.operating_conditions.boundaries.fuel_tank_pressure_pa,800000);
   assert.equal(request.operating_conditions.boundaries.ambient_pressure,0);
   assert.deepEqual(request.operating_conditions.controls,{valve_openings:{}});
   assert.deepEqual(request.operating_conditions.control_targets,{});
@@ -32,7 +32,7 @@ test("boundary request uses explicit fields and units without inheriting design 
   for(const bad of ["",NaN,Infinity,-1])assert.throws(()=>buildFixedSteadyRequest("design-1",{...form,fuel_inlet_temp:bad}));
   const ignored=buildFixedSteadyRequest("design-1",{...form,inlet_pressure:"99",feed_line_dp_pa:"0.7",shaft_speed_rpm:"20000"});
   assert.deepEqual(ignored,request);
-  assert.deepEqual(Object.keys(ignored.operating_conditions.boundaries),["ambient_pressure","tank_pressure_pa","fuel_inlet_temp","ox_inlet_temp"]);
+  assert.deepEqual(Object.keys(ignored.operating_conditions.boundaries),["ambient_pressure","fuel_tank_pressure_pa","ox_tank_pressure_pa","fuel_inlet_temp","ox_inlet_temp"]);
   assert.throws(()=>buildFixedSteadyRequest("",form),/概念设计/);
 });
 
@@ -156,4 +156,17 @@ test("saved task history remains readable when the current design cannot provide
   await change(container,"fixedRecord","candidate-1");
   assert.match(container.innerHTML,/historical-design/);
   assert.match(container.innerHTML,/所有字段只读/);
+});
+
+
+test("independent supply boundaries preserve source pressure differences",()=>{
+  const definition=task();
+  delete definition.operating_conditions.boundaries.tank_pressure_pa;
+  Object.assign(definition.operating_conditions.boundaries,{fuel_tank_pressure_pa:300000,ox_tank_pressure_pa:450000});
+  const before=copy(definition), form=fixedSteadyForm(definition);
+  assert.equal(form.fuel_tank_pressure_pa,"0.3");assert.equal(form.ox_tank_pressure_pa,"0.45");
+  const request=buildFixedSteadyRequest("design-1",form);
+  assert.equal(request.operating_conditions.boundaries.ox_tank_pressure_pa,450000);
+  assert.equal(request.operating_conditions.boundaries.fuel_tank_pressure_pa,300000);
+  assert.deepEqual(definition,before);
 });

@@ -126,7 +126,7 @@ def _supply_basis(states, parts, thermo):
     powers = [{"label": label, "power_W": _dict(_dict(parts.get(key)).get("outputs")).get("power_W")}
               for key, label in (("fuel_boost_pump", "燃料增压泵"), ("ox_boost_pump", "液氧增压泵"))]
     return {"ports": ports, "external_powers": powers,
-            "description": "当前两路采用共用压力边界与前置增压方案。增压功由外部功源提供，计入整机能量账；主涡轮轴不承担该功。",
+            "description": "本记录各端口的压力、温度与增压功取自保存结果。前置泵功由外部功源提供，计入整机能量账；主涡轮轴不承担该功。两路实际取值以记录为准。",
             "limits": "过冷度 = 该绝压下的饱和温度 − 液温。静压分量 = (p − p饱和)/(ρg)，未包含端口动能修正；未单独求解贮箱液柱、加速度与吸入管损，也没有 NPSHr 数据，不能判定抗汽蚀裕度通过。超临界区不定义饱和温度。历史记录未保存筛查时不回填。"}
 
 
@@ -193,7 +193,14 @@ def steady_design_view(result, record_id="", *, consistency=None):
     def gate(key, title, status, detail, target, **extra):
         gates.append({"id": key, "label": title, "status": status, "detail": detail, "target": target, **extra})
     gate("numerical", "数值收敛", numerical["status"], "内层匹配、热耦合、预燃室及延续求解分别验收。", "convergence")
-    gate("feed", "流量与压力闭合", feed["status"], "按四条实际支路重核；最低需求压头不代表泵能力或压力储备。", "checks")
+    explicit_valves = network.get("mode") == "valve_constrained_concept_design"
+    gate("feed", "流量与压力闭合", feed["status"],
+         "按三阀安装拓扑重核四支路与冷却压降；概念压力需求不代表泵能力或压力储备。" if explicit_valves else
+         "按四条实际支路重核；最低需求压头不代表泵能力或压力储备。", "checks")
+    if explicit_valves:
+        valve_status = _dict(_dict(calc.get("steady_closure")).get("valve_design")).get("status")
+        gate("valves", "实体三阀需求与开度", "pass" if valve_status == "pass" else "fail" if valve_status == "infeasible" else "review",
+             "使用本次保存安装端口、特性和候选域检查；通过不代表厂家选型或固定发动机节流验收。", "checks")
     gate("energy", "全循环能量收支", energy["status"], "从储箱到喷管出口，轴功与再生传热按边界分别记账。", "checks")
     gate("handoff", "组成、元素与焓交接", handoff_status, "检查实际两股涡轮排气及主室入口；总静态沿用明确保存的约定。", "models")
     gate("range", "流体物性声明范围", range_status, "仅检查最终燃气和纯推进剂端口，不包含壁面材料；范围内不等于高压燃气状态方程或输运精度已验证。", "models")
@@ -214,7 +221,9 @@ def steady_design_view(result, record_id="", *, consistency=None):
         available = all(bool(_dict(_dict(parts.get(i)).get("outputs"))) for i in ids)
         modules.append({"id": key, "label": title, "status": "recorded" if available else "missing",
                         "delivers": delivers, "pending": pending, "target": target, "component_ids": ids})
-    module("feed", "泵、阀门与供给", ["ox_pump", "fuel_pump"], "四支路流量、压力预算、所需泵功与调节压降", "泵特性图、汽蚀裕度、阀门流量系数及开度范围", "checks")
+    module("feed", "泵、阀门与供给", ["ox_pump", "fuel_pump"],
+           "三阀安装、流通面积需求/候选开度、流量压力与所需泵功" if explicit_valves else "四支路流量、压力预算、所需泵功与调节压降",
+           "泵特性图、阀门试验特性与压力恢复系数、汽蚀及固定硬件验证" if explicit_valves else "泵特性图、汽蚀裕度、阀门流量系数及开度范围", "checks")
     module("preburners", "富氧／富燃预燃室", ["ox_preburner", "fuel_preburner"], "实际入口焓与组成、出口平衡状态和元素收支", "高压混合物 EOS、凝聚相及平衡假设适用性", "models")
     module("turbines", "涡轮总体任务书", ["ox_preburner_turbine", "fuel_preburner_turbine"], "入口状态、流量、转速、压比、功率及完整燃气组成", "专业叶型设计、损失模型、性能图和结构校核", "models")
     module("chamber", "主燃烧室", ["main_chamber"], "接收两股实际涡轮排气，按统一化学焓求主室参考状态", "有限速率、混合效率及燃烧稳定性；不由平衡结果推定", "models")
@@ -239,7 +248,7 @@ def steady_design_view(result, record_id="", *, consistency=None):
                   gates=gates, models=models, modules=modules, actions=actions, stations=station_rows,
                   supply=_supply_basis(states, parts, thermo),
                   scope_label="液氧／甲烷 FFSC · 稳态总体设计基线",
-                  property_definitions="气相 cp、cv 为固定组成热容，γ 为 cp/cv；Cantera sound_speed 为冻结声速。平衡导数另行定义，不混用。",
+                   property_definitions="气相 cp、cv 为固定组成热容，γ 为 cp/cv；声速来自所选物性模型的冻结等熵导数。平衡导数另行定义，不混用。",
                   validation_status="not_certified", detail="本页组织总体设计证据；部件详细设计和试验验证仍按任务书继续。",
                   audit={"energy_status": energy["status"], "energy_residual_W": energy.get("residual_W"),
                          "energy_tolerance_W": energy.get("tolerance_W"), "feed_status": feed["status"]})

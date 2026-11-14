@@ -16,6 +16,22 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class UiSchemaTests(unittest.TestCase):
+    def test_displayed_solver_controls_match_execution_acceptance(self):
+        from inspect import signature
+        from lre_workbench.solvers.acceptance import ffsc_acceptance_policy
+        from lre_workbench.systems.ffsc import FFSCCycleModel
+        from lre_workbench.systems.regenerative import coupling_checks
+        controls = design_ui_schema()["solver_controls"]
+        parameters = signature(FFSCCycleModel.solve_cycle).parameters
+        self.assertEqual(controls["thrust_relative_tolerance"], parameters["tol_rel"].default)
+        self.assertEqual(controls["inner_max_iterations"], parameters["max_iter"].default)
+        expected = [(r["name"], r["tolerance"], r["unit"]) for r in coupling_checks({})]
+        displayed = [(r["key"], r["tolerance"], r["unit"]) for r in controls["coupling_criteria"]]
+        self.assertEqual(displayed, expected)
+        policy = ffsc_acceptance_policy(EngineInputs(thrust=2e6))
+        self.assertEqual(policy["equations"][0]["absolute_tolerance"],
+                         controls["thrust_relative_tolerance"] * 2e6)
+
     def setUp(self):
         self.schema = design_ui_schema()
         self.fields = {field["key"]: field for group in self.schema["groups"]
@@ -66,6 +82,44 @@ class UiSchemaTests(unittest.TestCase):
                                                delta=max(1e-12, abs(expected) * 1e-12))
                     else:
                         self.assertEqual(normalized[key], expected)
+
+    def test_pressure_inputs_use_mpa_without_changing_saved_si_values(self):
+        # A historical shared supply value must not be reinterpreted as MPa or
+        # converted twice when the form now uses a different display unit.
+        stored = {"tank_pressure_pa": 300_000, "inlet_pressure": 1_000_000,
+                  "feed_line_dp_pa": 50_000, "pc": 33_000_000,
+                  "ambient_pressure": 101_325, "cooling_dp_pa": 2_000_000,
+                  "ox_tank_pressure_pa": 400_000,
+                  "fuel_tank_pressure_pa": 250_000,
+                  "ox_boost_outlet_pressure_pa": 1_200_000,
+                  "fuel_boost_outlet_pressure_pa": 1_100_000,
+                  "ox_feed_line_dp_pa": 0, "fuel_feed_line_dp_pa": 75_000}
+        expected = {"tank_pressure_pa": .3, "inlet_pressure": 1,
+                    "feed_line_dp_pa": .05, "pc": 33,
+                    "ambient_pressure": .101325, "cooling_dp_pa": 2,
+                    "ox_tank_pressure_pa": .4, "fuel_tank_pressure_pa": .25,
+                    "ox_boost_outlet_pressure_pa": 1.2,
+                    "fuel_boost_outlet_pressure_pa": 1.1,
+                    "ox_feed_line_dp_pa": 0, "fuel_feed_line_dp_pa": .075}
+        roundtripped = dict(platform_defaults())
+        for key, value in stored.items():
+            with self.subTest(key=key):
+                field = self.fields[key]
+                self.assertEqual(field["unit"], "MPa")
+                self.assertEqual(field["factor"], 1e-6)
+                self.assertAlmostEqual(value * field["factor"], expected[key])
+                roundtripped[key] = expected[key] / field["factor"]
+        normalized, _ = input_values(roundtripped)
+        for key, value in stored.items():
+            self.assertAlmostEqual(normalized[key], value, delta=max(1e-9, abs(value) * 1e-12))
+        self.assertFalse(any(field["unit"] == "bar" for field in self.fields.values()))
+        # The desktop retains the GG editor although the browser is FFSC only.
+        gg_factor, gg_unit = DISPLAY_UNIT_MAP["gg_turbine_backpressure_pa"]
+        self.assertEqual(gg_unit, "MPa")
+        self.assertAlmostEqual(400_000 * gg_factor, .4)
+        self.assertAlmostEqual(.4 / gg_factor, 400_000)
+        self.assertFalse(any(unit == "bar" for _, fields in PARAM_GROUPS
+                             for _, _, unit in fields))
 
     def test_cycle_availability_and_material_choices(self):
         groups = {group["id"]: group for group in self.schema["groups"]}
@@ -136,9 +190,9 @@ class UiSchemaTests(unittest.TestCase):
         self.assertEqual(set(self.fields), set(platform_defaults()))
         cooling = next(g for g in groups if g["id"] == "cooling")
         mode = next(f for f in cooling["fields"] if f["key"] == "cooling_bartz_mode")
-        self.assertTrue(mode["read_only"])
-        self.assertNotIn("choices", mode)
-        self.assertTrue(all(f["advanced"] for f in cooling["fields"] if f["key"] in ("cooling_heat_load", "cooling_dp_pa")))
+        self.assertFalse(mode["read_only"])
+        self.assertEqual([c["value"] for c in mode["choices"]], [2, 1, 0])
+        self.assertTrue(all(not f["advanced"] for f in cooling["fields"] if f["key"] in ("cooling_heat_load", "cooling_dp_pa")))
         self.assertEqual(self.fields["cooling_bartz_mode"]["type"], "number")
 
     def test_design_conditions_and_geometry_have_single_editor_locations(self):
@@ -152,15 +206,25 @@ class UiSchemaTests(unittest.TestCase):
                 groups = {g["id"]: g for g in self.schema[collection]}
                 design = groups["design"]
                 contour = groups["chamber_contour"]
-                self.assertEqual(design["title"], "设计目标与工况")
+                self.assertEqual(design["title"], "设计目标与工况" if collection == "groups" else "发动机定义与设计工况")
                 self.assertEqual({f["key"] for f in design["fields"]},
-                                 {"thrust", "pc", "of_ratio", "ambient_pressure", "target_isp"})
+                                 {"thrust", "pc", "of_ratio", "ambient_pressure"} | ({"target_isp"} if collection == "groups" else {"cycle_type", "propellant_pair"}))
+                if collection == "groups":
+                    self.assertEqual(design["primary_initials"], ["target_isp"])
+                initial_owner = design if collection == "groups" else groups["initialization"]
+                initial = next(f for f in initial_owner["fields"] if f["key"] == "target_isp")
+                self.assertEqual(initial["role"], "initial_guess")
+                self.assertTrue(initial["inline_help"])
+                pressure = next(f for f in design["fields"] if f["key"] == "ambient_pressure")
+                self.assertEqual(pressure["factor"], 1e-6)
+                self.assertFalse(pressure.get("read_only", False))
+                self.assertTrue(all(not f.get("virtual") for f in design["fields"]))
                 self.assertEqual({f["key"] for f in contour["fields"]},
-                                 geometry_keys - {"cooling_cover_eps"} if collection == "system_groups" else geometry_keys)
+                                 set() if collection == "system_groups" else geometry_keys)
                 for key in geometry_keys:
                     owners = [g["id"] for g in groups.values()
                               for field in g["fields"] if field["key"] == key]
-                    owner = "chamber_cooling_layout" if collection == "system_groups" and key == "cooling_cover_eps" else "chamber_contour"
+                    owner = ("nozzle_performance" if key == "expansion_ratio" else "thermal_geometry") if collection == "system_groups" else "chamber_contour"
                     self.assertEqual(owners, [owner], key)
                 # The GG exhaust nozzle is independent hardware, not another
                 # editor for the main nozzle's expansion ratio.
@@ -178,6 +242,11 @@ class UiSchemaTests(unittest.TestCase):
     def test_ffsc_editor_has_fixed_architecture_without_relabeling_historic_inputs(self):
         groups = {g["id"]: g for g in self.schema["system_groups"]}
         fields = {f["key"]: f for g in groups.values() for f in g["fields"]}
+        self.assertNotIn("cycle", groups)
+        self.assertEqual(self.schema["system_groups"][0]["id"], "design")
+        self.assertTrue(groups["design"]["engine_definition"])
+        self.assertEqual({f["key"] for f in groups["design"]["fields"] if f.get("read_only")},
+                         {"cycle_type", "propellant_pair"})
         self.assertFalse({"gas_generator", "pressure"} & set(groups))
         self.assertFalse(any(key.startswith("gg_") for key in fields))
         for key, value in (("cycle_type", "ffsc"), ("propellant_pair", "lox_methane")):
@@ -186,6 +255,7 @@ class UiSchemaTests(unittest.TestCase):
             self.assertEqual(fields[key]["default"], self.schema["defaults"][key])
             self.assertTrue(self.fields[key].get("read_only", False))
             self.assertEqual(len(self.fields[key]["choices"]), 1)
+            self.assertIn("方案记录", fields[key]["help"])
         for group in groups.values():
             self.assertEqual(group["cycles"], ["ffsc"])
             self.assertEqual(group["propellants"], ["lox_methane"])
@@ -238,11 +308,10 @@ class UiSchemaTests(unittest.TestCase):
     def test_cooling_methods_keep_geometry_and_material_inputs_in_separate_groups(self):
         groups = {group["id"]: group for group in self.schema["system_groups"]}
         methods = {field["key"]: field for field in groups["cooling"]["fields"]}
-        # The default physical method is explanatory. Only old budget cases
-        # expose editable values in this group.
-        self.assertEqual(set(methods), {"cooling_bartz_mode", "cooling_heat_load", "cooling_dp_pa"})
+        # Model selection is explicit; both paths preserve their saved inputs.
+        self.assertEqual(set(methods), {"cooling_bartz_mode", "cooling_heat_load", "cooling_dp_pa", "cooling_reference_wall_temp_K", "cooling_estimated_dp_pa", "cooling_estimate_basis"})
         self.assertEqual(methods["cooling_bartz_mode"]["default"], 1.0)
-        self.assertTrue(methods["cooling_bartz_mode"]["read_only"])
+        self.assertFalse(methods["cooling_bartz_mode"]["read_only"])
         for key in ("cooling_heat_load", "cooling_dp_pa"):
             self.assertEqual(methods[key]["visibility"],
                              {"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]})
@@ -251,8 +320,8 @@ class UiSchemaTests(unittest.TestCase):
         # Explanation links must lead to the existing, unique editors. A UI
         # reorganization must not load a new physical design or duplicate it.
         defaults_by_group = {
-            "chamber_contour": {"expansion_ratio": 34.34},
-            "chamber_cooling_layout": {"cooling_cover_eps": 0.0},
+            "nozzle_performance": {"expansion_ratio": 34.34},
+            "thermal_geometry": {"cooling_cover_eps": 0.0},
             "chamber_channels": {
                 "cooling_channel_auto_size": 0.0, "cooling_n_channels": 300.0,
                 "cooling_channel_width_m": 0.0015, "cooling_channel_height_m": 0.008,
@@ -275,22 +344,24 @@ class UiSchemaTests(unittest.TestCase):
 
     def test_solver_selection_roundtrip_and_validation(self):
         self.assertEqual(self.fields["nonlinear_solver"]["type"], "select")
+        self.assertEqual([g["id"] for g in self.schema["system_groups"] if g.get("numerical_configuration")],
+                         ["solver", "initialization"])
         solver = next(g for g in self.schema["system_groups"] if g["id"] == "solver")
         self.assertEqual([f["key"] for f in solver["fields"]], ["nonlinear_solver",
-                         "steady_ox_power_tolerance_W", "steady_fuel_power_tolerance_W", "cooling_grid_points",
-                         "chamber_temp_guess", "chamber_gamma", "molar_mass"])
+                         "steady_ox_power_tolerance_W", "steady_fuel_power_tolerance_W", "cooling_grid_points"])
         for key in ("steady_ox_power_tolerance_W", "steady_fuel_power_tolerance_W"):
             self.assertEqual(self.fields[key]["role"], "solver_setting")
             self.assertEqual(self.fields[key]["unit"], "W")
             self.assertEqual(self.fields[key]["cycles"], ["ffsc"])
         self.assertNotIn("thermo", {g["id"] for g in self.schema["system_groups"]})
-        self.assertTrue(solver["initials_inline"])
+        self.assertTrue(solver["numerical_configuration"])
+        self.assertEqual([s["id"] for s in solver["sections"]], ["method", "acceptance", "discretization"])
         self.assertTrue(solver["compact"])
         # The old case/desktop group and saved values remain lossless.
         self.assertIn("thermo", {g["id"] for g in self.schema["groups"]})
         for key in ("chamber_temp_guess", "chamber_gamma", "molar_mass"):
             self.assertEqual([g["id"] for g in self.schema["system_groups"]
-                              for f in g["fields"] if f["key"] == key], ["solver"])
+                              for f in g["fields"] if f["key"] == key], ["initialization"])
             self.assertEqual(self.fields[key]["role"], "initial_guess")
             self.assertIn("启动估计", self.fields[key]["label"])
         self.assertEqual(input_values({})[0]["nonlinear_solver"], "newton")
@@ -301,40 +372,106 @@ class UiSchemaTests(unittest.TestCase):
 
     def test_supply_efficiencies_and_chemistry_have_separate_unique_homes(self):
         groups = {g["id"]: g for g in self.schema["system_groups"]}
-        self.assertEqual(groups["chamber_chemistry"]["title"], "主燃烧室热力学模型")
-        self.assertEqual(groups["chamber_chemistry"]["advanced_title"], "历史兼容设置")
-        self.assertTrue(all(f["advanced"] for f in groups["chamber_chemistry"]["fields"]))
-        self.assertEqual(groups["inlet"]["title"], "推进剂供给边界")
-        expected = {"inlet": {"fuel_inlet_temp", "ox_inlet_temp", "tank_pressure_pa",
-                              "inlet_pressure", "feed_line_dp_pa", "boost_pump_efficiency"},
+        self.assertEqual(groups["chamber_chemistry"]["title"], "工质与热物性模型")
+        self.assertTrue(groups["chamber_chemistry"]["requires_review"])
+        self.assertNotIn("advanced_title", groups["chamber_chemistry"])
+        self.assertEqual({f["key"] for f in groups["chamber_chemistry"]["fields"] if not f["read_only"]}, {"gas_eos"})
+        self.assertTrue(all(not f["advanced"] for f in groups["chamber_chemistry"]["fields"]))
+        eos = next(f for f in groups["chamber_chemistry"]["fields"] if f["key"] == "gas_eos")
+        self.assertFalse(eos["advanced"])
+        self.assertEqual([(c["value"], c["label"]) for c in eos["choices"]], [
+            ("ideal-gas", "理想气体混合物（默认）"),
+            ("Peng-Robinson", "Peng–Robinson（PR，预燃室与涡轮 · 研究模型）"),
+            ("Peng-Robinson-Boston-Mathias", "Peng–Robinson–Boston–Mathias（PR–BM，全燃气流程 · 研究模型）"),
+        ])
+        self.assertIn("密度、焓、熵和比热", eos["help"])
+        self.assertIn("16 种化学物种", eos["help"])
+        self.assertEqual(eos["label"], "燃气物性模型")
+        self.assertIn("研究模型用于设计点计算", eos["help"])
+        reference = " ".join(section["text"] for section in eos["help_sections"])
+        self.assertIn("H、O、OH", reference)
+        self.assertIn("共同 16 物种", reference)
+        self.assertIn("试验精度", reference)
+        self.assertIn("与几何部件无关", reference)
+        self.assertIn("名称不代表精度等级", reference)
+        self.assertIn("不是 PR 状态方程的理论物种数上限", reference)
+        self.assertIn("保留所选热化学数据", reference)
+        self.assertIn("热力学校核提供独立模型对照", reference)
+        self.assertIn("计算结果不能作为已验证性能", reference)
+        self.assertEqual({item["key"] for item in groups["chamber_chemistry"]["configuration_context"]},
+                         {"methane_thermo_dataset"})
+        self.assertTrue(self.fields["gas_species_policy"]["hidden"])
+        species = next(f for f in groups["chamber_chemistry"]["fields"] if f["key"] == "gas_species_policy")
+        self.assertFalse(species["hidden"])
+        self.assertFalse(species["advanced"])
+        self.assertTrue(species["read_only"])
+        self.assertEqual(species["label"], "参与平衡计算的化学物种")
+        choices = {choice["value"]: choice["label"] for choice in species["choices"]}
+        self.assertEqual(set(choices), {"full", "pr_supported_v1", "auto"})
+        self.assertIn("53 种化学物种", choices["full"])
+        self.assertIn("H、O、OH", choices["full"])
+        self.assertIn("16", choices["pr_supported_v1"])
+        self.assertIn("PR 参数覆盖范围", choices["pr_supported_v1"])
+        self.assertIn("旧版本自动选择", choices["auto"])
+        self.assertIn("H、O、OH", species["inline_help"])
+        self.assertIn("不会改写原物种范围", species["help"])
+        self.assertIn("可能导致温度偏高", species["help"])
+        self.assertIn("不提供单独切换", species["help"])
+        loss = next(f for f in groups["chamber_chemistry"]["fields"] if f["key"] == "combustion_loss_model")
+        self.assertEqual(loss["label"], "温度修正方式")
+        self.assertEqual({c["value"] for c in loss["choices"]}, {"adiabatic", "legacy_temperature_rise"})
+        self.assertIn("常规设计不采用", loss["inline_help"])
+        self.assertIn("已退出常规设计执行", loss["help"])
+        self.assertEqual(groups["inlet"]["title"], "推进剂供给条件")
+        supply_keys = {f"{side}_{suffix}" for side in ("ox", "fuel") for suffix in
+                       ("tank_pressure_pa", "boost_outlet_pressure_pa", "feed_line_dp_pa", "boost_pump_efficiency")}
+        expected = {"inlet": {"fuel_inlet_temp", "ox_inlet_temp"} | supply_keys,
                     "component_efficiencies": {"pump_efficiency_ox", "pump_efficiency_fuel",
                                                "turbine_efficiency_ox", "turbine_efficiency_fuel"},
-                    "chamber_chemistry": {"combustion_loss_model", "combustion_efficiency"}}
+                    "chamber_chemistry": {"combustion_loss_model", "combustion_efficiency", "gas_eos", "gas_species_policy"}}
         for owner, keys in expected.items():
             self.assertTrue(groups[owner]["compact"])
             self.assertEqual({f["key"] for f in groups[owner]["fields"]}, keys)
             for key in keys:
                 self.assertEqual([g["id"] for g in groups.values() for f in g["fields"] if f["key"] == key], [owner])
-        # Presentation reorganizes existing inputs without silently changing a case.
+        # Routine defaults and explicit historical model values remain distinct.
         values = {key: self.schema["defaults"][key] for keys in expected.values() for key in keys}
         self.assertEqual(values["fuel_inlet_temp"], 100.)
         self.assertEqual(values["ox_inlet_temp"], 70.)
-        self.assertEqual(values["combustion_loss_model"], "legacy_temperature_rise")
+        self.assertEqual(values["combustion_loss_model"], "adiabatic")
+        historical, _ = input_values({"combustion_loss_model": "legacy_temperature_rise"})
+        self.assertEqual(historical["combustion_loss_model"], "legacy_temperature_rise")
+        for field in groups["inlet"]["fields"]:
+            self.assertTrue(field["show_role"])
+            if field["key"] in supply_keys:
+                self.assertTrue(field["nullable"])
+                self.assertTrue(field["show_effective_value"])
+                self.assertIsNone(field["default"])
+                self.assertIn(field["fallback_key"], self.schema["defaults"])
+                if field["key"].endswith("_pa"):
+                    self.assertEqual((field["factor"], field["unit"]), (1e-6, "MPa"))
+        self.assertEqual([section["title"] for section in groups["inlet"]["sections"]],
+                         ["贮箱出口接口条件", "前置泵与供给管路假设"])
 
     def test_preburner_design_has_one_home_and_explicit_limit_provenance(self):
         groups = {g["id"]: g for g in self.schema["system_groups"]}
         self.assertNotIn("preburners", groups)
         group = groups["preburner_design"]
-        self.assertEqual(group["title"], "预燃室热力设计")
-        self.assertEqual([section["id"] for section in group["sections"]], ["targets", "interfaces", "results", "limits"])
-        self.assertTrue(group["sections"][-1]["collapsed"])
-        self.assertEqual(len(group["sections"][-1]["field_groups"]), 2)
+        self.assertEqual(group["title"], "预燃室热力匹配条件")
+        self.assertEqual([section["id"] for section in group["sections"]], ["targets"])
+        limits = groups["engineering_constraints"]
+        self.assertEqual(limits["workflow_stage"], "assessment")
+        self.assertTrue(limits["optional_configuration"])
+        self.assertFalse(limits["requires_review"])
+        self.assertEqual(limits["sections"][0]["title"], "出口燃气温度限值与依据")
+        self.assertEqual(len(limits["sections"][0]["field_groups"]), 2)
         keys = [f["key"] for f in group["fields"]]
         self.assertEqual(len(keys), len(set(keys)))
         for side in ("ox", "fuel"):
             for suffix in ("temp_target", "mr_target", "pressure_ratio", "temp_limit", "temp_limit_status", "temp_limit_basis"):
                 key = f"{side}_preburner_{suffix}"
-                self.assertEqual([g["id"] for g in groups.values() for f in g["fields"] if f["key"] == key], ["preburner_design"])
+                owner = "engineering_constraints" if suffix.startswith("temp_limit") else "preburner_design"
+                self.assertEqual([g["id"] for g in groups.values() for f in g["fields"] if f["key"] == key], [owner])
             state = self.fields[f"{side}_preburner_temp_limit_status"]
             self.assertEqual([c["value"] for c in state["choices"]], ["unset", "provisional", "documented"])
             self.assertEqual(state["default"], "unset")
@@ -349,7 +486,21 @@ class UiSchemaTests(unittest.TestCase):
         from lre_workbench.materials.wall import list_wall_datasets
         group = next(g for g in self.schema["system_groups"] if g["id"] == "wall_thermal")
         fields = {field["key"]: field for field in group["fields"]}
-        self.assertEqual(set(fields), {"wall_thermal_dataset_id", "wall_manufacturing_state", "wall_material_zones_json"})
+        self.assertEqual(set(fields), {"chamber_inner_wall_material", "wall_thermal_dataset_id", "wall_manufacturing_state", "wall_material_zones_json"})
+        liner = fields["chamber_inner_wall_material"]
+        self.assertEqual(liner["type"], "select")
+        self.assertFalse(liner["read_only"])
+        self.assertFalse(liner["hidden"])
+        self.assertFalse(liner["advanced"])
+        self.assertIn("分别核对", liner["help"])
+        self.assertIn("不会自动改换", liner["help"])
+        stored_liners = [(g["id"], f) for g in self.schema["groups"] for f in g["fields"]
+                         if f["key"] == "chamber_inner_wall_material"]
+        self.assertEqual([g for g, _ in stored_liners], ["chamber_structure"])
+        self.assertEqual(liner["choices"], stored_liners[0][1]["choices"])
+        self.assertEqual([g["id"] for g in self.schema["system_groups"] for f in g["fields"]
+                          if f["key"] == "chamber_inner_wall_material"], ["wall_thermal"])
+        self.assertNotIn("chamber_outer_wall_material", fields)
         catalog = fields["wall_thermal_dataset_id"]["dataset_catalog"]
         self.assertEqual(catalog, [d.metadata() for d in list_wall_datasets()])
         self.assertEqual({c["value"] for c in fields["wall_thermal_dataset_id"]["choices"]},
@@ -359,7 +510,7 @@ class UiSchemaTests(unittest.TestCase):
         self.assertEqual({item["key"] for item in group["configuration_context"]},
                          {"chamber_inner_wall_material", "chamber_outer_wall_material"})
         for field in fields.values():
-            self.assertEqual(field["visibility"], {"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]})
+            self.assertEqual(field["visibility"], {"all": []})
         self.assertNotIn("CuCrZr", " ".join(c["label"] for c in fields["wall_thermal_dataset_id"]["choices"]))
 
     def test_grcop42_source_metadata_survives_real_editor_rendering(self):

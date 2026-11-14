@@ -55,9 +55,9 @@ function pureFluidEvidence(evidence) {
 }
 
 function stateTable(states) {
-  return table(["燃气节点","温度 / K","压力 / MPa","所查物种共同温区 / K","温区状态","外推物种质量占比"],states.map(state=>{
+  return table(["燃气节点","实际状态方程","温度 / K","压力 / MPa","所查物种共同温区 / K","温区状态","外推物种质量占比"],states.map(state=>{
     const range=object(state.thermo_range), status=thermoRangeDisplayState(state);
-    return `<tr class="${status === "extrapolated" ? "ta-extrapolated" : ""}">${cell(state.label || state.id || "未命名节点")}${cell(fmt(state.T_K))}${cell(fmt(scale(state.p_Pa,1e-6)))}${cell(`${fmt(range.valid_temperature_min_K)}–${fmt(range.valid_temperature_max_K)}`)}${cell(rangeLabel(status))}${cell(finite(range.outside_mass_fraction) ? `${fmt(range.outside_mass_fraction * 100)} %` : "—")}</tr>`;
+    return `<tr class="${status === "extrapolated" ? "ta-extrapolated" : ""}">${cell(state.label || state.id || "未命名节点")}${cell(state.gas_model || "未记录")}${cell(fmt(state.T_K))}${cell(fmt(scale(state.p_Pa,1e-6)))}${cell(`${fmt(range.valid_temperature_min_K)}–${fmt(range.valid_temperature_max_K)}`)}${cell(rangeLabel(status))}${cell(finite(range.outside_mass_fraction) ? `${fmt(range.outside_mass_fraction * 100)} %` : "—")}</tr>`;
   }));
 }
 
@@ -78,7 +78,7 @@ function modelCard(title, model, fallback) {
 function dataEvidence(evidence) {
   const data=object(evidence.thermochemical_data);
   if(!data.id)return `<p class="ta-notice">本记录未单独保存热化学数据指纹；按历史记录解释，不以当前数据替换。</p>`;
-  return `<details class="ta-details"><summary>本次气相热化学数据：${escape(data.id)}</summary><p>${escape(data.description)}</p><dl><div><dt>数据与计算库</dt><dd>${escape(data.label)} · Cantera ${escape(data.cantera_version)}</dd></div><div><dt>全部 ${escape(data.species_count)} 个物种共同声明温区</dt><dd>${fmt(data.common_min_temperature_K)}–${fmt(data.common_max_temperature_K)} K</dd></div><div><dt>数据 SHA-256</dt><dd>${escape(data.sha256)}</dd></div></dl><p>高温数据扩展不改变理想气体状态方程；共同温区也不是高压精度保证。</p></details>`;
+    return `<details class="ta-details"><summary>本次气相热化学数据：${escape(data.id)}</summary><p>${escape(data.description)}</p><dl><div><dt>物种热数据</dt><dd>${escape(data.label)} · ${escape(data.id)}</dd></div><div><dt>计算工具运行版本</dt><dd>Cantera ${escape(data.cantera_version)}</dd></div><div><dt>全部 ${escape(data.species_count)} 个候选物种共同声明温区</dt><dd>${fmt(data.common_min_temperature_K)}–${fmt(data.common_max_temperature_K)} K</dd></div><div><dt>数据 SHA-256</dt><dd>${escape(data.sha256)}</dd></div></dl><p>物种热数据与状态方程分别记录；实际 EOS 见各燃气节点及下方模型说明，共同温区不是高压精度保证。Cantera 是计算工具，数据来源与模型选择独立记录。</p><button type="button" data-property-open="record">查看本记录物性依据与实际组成</button></details>`;
 }
 
 export function renderThermodynamicApplicability(result = {}) {

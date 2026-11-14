@@ -1,5 +1,6 @@
 """Actual hot-stream HP budgets cannot be replaced by fresh reactant defaults."""
 from copy import deepcopy
+from dataclasses import asdict
 import json
 import unittest
 from unittest.mock import patch
@@ -8,6 +9,9 @@ from webapp.chamber_handoff_compare import compare_chamber_handoff
 from webapp.validation import normalize_request, calculate_validation, fingerprint
 from webapp.validation_checks import conservation_checks
 from tests.test_gas_handoff import fixture
+from lre_workbench.properties.datasets import gas_eos_scope, methane_dataset_scope
+from lre_workbench.domain.models import FlowState
+from lre_workbench.components.chambers.model import MainChamber
 
 
 class ChamberHandoffTests(unittest.TestCase):
@@ -16,6 +20,79 @@ class ChamberHandoffTests(unittest.TestCase):
         cls.record = fixture()
         cls.record["calculation"]["inputs"] = {"cycle_type": "ffsc", "propellant_pair": "lox_methane",
                                                 "methane_thermo_dataset": "gri30_highT"}
+        with gas_eos_scope("Peng-Robinson", "pr_supported_v1"):
+            cls.pr_record = fixture()
+        cls.pr_record["calculation"]["inputs"] = {
+            "cycle_type": "ffsc", "propellant_pair": "lox_methane",
+            "methane_thermo_dataset": "gri30_highT", "gas_eos": "Peng-Robinson",
+            "gas_species_policy": "pr_supported_v1"}
+        cls.segmented_record = deepcopy(cls.pr_record)
+        saved = cls.segmented_record["calculation"]["states"]
+        with methane_dataset_scope("gri30_highT"), gas_eos_scope("Peng-Robinson", "pr_supported_v1"):
+            chamber = MainChamber(20e6, 54., 1.2, 22., 3500., heat_loss_W=1e6,
+                                  gas_eos_override="ideal-gas")
+            out, component = chamber.evaluate(FlowState(**deepcopy(saved["ox_turbine_exhaust"])),
+                                              FlowState(**deepcopy(saved["fuel_turbine_exhaust"])))
+        saved["main_chamber"] = asdict(out)
+        cls.segmented_record["calculation"]["components"]["main_chamber"] = asdict(component)
+
+    def test_segmented_pr_exhaust_ideal_chamber_keeps_real_inlet_enthalpy(self):
+        before = deepcopy(self.segmented_record)
+        with patch("webapp.chamber_handoff_compare._cea_actual_ports") as cea:
+            result = compare_chamber_handoff(self.segmented_record)
+        self.assertEqual(result["status"], "ok", result.get("reason"))
+        self.assertEqual(result["source_model"]["eos"], "Peng-Robinson")
+        self.assertEqual(result["production_reproduction"]["gas_eos"], "ideal-gas")
+        self.assertEqual(result["target"]["eos_transition"]["kind"], "conservative_enthalpy_species_handoff")
+        self.assertLess(abs(result["production_reproduction"]["temperature_difference_K"]), .01)
+        streams = before["calculation"]["states"]
+        hflux = sum(streams[name]["mass_flow"] * streams[name]["enthalpy"]
+                    for name in ("ox_turbine_exhaust", "fuel_turbine_exhaust"))
+        self.assertAlmostEqual(result["target"]["h_Jkg"], (hflux - 1e6) / 54.)
+        self.assertEqual(result["matched_cho_comparison"]["status"], "unavailable")
+        cea.assert_not_called()
+        self.assertEqual(before, self.segmented_record)
+
+    def test_segmented_boundary_requires_matching_explicit_transition_evidence(self):
+        for change in ("missing_metadata", "missing_profile", "wrong_source", "wrong_reference"):
+            record = deepcopy(self.segmented_record)
+            metadata = record["calculation"]["states"]["main_chamber"]["metadata"]
+            profile = record["calculation"]["components"]["main_chamber"]["profile"]["inlet_handoff"]
+            if change == "missing_metadata": metadata.pop("eos_transition")
+            if change == "missing_profile": profile.pop("eos_transition")
+            if change == "wrong_source": metadata["eos_transition"]["source_eos"] = "ideal-gas"
+            if change == "wrong_reference": profile["eos_transition"]["enthalpy_reference_id"] = "wrong"
+            with self.subTest(change=change):
+                result = compare_chamber_handoff(record)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertIsNone(result["production_reproduction"])
+                self.assertIsNone(result["matched_cho_comparison"])
+
+    def test_pr_source_reproduces_original_eos_without_cea_relabeling(self):
+        before = deepcopy(self.pr_record)
+        with patch("webapp.chamber_handoff_compare._cea_actual_ports") as cea:
+            result = compare_chamber_handoff(self.pr_record)
+        self.assertEqual(result["status"], "ok", result.get("reason"))
+        self.assertEqual(result["production_reproduction"]["gas_eos"], "Peng-Robinson")
+        self.assertLess(abs(result["production_reproduction"]["temperature_difference_K"]), .01)
+        self.assertLess(abs(result["production_reproduction"]["pressure_residual_Pa"]), .1)
+        self.assertEqual(result["source_model"]["species_policy"], "pr_supported_v1")
+        self.assertEqual(result["matched_cho_comparison"]["status"], "unavailable")
+        self.assertEqual(result["matched_cho_comparison"]["applicability"], "not_applicable_to_PR_source")
+        self.assertEqual(result["matched_cho_comparison"]["recommended_comparison"], "paired_ideal_PR_same_species")
+        cea.assert_not_called()
+        self.assertEqual(before, self.pr_record)
+
+    def test_pr_source_must_match_both_feed_and_chamber_models(self):
+        for station in ("fuel_turbine_exhaust", "main_chamber"):
+            record = deepcopy(self.pr_record)
+            record["calculation"]["states"][station]["metadata"]["model"] = deepcopy(
+                self.record["calculation"]["states"][station]["metadata"]["model"])
+            with self.subTest(station=station):
+                result = compare_chamber_handoff(record)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertIsNone(result["matched_cho_comparison"])
+                self.assertIn("身份不同", result["reason"])
 
     def test_hot_stream_budget_and_source_immutable(self):
         before = deepcopy(self.record)

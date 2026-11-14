@@ -18,7 +18,7 @@ from webapp.ui_schema import design_ui_schema
 
 
 def component_result(cycle="ffsc", layout="single_shaft"):
-    inputs = EngineInputs(cycle_type=cycle, gg_layout=layout)
+    inputs = EngineInputs(cycle_type=cycle, gg_layout=layout, combustion_loss_model="adiabatic")
     # A controlled ideal-gas component test point, not a real engine measurement.
     gas = GasState(temperature=850., pressure=8e6, cp=1200., gamma=1.33,
                    molar_mass=8314.462618 / (1200. * (1 - 1 / 1.33)),
@@ -96,7 +96,7 @@ class TurbineGeometryAPITests(unittest.TestCase):
             app = create_app(Path(temporary) / "workspace.sqlite3", queue_enabled=False)
             with client(app) as api:
                 api.post("/api/auth/setup", json={"username": "admin", "display_name": "测试", "password": TEST_PASSWORD})
-                project = api.post("/api/projects", json={"name": "涡轮几何测试", "inputs": asdict(EngineInputs())}).json()["project"]
+                project = api.post("/api/projects", json={"name": "涡轮几何测试", "inputs": asdict(EngineInputs(combustion_loss_model="adiabatic"))}).json()["project"]
                 job_id = api.post(f"/api/projects/{project['id']}/jobs", json={"revision": 1}).json()["id"]
                 new = {"calculation": asdict(component_result())}
                 old = deepcopy(new)

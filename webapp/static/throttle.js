@@ -214,7 +214,7 @@ function renderBaseThrottleResult(result,selectedRatio=null,recordStatus=null,le
       succeeded:["本次扫描未返回工况记录","请检查任务记录与诊断；没有工况数据时不会生成性能曲线。"],
     };
     const [title,description]=emptyStates[recordStatus]||["建立从额定工况到部分推力的稳态性能曲线","选择已完成的设计记录，设置最低节流比例与点数后运行。每一点独立求解；结果逐点保留。"];
-    const explanation=legacyReadOnly?"本条旧扫描没有可绘制的工况，原始请求与状态仅供历史追溯。新分析请进入“工况与运行 → 发动机节流分析”。":description;
+    const explanation=legacyReadOnly?"本条旧扫描没有可绘制的工况，原始请求与状态仅供历史追溯。新分析请进入“稳态分析 → 发动机节流扫描”。":description;
     return `<section class="th-empty" data-throttle-empty-status="${escape(recordStatus||"initial")}"><span>${legacyReadOnly?"LEGACY DESIGN MATCHING · READ ONLY":"STEADY THROTTLE SWEEP"}</span><h3>${escape(title)}</h3><p>${escape(explanation)}</p><div>推力跟随　·　比冲　·　室压　·　质量流量　·　温度　·　约束检查</div></section>`;
   }
   const data=prepareThrottleData(result),computed=data.points.filter(point=>!point.pending),chosen=data.points.find(point=>point.throttle_ratio===selectedRatio)||computed.find(point=>point.status!=="pass")||computed[0];
@@ -294,7 +294,7 @@ function renderThrottleWorkspace(values){
   const output=!operating&&selected&&!result?.points?.length?renderBaseThrottleResult(result,selectedRatio,selected.status,true):result?renderThrottleResult(result,selectedRatio,selected?.status):operating?renderThrottleResult(null,null,selected?.status):notice("选择一条已保存的旧设计匹配记录进行查看或导出。历史记录不再重新计算。");
   return `<section class="throttle-workspace" aria-label="${operating?"发动机节流分析":"设计匹配扫描历史"}">
     <div class="th-heading"><div><span class="th-kicker">${operating?"FIXED GEOMETRY · LOCAL OPERATING MODEL":"LEGACY DESIGN MATCHING · READ ONLY"}</span><h2>${operating?"发动机节流分析":"设计匹配扫描历史"}</h2><p>${operating?"保存设计点 → 冻结几何 → 目标推力配平 → 局部性能曲线":"只读历史 · 保留原始求解与数据口径"}</p></div><button data-throttle-action="refresh" ${busy?"disabled":""}>刷新记录</button></div>
-    ${notice(operating?"当前采用基准标定的局部模型。可比较固定几何下的稳态节流变化；结果不是已验证的全范围工作包线。":"原扫描可能按预燃室设计温度重新匹配各点，不属于固定硬件节流分析。此入口仅查看与导出历史；新分析请进入“工况与运行 → 发动机节流分析”。","warning")}
+    ${notice(operating?"当前采用基准标定的局部模型。可比较固定几何下的稳态节流变化；结果不是已验证的全范围工作包线。":"原扫描可能按预燃室设计温度重新匹配各点，不属于固定硬件节流分析。此入口仅查看与导出历史；新分析请进入“稳态分析 → 发动机节流扫描”。","warning")}
     ${operating?operatingSettings(values):""}<section class="th-output"><div class="th-history"><label>${operating?"运行分析记录":"旧设计扫描记录"}<select data-throttle-record ${busy?"disabled":""}><option value="">选择已保存的记录</option>${records.map(record=>`<option value="${escape(record.id)}" ${selected?.id===record.id?"selected":""}>v${escape(record.revision)} · ${escape(date(record.created))} · ${escape(STATUS[record.status]||record.status)}</option>`).join("")}</select></label><button data-throttle-action="export-json" ${selected?"":"disabled"}>导出 JSON</button>${operating?`<button data-throttle-action="cancel" ${running(selected)&&!busy?"":"disabled"}>取消分析</button>`:""}</div>
     ${error?notice(error,"error"):""}${selected?.error?notice(typeof selected.error==="string"?selected.error:JSON.stringify(selected.error),"error"):""}${progressPanel(selected)}
     ${operating&&selectedSource&&selectedSource!==sourceId?notice("当前展示另一设计基准的已保存结果。上方设置用于新任务，不会改变历史结果。","warning"):""}${output}</section></section>`;

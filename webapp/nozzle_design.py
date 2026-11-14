@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 
+from lre_workbench.components.nozzles.model_ids import HEATED_NOZZLE_MODELS
 from lre_workbench.components.nozzles.performance import ambient_characteristic, finite_number
 from lre_workbench.domain.models import G0
 from webapp.design_scope import require_supported_source
@@ -83,11 +84,12 @@ def _flow(profile, geometry):
 def _thermal(cooling, geometry):
     outputs = _mapping(cooling.get("outputs"), "冷却输出")
     profile = _mapping(cooling.get("profile"), "冷却剖面")
+    concept = profile.get("model_id") == "regen_concept_heat_v1" and profile.get("version") == 1
     xt = geometry.get("dimensions", {}).get("throat_x_m")
     xe = geometry.get("dimensions", {}).get("total_length_m")
     nodes, material_outside, invalid_cells = [], 0, 0
     for cell in profile.get("cells", []) if isinstance(profile.get("cells", []), list) else []:
-        if not isinstance(cell, dict) or cell.get("kind") != "channel":
+        if not isinstance(cell, dict) or cell.get("kind") != ("heat_estimate" if concept else "channel"):
             continue
         x = _num(cell.get("x_m"))
         if x is None or (xe is not None and not 0 <= x <= xe + 1e-9):
@@ -96,6 +98,8 @@ def _thermal(cooling, geometry):
         if xt is None or x < xt:
             continue
         node = {k:_num(cell.get(k)) for k in ("x_m", "q_W_m2", "T_wall_hot_K", "T_wall_cold_K")}
+        if concept:
+            node.update(T_wall_hot_K=None, T_wall_cold_K=None)
         nodes.append(node)
         if isinstance(cell.get("material"), dict) and cell["material"].get("within_range") is False:
             material_outside += 1
@@ -113,10 +117,18 @@ def _thermal(cooling, geometry):
         _metric("coolant_pressure_drop_Pa", "全再生回路压降", outputs.get("delta_P_MPa")*1e6 if _num(outputs.get("delta_P_MPa")) is not None else None,
                 "Pa", "cooling_channel.outputs.delta_P_MPa × 10⁶", "整条回路压降，不是独立喷管段压降。", derived=True),
     ]
-    return dict(metrics=metrics, nodes=nodes, status="invalid" if invalid_cells else "saved" if nodes else "missing",
-                invalid_cell_count=invalid_cells, scope="已保存的稳态热流/壁温模型；无应力、疲劳寿命或制造验收结论。",
+    if concept:
+        for metric in metrics:
+            if metric["key"] == "nozzle_peak_heat_flux_W_m2":
+                metric.update(label="扩张段峰值热流估算", basis="概略受热面单元，x≥喉部")
+            elif metric["key"] == "coolant_pressure_drop_Pa":
+                metric.update(label="全再生回路压降估计")
+        metrics = [m for m in metrics if m["key"] != "nozzle_peak_wall_temperature_K"]
+    return dict(metrics=metrics, nodes=nodes, status="invalid" if invalid_cells else "concept_estimate" if concept and nodes else "saved" if nodes else "missing",
+                invalid_cell_count=invalid_cells, scope=("概略受热面与参考壁温下的热流估算；未求解实际壁温、冷却剂沿程状态或冷却能力。" if concept else "已保存的稳态热流/壁温模型；无应力、疲劳寿命或制造验收结论。"),
                 material_outside_range_cells=material_outside,
                 note=(f"{invalid_cells} 个冷却单元坐标无效或超出完整型面范围，未绘制热分布或报告峰值。" if invalid_cells else
+                      "参考壁温是本次热负荷估算的输入，实际壁温须由后续部件热工模型求解。" if concept else
                       f"扩张段 {material_outside} 个单元的材料物性超出声明温区，需复核。" if material_outside else
                       "材料制造状态、物性范围和热应力需在冷却/结构分析中进一步核对。"))
 
@@ -204,7 +216,7 @@ def nozzle_design_view(result, record_id=""):
             end = flow["nodes"][-1]
             for key, target in (("p_Pa", pe), ("T_K", out.get("T_exit_K")), ("M", out.get("mach_exit")), ("velocity_ms", ve), ("area_ratio", eps)):
                 checks.append(_check("exit_"+key, "轴向末端 / 出口结果 · "+key, end[key], target))
-        heated = profile.get("model_id") == "heated_frozen_quasi1d_v1"
+        heated = profile.get("model_id") in HEATED_NOZZLE_MODELS
         mode = out.get("flow_model")
         model_id = profile.get("model_id") or {0:"frozen_ideal_gas_isentropic", -1:"constant_gamma_isentropic", 1:"equilibrium_isentropic"}.get(mode, "unidentified_saved_model")
         thermal = _thermal(_mapping(components.get("cooling_channel"), "冷却部件"), geometry)

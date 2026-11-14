@@ -3,6 +3,7 @@ from time import perf_counter
 
 from lre_workbench.solvers.nonlinear import initial_evaluation_diagnostics
 from lre_workbench.solvers.initialization import SolverInitializationError
+from lre_workbench.solvers.monitor import MonitorCallbackError
 
 
 class SolverAttempt:
@@ -22,6 +23,8 @@ class SolverAttempt:
         self.stage = "initialization" if self.calls == 1 else "model_evaluation"
         try:
             result = function(*values)
+        except MonitorCallbackError:
+            raise
         except Exception as exc:
             # Store the exact exception and actual projected model input. An
             # unrelated later processing exception must not inherit its label.

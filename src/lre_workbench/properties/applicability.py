@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import math
 
+from lre_workbench.components.nozzles.model_ids import HEATED_NOZZLE_MODELS
 from lre_workbench.properties.propellants import get_propellant
-from lre_workbench.properties.datasets import methane_dataset_scope, METHANE_DATASETS
+from lre_workbench.properties.datasets import methane_dataset_scope, gas_eos_scope, METHANE_DATASETS
 from lre_workbench.properties.fluids import state_tp as pure_state_tp, supply_liquid_screen
 
 
@@ -26,7 +27,8 @@ GAS_STATIONS = {
 
 
 def build_thermodynamic_applicability(result):
-    with methane_dataset_scope(getattr(result.inputs, "methane_thermo_dataset", "gri30")):
+    with methane_dataset_scope(getattr(result.inputs, "methane_thermo_dataset", "gri30")), gas_eos_scope(
+            getattr(result.inputs, "gas_eos", "ideal-gas"), getattr(result.inputs, "gas_species_policy", "auto")):
         return _build_thermodynamic_applicability(result)
 
 
@@ -98,15 +100,22 @@ def _build_thermodynamic_applicability(result):
         "status": "missing_evidence", "manufacturing_match": "unknown",
         "description": "历史记录或预算模式未保存逐单元材料热物性证据；不以当前数据集回填。"})
     nozzle_profile = (getattr(nozzle, "profile", None) or {}) if nozzle else {}
+    if cooling_profile.get("model_id") == "regen_concept_heat_v1":
+        report["cooling"] = {"id": "regen_concept_heat_v1", "label": "概略热负荷：参考壁温下的热环境估算",
+            "total_heat_transfer_W": cooling.outputs.get("heat_load_W"),
+            "description": "概略受热面与当前燃气状态决定热流并反馈循环；冷却压降为估计。实际壁温、通道水力、冷却剂沿程状态与冷却能力均未求解。",
+            "assumptions": deepcopy(cooling_profile["assumptions"]), "validation_status": "concept_estimate_only"}
+        report["solid_wall_thermal"] = {"status": "not_evaluated", "manufacturing_match": "unknown",
+            "description": "概略模型未求解壁面导热或实际壁温，不作材料温区与冷却能力判定。"}
     if cooling_profile.get("model_id") == "regen_quasi1d_ph_v1":
         report["cooling"] = {
             "id": "regen_quasi1d_ph_v1", "label": "统一准一维冷却：压力与焓沿程积分",
             "total_heat_transfer_W": cooling.outputs.get("heat_load_W"),
             "description": "冷却沿程节点、总吸热、压降和出口状态来自同一模型；纯流体检查声明温压域和单相，传热相关式及高压输运物性精度仍待独立验证。",
             "validation_status": "correlations_not_independently_validated"}
-    if nozzle_profile.get("model_id") == "heated_frozen_quasi1d_v1":
+    if nozzle_profile.get("model_id") in HEATED_NOZZLE_MODELS:
         report["nozzle"] = {
-            "id": "heated_frozen_quasi1d_v1", "label": "固定主室组成的准一维有热损喷管",
+            "id": nozzle_profile["model_id"], "label": "固定主室组成的准一维有热损喷管",
             "description": "冻结主室组成，从主室平衡参考状态起按冷却覆盖沿程扣除全部再生吸热；声速位置由面积变化与沿程热流的跨声速临界条件求解，不强制位于几何喉部。循环室压和温度是零速储室参考总态，空间热侧返回局部静压与静温；有限燃烧室喷注和压力预算与该总态的对应关系仍属系统级假设。不再假定全喷管等熵，也不把再生热量集中扣在主室平衡计算中。凝结、温区覆盖、高压混合燃气 EOS 与传热相关式仍须分别核查，数值闭合不代表适用性已验证。"}
         report["combustion"]["description"] = (
             "主室先按入口化学焓求未扣再生热的 HP 平衡参考状态；全部再生热在随后准一维热侧模型的对应位置扣除，不在主室平衡中重复扣热。化学平衡含解离，不等于燃尽率 100%。"
@@ -154,9 +163,40 @@ def _build_thermodynamic_applicability(result):
         "common_min_temperature_K": gas.min_temp, "common_max_temperature_K": gas.max_temp,
         "description": "气相平衡与冻结膨胀使用所选物种热化学数据；未验证有限速率反应、高压非理想性、凝聚相或积碳。",
     }
+    if not kerosene:
+        from lre_workbench.properties.library import gas_dataset_details, pure_fluid_catalog
+        used_fluids = {row.get("limits", {}).get("fluid") for row in report["pure_fluid_states"]}
+        report["data_manifest"] = {
+            "schema_version": 1, "scope": "calculation_snapshot",
+            "gas_dataset": gas_dataset_details(inputs.methane_thermo_dataset),
+            "candidate_species": list(gas.species_names),
+            "chemistry": {"combustion": "HP_equilibrium", "expansion": "frozen_composition",
+                          "finite_rate_reactions_used": False,
+                          "combustion_loss_model": inputs.combustion_loss_model},
+            "pure_fluids": [item for item in pure_fluid_catalog() if item["id"] in used_fluids],
+            "wall_thermal": {
+                "use": "evaluated" if cooling_profile.get("model_id") == "regen_quasi1d_ph_v1" else "not_evaluated",
+                "configured_dataset_id": inputs.wall_thermal_dataset_id,
+                "evidence": deepcopy(report["solid_wall_thermal"]),
+                "note": "材料配置与实际导热使用分开记录；概略热负荷和外部给定热量模式不使用壁面导热曲线。",
+            },
+        }
     saved = gas.state.copy()
     report["gas_model"].update(id=gas.thermo_model, label="理想气体混合物" if gas.thermo_model == "ideal-gas" else gas.thermo_model)
-    stations = [(key, label, state.temperature, state.pressure, state.composition)
+    identity = thermo.gas_model_identity(gas)
+    report["gas_model"]["identity"] = identity
+    if identity.get("species_policy") == "pr_supported_v1":
+        report["gas_model"].update(validation_status="restricted_candidate_not_validated",
+            description="两模型共同采用有来源参数的受限物种集合；未覆盖完整自由基解离与凝聚相，不能替代完整燃烧产物模型的验证。")
+        report["notes"].append("PR 候选与相同集合的理想模型均保留物种清单和参数来源；混合规则、非理想化学平衡及高压输运尚未由试验独立验证。")
+    if inputs.gas_eos == "Peng-Robinson":
+        report["gas_model"].update(id="segmented_pr_ideal_v1", label="PR 预燃室／涡轮 + 理想主室／喷管",
+            regions={"preburners_turbines": "Peng-Robinson", "chamber_nozzle": "ideal-gas"})
+    elif inputs.gas_eos == "Peng-Robinson-Boston-Mathias":
+        report["gas_model"].update(id="full_pr_boston_mathias_v1", label="PR–BM 全燃气流程受限候选",
+            regions={"preburners_turbines": inputs.gas_eos, "chamber_nozzle": inputs.gas_eos})
+        report["notes"].append("PR–BM 用 Boston–Mathias 超临界 α 延拓避免标准 PR 高温吸引项过零；它是独立模型版本，不能与历史原生 PR 视为同一参数化。")
+    stations = [(key, label, state.temperature, state.pressure, state.composition, state.metadata.get("model", {}))
                 for key, label in GAS_STATIONS.items()
                 if (state := result.states.get(key)) is not None]
     # GG results do not always carry nozzle FlowStates; inspect the same recorded
@@ -166,19 +206,26 @@ def _build_thermodynamic_applicability(result):
         for key, label, tk, pk in (("nozzle_throat", "主喷管喉部", "T_throat_K", "p_throat_Pa"),
                                   ("nozzle_exit", "主喷管出口", "T_exit_K", "p_exit_Pa")):
             if key not in result.states and nozzle.outputs.get(tk) is not None and nozzle.outputs.get(pk) is not None:
-                stations.append((key, label, nozzle.outputs[tk], nozzle.outputs[pk], chamber.composition))
+                stations.append((key, label, nozzle.outputs[tk], nozzle.outputs[pk], chamber.composition, chamber.metadata.get("model", {})))
     stations.sort(key=lambda row: list(GAS_STATIONS).index(row[0]))
     try:
-        for key, label, temperature, pressure, composition in stations:
+        for key, label, temperature, pressure, composition, model in stations:
+            station_gas = thermo._get_gas(fuel.fuel_species,
+                gas_eos=model.get("eos", gas.thermo_model),
+                species_policy=model.get("species_policy", identity.get("species_policy", "full")))
+            station_saved = station_gas.state.copy()
             row = {"id": key, "label": label, "T_K": temperature, "p_Pa": pressure,
-                   "gas_model": gas.thermo_model}
+                   "gas_model": station_gas.thermo_model,
+                   "composition_basis": "mass_fraction", "mass_fractions": dict(composition or {})}
             try:
                 if not composition or not math.isfinite(temperature) or not math.isfinite(pressure):
                     raise ValueError("缺失或无效的气相状态")
-                gas.TPY = temperature, pressure, thermo._dict_to_Y(gas, composition)
-                row["thermo_range"] = thermo.gas_temperature_applicability(gas)
+                station_gas.TPY = temperature, pressure, thermo._dict_to_Y(station_gas, composition)
+                row["thermo_range"] = thermo.gas_temperature_applicability(station_gas)
             except Exception as exc:
                 row["thermo_range"] = {"status": "unavailable", "reason": str(exc)}
+            finally:
+                station_gas.state = station_saved
             report["states"].append(row)
     finally:
         gas.state = saved
@@ -206,7 +253,7 @@ def attach_thermodynamic_applicability(result):
                    "诊断解使用端点常值延用，未验证材料适用性。")
         if message not in result.warnings:
             result.warnings.append(message)
-    if solid.get("manufacturing_match") in ("unknown", "mismatch"):
+    if solid.get("status") != "not_evaluated" and solid.get("manufacturing_match") in ("unknown", "mismatch"):
         message = "壁面制造状态未与热物性数据试样匹配；温区内不等于实物或重复使用性能已验证。"
         if message not in result.warnings:
             result.warnings.append(message)

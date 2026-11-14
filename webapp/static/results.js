@@ -1,6 +1,7 @@
 // System-design views of the shared solver's serialized results. No calculation lives here.
-// The small unit adapters below mirror src/gui_pyside6.py.
+// Pressure is presented in MPa; saved SI values and historical aliases stay unchanged.
 import {renderComponentWorkspace} from "./component-analysis.js";
+import {renderModelValidity} from "./model-validity.js";
 import {buildFlowModel} from "./flow-model.js";
 import {renderFlowWorkspace} from "./flow-analysis.js";
 import {buildCycleModel,supportsCycleResult} from "./cycle-model.js";
@@ -17,7 +18,7 @@ const COMPONENT_ALIASES = [
   ["rho_in_kgm3","rho_kgm3"],
   ["p_in_Pa","p_in_MPa","p_in_bar"], ["p_out_Pa","p_out_MPa","p_out_bar"],
   ["power_W","power_MW"], ["turbine_power_W","turbine_power_MW"],
-  ["heat_load_W","heat_load_MW"], ["delta_p_Pa","delta_p_MPa"],
+  ["heat_load_W","heat_load_MW"], ["delta_p_Pa","delta_p_MPa","delta_p_bar"],
   ["dp_ox_Pa","dp_ox_MPa"], ["dp_fuel_Pa","dp_fuel_MPa"],
   ["injector_dp_Pa","injector_dp_MPa","injector_dp_bar"],
   ["preburner_pressure_Pa","preburner_pressure_MPa"],
@@ -34,6 +35,7 @@ const COMPONENT_VALUE_SCALE = {
   "delta_p_Pa": 1e-06,
   "p_in_bar": 0.1,
   "p_out_bar": 0.1,
+  "delta_p_bar": 0.1,
   "injector_dp_bar": 0.1,
   "P_in_Pa": 1e-06,
   "P_out_Pa": 1e-06,
@@ -53,11 +55,13 @@ const COMPONENT_LABEL_OVERRIDE = {
   "thrust_vac_N": "真空推力 [kN]",
   "power_hydraulic_W": "不可压近似轴功率参考 [MW]",
   "delta_p_Pa": "压升 [MPa]",
+  "delta_p_MPa": "压升 [MPa]",
+  "delta_p_bar": "压升 [MPa]",
   "injector_dp_bar": "预燃室喷注器压降 [MPa]",
   "Ve_ms": "喷管出口速度 [m/s]",
   "exit_velocity_ms": "喷管出口速度 [m/s]",
   "specific_work_isentropic_Jkg": "等熵比功 [J/kg]",
-  "T_chamber_ideal_K": "理想燃烧温度 [K]",
+  "T_chamber_ideal_K": "经验温升折减前 HP 温度 [K]",
   "combustion_efficiency": "历史温升折减系数（非 c* 效率） [-]",
   "mdot_chamber_kgs": "主燃烧室流量 [kg/s]",
   "Cf_vac": "真空推力系数 Cf",
@@ -110,7 +114,7 @@ const COMPONENT_SPECIFIC_LABELS = {
 // diagnostics remain available in the export and log, without reinterpreting it.
 const fieldSet = text => new Set(text.trim().split(/\s+/));
 const PUMP_FIELDS = fieldSet(`rho_in_kgm3 rho_out_kgm3 rho_kgm3 p_in_Pa p_out_Pa
-  p_in_MPa p_out_MPa p_in_bar p_out_bar delta_p_Pa delta_p_MPa power_W power_MW
+  p_in_MPa p_out_MPa p_in_bar p_out_bar delta_p_Pa delta_p_MPa delta_p_bar power_W power_MW
   power_hydraulic_W specific_work_isentropic_Jkg T_in_K T_out_K delta_T_K
   delta_T_isentropic_K delta_T_loss_K eta head_m volume_flow_m3s nr_rpm npsh_available_m`);
 const PREBURNER_FIELDS = fieldSet(`mdot_total_kgs mdot_fuel_kgs mdot_ox_kgs phi
@@ -229,7 +233,7 @@ const scopeNotice = result => result.calculation_scope?.id === "engine_system"
   : '<div class="banner">历史记录：保留原计算与完整工程校核，尚未按当前系统范围重新运行。下方系统量展示不会改变原校核结论。</div>';
 
 function welcome() {
-  return `<div class="analysis-stack"><section class="panel welcome-card"><div class="welcome-copy"><span class="eyebrow">DESIGN POINT / 初步设计</span><h2>从一个设计点开始</h2><p class="muted">选择参考工况、设置参数，运行后在这里查看循环匹配与系统平衡。</p><ol class="welcome-steps"><li><span>01</span><div><b>选择工况</b><p>在参数设置中选择 FFSC 参考工况。</p></div></li><li><span>02</span><div><b>运行设计点</b><p>检查推力、轴功率平衡和收敛状态。</p></div></li><li><span>03</span><div><b>查看分析</b><p>沿左侧工作流程查看流路状态与部件性能分析结果。</p></div></li></ol><p class="fine">点击上方「运行设计点」开始计算。</p></div><svg class="engine-illustration" viewBox="0 0 400 420" role="img" aria-label="液体火箭发动机结构示意，非计算几何"><defs><pattern id="engine-grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="#e8edf0" stroke-width="1"/></pattern><linearGradient id="engine-metal" x1="0" x2="1"><stop stop-color="#d9e1e6"/><stop offset=".5" stop-color="#fafcfd"/><stop offset="1" stop-color="#b9c7d1"/></linearGradient></defs><rect width="400" height="420" rx="12" fill="url(#engine-grid)"/><path d="M200 30V388M62 240H338" stroke="#b9c7d1" stroke-dasharray="5 5"/><g fill="url(#engine-metal)" stroke="#566f80" stroke-width="2"><path d="M164 151H236V218Q236 238 218 252Q223 300 283 352Q200 376 117 352Q177 300 182 252Q164 238 164 218Z"/><ellipse cx="200" cy="151" rx="36" ry="10"/><ellipse cx="200" cy="352" rx="83" ry="16"/><ellipse cx="200" cy="352" rx="67" ry="10" fill="#78909f"/><rect x="151" y="137" width="98" height="16" rx="4"/><circle cx="132" cy="103" r="23"/><circle cx="267" cy="103" r="23"/><circle cx="132" cy="103" r="10"/><circle cx="267" cy="103" r="10"/><rect x="172" y="69" width="56" height="28" rx="7"/></g><g fill="none" stroke-width="7"><path d="M101 52V91H109M155 103H171V137" stroke="#7d9aaf"/><path d="M298 52V91H290M244 103H230V137M262 119V204Q262 233 236 256L256 309" stroke="#bda172"/></g><g fill="none" stroke="#b99154" stroke-width="2"><path d="M173 174V215Q174 237 191 250Q188 293 141 344M227 174V215Q226 237 209 250Q212 293 259 344"/></g><g font-family="Microsoft YaHei, sans-serif" font-size="11" fill="#7b8a97"><text x="74" y="39">液氧</text><text x="280" y="39">燃料</text><text x="200" y="405" text-anchor="middle">ENGINE CONCEPT / 结构示意</text></g></svg></section>${panel("开始之前", '<div class="metric-list"><div><span>计算范围</span><b>液氧/甲烷全流量补燃循环（FFSC）</b></div><div><span>结果用途</span><b>循环匹配与系统级初步设计</b></div><div><span>设计点要求</span><b>先检查收敛，再检查系统约束</b></div></div>')}</div>`;
+  return `<div class="analysis-stack"><section class="panel welcome-card"><div class="welcome-copy"><span class="eyebrow">DESIGN POINT / 初步设计</span><h2>从一个设计点开始</h2><p class="muted">选择参考工况、设置参数，运行后在这里查看循环匹配与系统平衡。</p><ol class="welcome-steps"><li><span>01</span><div><b>选择工况</b><p>在参数设置中选择 FFSC 参考工况。</p></div></li><li><span>02</span><div><b>运行设计点</b><p>检查推力、轴功率平衡和收敛状态。</p></div></li><li><span>03</span><div><b>查看分析</b><p>沿左侧工作流程查看流路状态与部件性能分析结果。</p></div></li></ol><p class="fine">前往左侧「总体方案与循环设计 → 总体设计点计算 → 输入检查与运行」提交计算，在「总体结果与部件要求」查看输出。</p></div><svg class="engine-illustration" viewBox="0 0 400 420" role="img" aria-label="液体火箭发动机结构示意，非计算几何"><defs><pattern id="engine-grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="#e8edf0" stroke-width="1"/></pattern><linearGradient id="engine-metal" x1="0" x2="1"><stop stop-color="#d9e1e6"/><stop offset=".5" stop-color="#fafcfd"/><stop offset="1" stop-color="#b9c7d1"/></linearGradient></defs><rect width="400" height="420" rx="12" fill="url(#engine-grid)"/><path d="M200 30V388M62 240H338" stroke="#b9c7d1" stroke-dasharray="5 5"/><g fill="url(#engine-metal)" stroke="#566f80" stroke-width="2"><path d="M164 151H236V218Q236 238 218 252Q223 300 283 352Q200 376 117 352Q177 300 182 252Q164 238 164 218Z"/><ellipse cx="200" cy="151" rx="36" ry="10"/><ellipse cx="200" cy="352" rx="83" ry="16"/><ellipse cx="200" cy="352" rx="67" ry="10" fill="#78909f"/><rect x="151" y="137" width="98" height="16" rx="4"/><circle cx="132" cy="103" r="23"/><circle cx="267" cy="103" r="23"/><circle cx="132" cy="103" r="10"/><circle cx="267" cy="103" r="10"/><rect x="172" y="69" width="56" height="28" rx="7"/></g><g fill="none" stroke-width="7"><path d="M101 52V91H109M155 103H171V137" stroke="#7d9aaf"/><path d="M298 52V91H290M244 103H230V137M262 119V204Q262 233 236 256L256 309" stroke="#bda172"/></g><g fill="none" stroke="#b99154" stroke-width="2"><path d="M173 174V215Q174 237 191 250Q188 293 141 344M227 174V215Q226 237 209 250Q212 293 259 344"/></g><g font-family="Microsoft YaHei, sans-serif" font-size="11" fill="#7b8a97"><text x="74" y="39">液氧</text><text x="280" y="39">燃料</text><text x="200" y="405" text-anchor="middle">ENGINE CONCEPT / 结构示意</text></g></svg></section>${panel("开始之前", '<div class="metric-list"><div><span>计算范围</span><b>液氧/甲烷全流量补燃循环（FFSC）</b></div><div><span>结果用途</span><b>循环匹配与系统级初步设计</b></div><div><span>设计点要求</span><b>先检查收敛，再检查系统约束</b></div></div>')}</div>`;
 }
 
 function statusStrip(result) {
@@ -266,7 +270,8 @@ const sum = (...values) => values.every(finite) ? values.reduce((total,value)=>t
 
 function engineeringTable(fields, summary, inputs) {
   return `<div class="table-wrap"><table class="engineering-table"><thead><tr><th scope="col">参数</th><th scope="col">符号</th><th scope="col">数值</th><th scope="col">单位</th></tr></thead><tbody>${fields.map(([key,label,unit])=>{
-    const value = key === "thermo_source" && finite(summary[key]) ? (summary[key] >= .5 ? "Cantera" : "替代热力学模型") : valueText(summary[key]);
+    const value = key === "thermo_source" && finite(summary[key]) ? (summary[key] >= .5 ?
+      (inputs.gas_eos === "Peng-Robinson-Boston-Mathias" ? "PR–BM 求解 / Cantera 物种热数据" : "Cantera") : "替代热力学模型") : valueText(summary[key]);
     return `<tr><td title="${escape(key)}">${escape(fuelLabel(label,inputs))}</td><td class="metric-symbol">${escape(SUMMARY_SYMBOLS[key] || "—")}</td><td class="metric-value">${escape(value)}</td><td class="metric-unit">${escape(unit && unit !== "—" ? unit : "—")}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 }
@@ -523,5 +528,5 @@ export function renderAnalysis(view = "overview", record = null) {
   }
   const renderers = {overview,results_overview:(result,record)=>overview(result,record,{separateDiagnostics:true}),
     solver_diagnostics:solverDiagnostics,states,components,log,topology};
-  return (Object.hasOwn(renderers, view) ? renderers[view] : overview)(record.result, record);
+  return renderModelValidity(record)+(Object.hasOwn(renderers, view) ? renderers[view] : overview)(record.result, record);
 }

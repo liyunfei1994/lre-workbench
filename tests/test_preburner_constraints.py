@@ -25,12 +25,13 @@ class PreburnerConstraintTests(unittest.TestCase):
             self.assertIsNone(preburner_temperature_constraint(inputs, side)["limit_K"])
             self.assertEqual(values[f"{side}_preburner_temp_limit_status"], "unset")
 
-    def test_engineering_example_explicitly_enables_only_provisional_limits(self):
+    def test_new_engineering_example_does_not_enable_historical_limit_values(self):
         values = preset_input_values("raptor3_ffsc")
         for side, limit in (("ox", 800), ("fuel", 900)):
-            self.assertEqual(values[f"{side}_preburner_temp_limit_status"], "provisional")
+            self.assertEqual(values[f"{side}_preburner_temp_limit_status"], "unset")
             self.assertEqual(values[f"{side}_preburner_temp_limit"], limit)
             self.assertEqual(values[f"{side}_preburner_temp_limit_basis"], "")
+            self.assertIsNone(preburner_temperature_constraint(values, side)["limit_K"])
 
     def test_old_numeric_limits_remain_provisional_without_rewriting_source(self):
         legacy = {"ox_preburner_temp_limit": 820.0, "fuel_preburner_temp_limit": 940.0}

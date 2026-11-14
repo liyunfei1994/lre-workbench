@@ -2,6 +2,7 @@
 from copy import deepcopy
 from time import perf_counter
 from traceback import extract_tb
+from lre_workbench.solvers.monitor import MonitorCallbackError
 
 
 def _exception_location(exc):
@@ -46,6 +47,8 @@ class InitializationTrace:
             self.data["counts"][kind + "_attempted"] += 1
         try:
             result = function()
+        except MonitorCallbackError:
+            raise
         except Exception as exc:
             # TaskCancelled inherits BaseException and must bypass this wrapper.
             explicit_component = getattr(exc, "component", "")
@@ -78,6 +81,8 @@ class InitializationTrace:
         self.data["counts"]["property_attempted"] += 1
         try:
             result = function()
+        except MonitorCallbackError:
+            raise
         except Exception as exc:
             evidence.update(status="failed", error_type=type(exc).__name__, message=str(exc),
                             location=_exception_location(exc))

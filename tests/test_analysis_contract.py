@@ -7,7 +7,9 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from lre_workbench.domain.analysis_contract import GROUPS, concept_design_task, concept_inputs, require_concept_mode
+from lre_workbench.domain.analysis_contract import (
+    FFSC_INPUT_FIELDS, GROUPS, concept_design_task, concept_inputs, require_concept_mode,
+)
 from lre_workbench.domain.models import EngineInputs
 
 
@@ -33,6 +35,21 @@ def legacy_task(values):
 
 
 class AnalysisContractTests(unittest.TestCase):
+    def test_saved_ffsc_task_replays_before_and_after_shared_thermal_method(self):
+        values = {key: value for key, value in asdict(EngineInputs(hot_side_thermo_method="same_eos")).items()
+                  if key in FFSC_INPUT_FIELDS}
+        task = concept_design_task(values)
+        self.assertEqual(task["model_configuration"]["hot_side_thermo_method"], "same_eos")
+        self.assertEqual(concept_inputs(task), values)
+
+        old_task = deepcopy(task)
+        del old_task["model_configuration"]["hot_side_thermo_method"]
+        before = deepcopy(old_task)
+        old_values = concept_inputs(old_task)
+        self.assertNotIn("hot_side_thermo_method", old_values)
+        self.assertEqual(EngineInputs.from_dict(old_values).hot_side_thermo_method, "legacy")
+        self.assertEqual(old_task, before)
+
     def test_complete_roundtrip_has_no_shared_or_missing_fields(self):
         for cycle in ("ffsc", "gg"):
             with self.subTest(cycle=cycle):

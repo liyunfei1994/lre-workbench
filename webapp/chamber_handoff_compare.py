@@ -38,9 +38,11 @@ def _load_source_gas(source, ports):
     for port in ports:
         model = port.get("model", {})
         gas = load_verified_gas_model(model)
-        identities.add((model.get("mechanism"), model.get("phase"), model.get("mechanism_sha256")))
-        if model.get("eos", model.get("gas_eos")) != "ideal-gas":
-            raise ValueError("本复核器只重现已保存的 ideal-gas 化学平衡；非理想燃烧需独立模型。")
+        identities.add((model.get("mechanism"), model.get("phase"), model.get("mechanism_sha256"),
+                        gas.thermo_model, model.get("species_policy", "full"),
+                        model.get("species_policy_sha256"), model.get("eos_parameter_sha256"), model.get("eos_model_sha256")))
+        if gas.thermo_model not in thermo.GAS_EOS_MODELS:
+            raise ValueError("本复核器只重现已保存且已核验身份的理想气体或 PR 气相。")
         reference = model.get("enthalpy_reference_id")
         if not reference:
             raise ValueError("排气未保存可识别的化学焓基准。")
@@ -48,7 +50,7 @@ def _load_source_gas(source, ports):
     if len(references) != 1:
         raise ValueError("两股排气的化学焓参考不同，禁止直接相加。")
     if len(identities) != 1:
-        raise ValueError("两股排气的热化学数据库身份不同。")
+        raise ValueError("排气或主室的热化学数据库、EOS、物种集合或参数身份不同。")
     return gas
 
 
@@ -81,6 +83,28 @@ def _budgets(source, report):
         total += mass
         hflux += mass*enthalpy
     chamber = stations["main_chamber"]
+    chamber_gas = _load_source_gas(source, [chamber])
+    source_model, chamber_model = ports[0]["model"], chamber["model"]
+    chemical_keys = ("mechanism", "phase", "mechanism_sha256", "species_policy_sha256",
+                     "eos_parameter_sha256", "enthalpy_reference_id")
+    if any(source_model.get(key) != chamber_model.get(key) for key in chemical_keys):
+        raise ValueError("排气与主室的热化学数据库、物种集合或参数身份不同。")
+    if source_model.get("eos_model_sha256") != chamber_model.get("eos_model_sha256"):
+        raise ValueError("排气与主室的 EOS 实现版本指纹不同。")
+    calculation = source.get("calculation", {})
+    transition = calculation.get("states", {}).get("main_chamber", {}).get("metadata", {}).get("eos_transition")
+    profile_transition = calculation.get("components", {}).get("main_chamber", {}).get("profile", {}).get("inlet_handoff", {}).get("eos_transition")
+    if gas.thermo_model != chamber_gas.thermo_model:
+        expected = {"kind": "conservative_enthalpy_species_handoff", "source_eos": "Peng-Robinson",
+                    "target_eos": "ideal-gas", "species_policy": "pr_supported_v1",
+                    "enthalpy_reference_id": source_model["enthalpy_reference_id"]}
+        if (gas.thermo_model != "Peng-Robinson" or chamber_gas.thermo_model != "ideal-gas"
+                or source_model.get("species_policy") != "pr_supported_v1"
+                or chamber_model.get("species_policy") != "pr_supported_v1"
+                or transition != expected or profile_transition != expected):
+            raise ValueError("跨 EOS 主室缺少一致的守恒焓与物种交接声明，不能把 PR 排气静默解释为理想气体。")
+    elif transition or profile_transition:
+        raise ValueError("保存的主室 EOS 转换声明与实际入口/出口模型不一致。")
     if abs(_finite(chamber.get("mass_flow_kg_s"), "主室流量", True)-total) > max(1e-8, total*1e-8):
         raise ValueError("主室流量与保存的两股排气流量之和不符。")
     outputs = source.get("calculation", {}).get("components", {}).get("main_chamber", {}).get("outputs", {})
@@ -97,9 +121,11 @@ def _budgets(source, report):
               "inlet_enthalpy_flow_W": hflux, "heat_loss_W": heat,
               "legacy_combustion_loss_W": loss,
               "saved_exit_energy_residual_W": energy_residual,
+              "source_eos": gas.thermo_model, "chamber_eos": chamber_gas.thermo_model,
+              "eos_transition": deepcopy(transition), "chamber_model": deepcopy(chamber_model),
               "element_mass_fractions": {name: value/total for name, value in elements.items()},
               "scope": "保存入口总焓扣除集中抽热后的 HP 平衡，历史经验温升折减前"}
-    return gas, ports, target, {name: value/total for name, value in mixed.items()}, outputs
+    return chamber_gas, ports, target, {name: value/total for name, value in mixed.items()}, outputs
 
 
 def _equilibrate(gas, target, composition):
@@ -111,14 +137,17 @@ def _equilibrate(gas, target, composition):
                  for name, fraction in target["element_mass_fractions"].items() if name in gas.element_names}
     max_element = max((abs(v) for v in residuals.values()), default=0.0)
     h_residual = float(gas.enthalpy_mass)-target["h_Jkg"]
-    if max_element > 1e-7 or abs(h_residual) > max(10.0, abs(target["h_Jkg"])*1e-5):
-        raise ValueError("独立 HP 平衡未保持保存的元素或化学焓。")
+    pressure_residual = float(gas.P)-target["p_Pa"]
+    if (max_element > 1e-7 or abs(h_residual) > max(10.0, abs(target["h_Jkg"])*1e-5)
+            or abs(pressure_residual) > max(.1, target["p_Pa"]*1e-8)):
+        raise ValueError("独立 HP 平衡未保持保存的元素、化学焓或压力。")
     composition = {name: _finite(float(y), "HP 产物质量分数") for name, y in zip(gas.species_names, gas.Y) if y != 0}
     if any(y < 0 for y in composition.values()) or abs(sum(composition.values())-1) > 1e-8:
         raise ValueError("HP 平衡产物质量分数不闭合。")
     ranges = _station_ranges(gas, {"chamber": {"temperature_K": temperature, "mass_fractions": composition}})["chamber"]
     return {"status": "ok", "temperature_K": temperature, "enthalpy_Jkg": h,
             "enthalpy_residual_Jkg": h_residual, "element_max_residual": max_element,
+            "pressure_residual_Pa": pressure_residual, "gas_eos": gas.thermo_model,
             "element_residuals": residuals,
             "temperature_range_evidence": ranges,
             "thermochemical_range_status": "extrapolated" if ranges["outside_species"] else "within_declared_ranges",
@@ -186,14 +215,15 @@ def compare_chamber_handoff(source_result, handoff=None, progress=None):
               "matched_cho_comparison": None,
               "notes": ["主室生产路径接收完整分子组成；共同 CHO16 对照只用等效元素卡表示相同入口预算。",
                         "纯推进剂理论基线、实际循环主室复核、非理想物性筛查是三种不同问题。",
-                        "此处两端均为理想气相 HP 平衡，不验证高压真实气体、混合速率或燃烧稳定性。"]}
+                        "保存工况先按其原 EOS 和物种集合复现；理想气相 CEA 对照另行限定适用范围。",
+                        "复现通过不验证高压混合物精度、混合速率或燃烧稳定性。"]}
     try:
         checkpoint()
         if handoff is None:
             from lre_workbench.integrations.gas_handoff import capture_gas_handoff
             handoff = capture_gas_handoff(source_result)
         gas, ports, target, mixed, outputs = _budgets(source_result, handoff)
-        result.update(source_ports=ports, target=target)
+        result.update(source_ports=ports, target=target, source_model=deepcopy(ports[0]["model"]))
         production = _equilibrate(gas, target, mixed)
         saved_temperature = _finite(outputs.get("T_chamber_ideal_K"), "保存的主室平衡温度", True)
         production.update(saved_temperature_K=saved_temperature,
@@ -202,6 +232,14 @@ def compare_chamber_handoff(source_result, handoff=None, progress=None):
             production.update(status="inconsistent", reason="保存主室温度不能由保存入口元素与焓复现。")
         result["production_reproduction"] = production
         result["status"] = "ok" if production["status"] == "ok" else "inconsistent"
+        if gas.thermo_model in thermo.PR_EOS_MODELS or target["source_eos"] in thermo.PR_EOS_MODELS:
+            result["matched_cho_comparison"] = {
+                "status": "unavailable", "applicability": "not_applicable_to_PR_source",
+                "reason": "本记录包含 PR 非理想排气或主室；CEA 的理想气相 CHO16 不在本次同模型对照范围。请使用理想/PR 配对比较，保持相同候选物种集合及明确的焓交接边界。",
+                "recommended_comparison": "paired_ideal_PR_same_species",
+            }
+            result["notes"].append("复现逐端口核验原 EOS 下的保存实焓，并采用主室声明的 EOS 求 HP 平衡；跨 EOS 时保留组成与焓，不按原温压重取理想焓。未生成 CEA 校核结论。")
+            return result
         if any(v > 1e-14 for e, v in target["element_mass_fractions"].items() if e not in CEA_ATOMIC_WEIGHTS):
             result["matched_cho_comparison"] = {"status": "unavailable", "reason": "保存排气含 CHO 以外元素，禁止丢弃后套用 CHO16。"}
             return result

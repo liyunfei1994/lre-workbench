@@ -252,7 +252,6 @@ class FFSCTopologyRenderer:
         except Exception:
             return default
 
-    def _bar(self, key):  return self._fmt(key, "{:.0f} bar", 1e5)
     def _mpa(self, key):  return self._fmt(key, "{:.2f} MPa", 1e6)
     def _K(self, key):    return self._fmt(key, "{:.0f} K")
     def _kg(self, key):   return self._fmt(key, "{:.1f} kg/s")
@@ -295,7 +294,7 @@ class FFSCTopologyRenderer:
         self._draw_one_turbopump(
             ax, cx=self.CH4_X, l1="CH4 涡轮泵", l2="Methane TP",
             liq=self.p.ch4_liq, stroke=self.p.ch4_stroke,
-            p_text=self._bar("fuel_pump_out_pressure_Pa"),
+            p_text=self._mpa("fuel_pump_out_pressure_Pa"),
             m_text=self._kg("mdot_fuel_kg_s"),
             power_text=self._MW("fuel_pump_power_MW"),
             side='left',
@@ -303,7 +302,7 @@ class FFSCTopologyRenderer:
         self._draw_one_turbopump(
             ax, cx=self.LOX_X, l1="LOX 涡轮泵", l2="LOX TP",
             liq=self.p.lox_liq, stroke=self.p.lox_stroke,
-            p_text=self._bar("lox_pump_out_pressure_Pa"),
+            p_text=self._mpa("lox_pump_out_pressure_Pa"),
             m_text=self._kg("mdot_ox_kg_s"),
             power_text=self._MW("ox_pump_power_MW"),
             side='right',
@@ -450,7 +449,7 @@ class FFSCTopologyRenderer:
             anchor, box_side, ha = cx - 84, 'left', 'right'
         else:
             anchor, box_side, ha = cx + 84, 'right', 'left'
-        self._two_line_box(ax, anchor, cy - 6, self._bar(p_key), self._K(t_key),
+        self._two_line_box(ax, anchor, cy - 6, self._mpa(p_key), self._K(t_key),
                            color=self.p.pressure, color2=self.p.temp,
                            box_side=box_side)
         v = self.s.get(mr_key)
@@ -480,7 +479,7 @@ class FFSCTopologyRenderer:
                 anchor, box_side = cx - 80, 'left'
             else:
                 anchor, box_side = cx + 80, 'right'
-            self._two_line_box(ax, anchor, cy, self._bar(p_key), self._K(t_key),
+            self._two_line_box(ax, anchor, cy, self._mpa(p_key), self._K(t_key),
                                color=self.p.pressure, color2=self.p.temp,
                                box_side=box_side)
             # 功率芯片(下方居中)
@@ -647,9 +646,9 @@ class FFSCTopologyRenderer:
                           edgecolor='none', alpha=0.7))
 
         # 主燃室 P/T 卡(右侧外)
-        pc_text = self._bar("chamber_pressure_Pa")
+        pc_text = self._mpa("chamber_pressure_Pa")
         if pc_text == "—" and self.inputs_pc is not None:
-            pc_text = f"{float(self.inputs_pc)/1e5:.0f} bar"
+            pc_text = f"{float(self.inputs_pc)/1e6:.2f} MPa"
         # 放燃烧室体右侧(排气入口下方~喉部之上的直段),与喉部标签拉开间距
         ax.text(cx + ch_hw + 12, ch_top + 40,
                 pc_text, ha='left', va='center',
@@ -1033,7 +1032,7 @@ class GGTopologyRenderer(FFSCTopologyRenderer):
 
         # P/T 信息框(左侧,下移避开 CH4 供应管标签) + 氧燃质量比、流量分数(其下)
         self._two_line_box(ax, cx - 94, cy + 10,
-                           self._bar("gg_pressure_Pa"),
+                           self._mpa("gg_pressure_Pa"),
                            self._K("gg_T_combustion_K"),
                            color=self.p.pressure, color2=self.p.temp,
                            box_side='left')

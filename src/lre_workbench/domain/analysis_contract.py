@@ -7,7 +7,7 @@ initials. Version 1 records retain their original partition for exact replay.
 from copy import deepcopy
 from dataclasses import fields
 
-from lre_workbench.domain.models import EngineInputs
+from lre_workbench.domain.models import EngineInputs, SUPPLY_FIELD_FALLBACKS
 from lre_workbench.domain import parameters as parameter_contract
 from lre_workbench.systems.pressure_budget import BRANCH_BUDGET_FIELDS
 
@@ -50,6 +50,9 @@ _ADDED_COOLING_PARAMETERS = frozenset({
     "cooling_channel_roughness_m", "cooling_k_minor_inlet", "cooling_k_minor_outlet",
     "cooling_htc_enhancement_basis",
 })
+_ADDED_HOT_SIDE_THERMO = frozenset({"hot_side_thermo_method"})
+_ADDED_VALVES = frozenset({"valve_configuration_json"})
+_ADDED_CONCEPT_HEAT = frozenset({"cooling_reference_wall_temp_K", "cooling_estimated_dp_pa", "cooling_estimate_basis"})
 # Older V2 records classified these turbine assumptions together as design choices.
 # Accept only that complete historic partition, without rewriting its saved evidence.
 _V2_OLD_TURBINE_CHOICES = frozenset({
@@ -133,7 +136,14 @@ def concept_inputs(task):
     # missing fields within a new group. Replay returns the original evidence.
     legacy_shapes += tuple(shape | _ADDED_COOLING_PARAMETERS
                            for shape in (frozenset(),) + legacy_shapes)
-    legacy_missing = missing if version != FFSC_SCHEMA_VERSION and missing in legacy_shapes else frozenset()
+    legacy_shapes += tuple(shape | _ADDED_HOT_SIDE_THERMO
+                           for shape in (frozenset(),) + legacy_shapes)
+    allowed_missing = (_ADDED_HOT_SIDE_THERMO,) if version == FFSC_SCHEMA_VERSION else legacy_shapes
+    allowed_missing += tuple(shape | _ADDED_VALVES for shape in (frozenset(),) + allowed_missing)
+    allowed_missing += tuple(shape | SUPPLY_FIELD_FALLBACKS.keys() for shape in (frozenset(),) + allowed_missing)
+    if values.get("cooling_bartz_mode") != 2:
+        allowed_missing += tuple(shape | _ADDED_CONCEPT_HEAT for shape in (frozenset(),) + allowed_missing)
+    legacy_missing = missing if missing in allowed_missing else frozenset()
     _require_fields(values, input_fields - legacy_missing, "概念设计输入")
     expected = _V1_GROUP_FIELDS if version == 1 else _v2_group_fields(values, input_fields)
     if version == 2 and _V2_OLD_TURBINE_CHOICES <= set(task["design_choices"]):

@@ -43,7 +43,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
 from lre_workbench.properties.propellants import for_fuel, normalize_fuel_species, validate_surrogate_state
-from lre_workbench.properties.datasets import METHANE_DATASETS, active_methane_dataset
+from lre_workbench.properties.datasets import (METHANE_DATASETS, active_methane_dataset,
+                                              active_gas_eos, active_gas_species_policy,
+                                              GAS_EOS_MODELS, PR_EOS_MODELS)
 from lre_workbench.properties.fluids import (state_tp as fluid_state_tp, state_ph as fluid_state_ph,
                               ideal_reference_enthalpy, saturation_pressure, fluid_spec)
 
@@ -52,10 +54,15 @@ try:
     import cantera as ct
     _GAS_LOCAL = threading.local()
 
-    def _get_gas(fuel_species: str = "CH4", methane_dataset=None) -> ct.Solution:
+    def _get_gas(fuel_species: str = "CH4", methane_dataset=None, *, gas_eos=None,
+                 species_policy=None) -> ct.Solution:
         """Lazily cache each declared data set per thread, never switch mid-flow."""
         checkpoint()
         fuel_species = normalize_fuel_species(fuel_species)
+        eos = gas_eos if gas_eos is not None else active_gas_eos()
+        policy = species_policy if species_policy is not None else active_gas_species_policy()
+        if policy == "auto":
+            policy = "pr_supported_v1" if eos in PR_EOS_MODELS else "full"
         if fuel_species == "CH4":
             dataset = methane_dataset if methane_dataset is not None else active_methane_dataset()
             if dataset not in METHANE_DATASETS:
@@ -63,13 +70,20 @@ try:
             definition = METHANE_DATASETS[dataset]
             filename, phase = definition["file"], definition["phase"]
         else:
+            if eos != "ideal-gas" or policy != "full":
+                raise ValueError("受限物种／PR 燃气模型目前仅支持液氧甲烷。")
             model = for_fuel(fuel_species)
             filename, phase = model.mechanism, model.phase
         if not hasattr(_GAS_LOCAL, "gases"):
             _GAS_LOCAL.gases = {}
             _GAS_LOCAL.identities = {}
-        key = (filename, phase)
+        key = (filename, phase, eos, policy)
         if key not in _GAS_LOCAL.gases:
+            if eos != "ideal-gas" or policy != "full":
+                from lre_workbench.properties.gas_eos import build_gas
+                gas, identity = build_gas(dataset, eos=eos, species_policy=policy)
+                _GAS_LOCAL.gases[key], _GAS_LOCAL.identities[key] = gas, identity
+                return gas
             # Cantera's native Windows file lookup can lose non-ASCII path
             # characters. Read its unchanged bundled mechanism through Python's
             # Unicode-aware path handling and pass the exact YAML contents.
@@ -164,8 +178,12 @@ def _chemical_reference_offset(species, gas):
     T_ref, p_ref = (600.0, 1000.0) if gas.name == "nDodecane_IG" else (298.15, 101325.0)
     saved = gas.state.copy()
     try:
-        gas.TPX = T_ref, p_ref, {species: 1.0}
-        return gas.enthalpy_mass - ideal_reference_enthalpy(species, T_ref, p_ref)
+        # Species standard enthalpy is the common ideal-gas chemical reference.
+        # A PR mixture's finite-pressure enthalpy includes a departure term and
+        # must NEVER become the zero offset of an incoming HEOS liquid stream.
+        index = gas.species_index(species)
+        h_ideal = gas.species(index).thermo.h(T_ref) / gas.molecular_weights[index]
+        return h_ideal - ideal_reference_enthalpy(species, T_ref, p_ref)
     finally:
         gas.state = saved
 
@@ -282,17 +300,45 @@ def _fuel_from_compositions(*compositions: Dict[str, float]) -> str:
                            for name, fraction in composition.items()) else "CH4"
 
 
+def _require_candidate_fingerprints(model, *, required=False):
+    """Candidate identity cannot be filled from the currently installed model."""
+    if not isinstance(model, dict):
+        raise ValueError("燃气模型身份必须为对象。")
+    candidate = (required or model.get("eos") in PR_EOS_MODELS
+                 or model.get("species_policy") == "pr_supported_v1"
+                 or model.get("eos_parameter_sha256") is not None
+                 or model.get("eos_model_sha256") is not None)
+    if not candidate:
+        return
+    keys = ("species_policy_sha256", "eos_parameter_sha256")
+    if model.get("eos") == "Peng-Robinson-Boston-Mathias":
+        keys += ("eos_model_sha256",)
+    for key in keys:
+        value = model.get(key)
+        if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError(f"候选燃气模型缺少完整的保存指纹：{key}；不能从当前参数补齐。")
+    if model.get("species_policy") != "pr_supported_v1" or model.get("eos") not in GAS_EOS_MODELS:
+        raise ValueError("候选燃气模型必须显式声明 EOS 与受限物种策略。")
+
+
 def _gas_for_state(state: GasState) -> "ct.Solution":
+    _require_candidate_fingerprints(state.model, required=state.gas_model in PR_EOS_MODELS)
+    if (state.gas_model in GAS_EOS_MODELS and state.model.get("eos") is not None
+            and state.gas_model != state.model["eos"]):
+        raise ValueError("气相状态 EOS 与其保存模型 EOS 冲突；不能以其中一个静默覆盖另一个。")
     gas = None
     if state.mechanism == "nDodecane_Reitz.yaml" and state.phase == "nDodecane_IG":
-        gas = _get_gas("c12h26")
+        gas = _get_gas("c12h26", gas_eos="ideal-gas", species_policy="full")
     for dataset, definition in METHANE_DATASETS.items():
         if state.mechanism == definition["file"] and state.phase == definition["phase"]:
-            gas = _get_gas("CH4", methane_dataset=dataset)
+            gas = _get_gas("CH4", methane_dataset=dataset,
+                           gas_eos=state.model.get("eos", state.gas_model if state.gas_model in GAS_EOS_MODELS else "ideal-gas"),
+                           species_policy=state.model.get("species_policy", "full"))
     if gas is None:
         raise ValueError(f"未支持的气相机制身份：{state.mechanism}/{state.phase}")
     actual = gas_model_identity(gas)
-    for key in ("mechanism", "phase", "mechanism_sha256", "eos", "enthalpy_reference_id"):
+    for key in ("mechanism", "phase", "mechanism_sha256", "eos", "enthalpy_reference_id",
+                "species_policy_sha256", "eos_parameter_sha256", "eos_model_sha256"):
         if state.model.get(key) and state.model[key] != actual.get(key):
             raise ValueError(f"气相状态的保存模型身份与实际物性模型不一致：{key}。")
     return gas
@@ -300,9 +346,9 @@ def _gas_for_state(state: GasState) -> "ct.Solution":
 
 def gas_data_filename(gas):
     """Get identity from the cached instance; phase names alone are ambiguous."""
-    for (filename, _phase), instance in getattr(_GAS_LOCAL, "gases", {}).items():
+    for key, instance in getattr(_GAS_LOCAL, "gases", {}).items():
         if instance is gas:
-            return filename
+            return key[0]
     return "nDodecane_Reitz.yaml" if gas.name == "nDodecane_IG" else gas.source
 
 
@@ -324,7 +370,7 @@ def gas_model_identity(gas) -> dict:
     identity.update(eos=gas.thermo_model, enthalpy_reference_id=reference,
                     entropy_reference_id=f"cantera_species_standard_entropy:{identity['mechanism_sha256']}:{gas.name}",
                     composition_basis="mass_fraction", phase_set=[gas.name],
-                    equilibrium_scope="gas_phase_only", high_pressure_validation="not_validated")
+                    equilibrium_scope=identity.get("equilibrium_scope", "gas_phase_only"), high_pressure_validation="not_validated")
     return identity
 
 
@@ -338,6 +384,9 @@ def gas_flow_metadata(state: GasState, *, basis=None, source_ports=None) -> dict
         "composition_basis": "mass_fraction", "composition_complete": state.source == "cantera",
         "entropy_JkgK": state.entropy if state.source == "cantera" else None,
         "cp_JkgK": state.cp, "cv_JkgK": state.cv, "sound_speed_m_s": state.sound_speed,
+        "molar_mass_kg_per_kmol": state.molar_mass,
+        "compressibility_factor": (state.pressure * state.molar_mass / (state.density * ct.gas_constant * state.temperature)
+                                   if state.density and CANTERA_AVAILABLE else None),
         "property_definitions": {"cp": "dh_dT_at_constant_p_and_composition", "cv": "du_dT_at_constant_v_and_composition",
                                  "gamma": "cp_over_cv_frozen", "sound_speed": "isentropic_frozen_composition"},
         "temperature_range_evidence": deepcopy(state.thermo_range),
@@ -347,7 +396,7 @@ def gas_flow_metadata(state: GasState, *, basis=None, source_ports=None) -> dict
     }
 
 
-def validate_gas_streams(streams, *, expected_mass_flow=None) -> dict:
+def validate_gas_streams(streams, *, expected_mass_flow=None, allow_eos_transition=False) -> dict:
     """Reject incomplete numeric/composition contracts and incompatible known references.
 
     Legacy callers without identity remain usable, with an explicit incomplete
@@ -368,6 +417,7 @@ def validate_gas_streams(streams, *, expected_mass_flow=None) -> dict:
         model = stream.metadata.get("model", {})
         if not isinstance(model, dict):
             raise ValueError(f"{stream.name}: 燃气模型身份格式无效。")
+        _require_candidate_fingerprints(model)
         if stream.metadata.get("composition_complete") is False:
             raise ValueError(f"{stream.name}: 入口组成已标为不完整。")
         ref = model.get("enthalpy_reference_id") or stream.metadata.get("reference_id")
@@ -379,27 +429,46 @@ def validate_gas_streams(streams, *, expected_mass_flow=None) -> dict:
     if expected_mass_flow is not None and (not math.isfinite(expected_mass_flow) or
             not math.isclose(total, expected_mass_flow, rel_tol=1e-10, abs_tol=1e-9)):
         raise ValueError("主室入口两股质量流量之和与主室出口指定流量不一致。")
-    for key in ("mechanism", "phase", "mechanism_sha256", "eos", "enthalpy_reference_id"):
+    for key in ("mechanism", "phase", "mechanism_sha256", "eos", "enthalpy_reference_id",
+                "species_policy_sha256", "eos_parameter_sha256", "eos_model_sha256"):
         known = [model.get(key) for model, _ref in models if model.get(key) is not None]
         if len(set(known)) > 1:
             raise ValueError(f"主室入口燃气模型／化学焓基准不兼容：{key}。")
     refs = {ref for _model, ref in models if ref}
     if len(refs) > 1:
         raise ValueError("主室入口化学焓基准不兼容。")
+    transition = None
     if CANTERA_AVAILABLE:
         gas = _get_gas(_fuel_from_compositions(*(stream.composition for stream in streams)))
         active = gas_model_identity(gas)
         for stream, (model, ref) in zip(streams, models):
+            _require_candidate_fingerprints(model, required=active.get("species_policy") == "pr_supported_v1")
             _dict_to_Y(gas, stream.composition)
-            for key in ("mechanism", "phase", "mechanism_sha256", "eos"):
+            for key in ("mechanism", "phase", "mechanism_sha256", "eos", "species_policy_sha256", "eos_parameter_sha256", "eos_model_sha256"):
+                if key == "eos" and model.get(key) != active.get(key) and allow_eos_transition:
+                    if not (model.get("eos") == "Peng-Robinson" and active.get("eos") == "ideal-gas"
+                            and model.get("species_policy") == active.get("species_policy") == "pr_supported_v1"
+                            and all(statuses)):
+                        raise ValueError("仅支持已声明、同受限物种及同化学焓基准的 PR 排气到理想主室交接。")
+                    transition = dict(kind="conservative_enthalpy_species_handoff", source_eos="Peng-Robinson",
+                                      target_eos="ideal-gas", species_policy="pr_supported_v1",
+                                      enthalpy_reference_id=ref)
+                    continue
                 if model.get(key) and model[key] != active.get(key):
                     raise ValueError(f"{stream.name}: 保存燃气身份与主室所选模型不一致：{key}。")
             if ref and ref != active["enthalpy_reference_id"]:
                 raise ValueError(f"{stream.name}: 化学焓基准与主室模型不一致。")
+            if transition:
+                source_gas = _get_gas(_fuel_from_compositions(stream.composition),
+                    methane_dataset=Path(model["mechanism"]).stem, gas_eos=model["eos"], species_policy=model["species_policy"])
+                source_gas.TPY = stream.temperature, stream.pressure, _dict_to_Y(source_gas, stream.composition)
+                if not math.isclose(source_gas.enthalpy_mass, stream.enthalpy, rel_tol=1e-8, abs_tol=.05):
+                    raise ValueError("PR 主室入口保存焓与原模型的温压组成不一致。")
     return {"status": "complete" if all(statuses) else "incomplete",
             "source_ports": [stream.name for stream in streams],
             "mass_flow_kg_s": total,
             "h_mixed_Jkg": math.fsum(stream.mass_flow * stream.enthalpy for stream in streams) / total,
+            "eos_transition": transition,
             "note": "采用两股保存组成与焓；旧接口缺少模型身份时保留缺失标识。"}
 
 
@@ -443,6 +512,8 @@ def combustion_equilibrium(
                                   fuel_enthalpy=fuel_enthalpy, ox_enthalpy=ox_enthalpy,
                                   heat_loss_W=heat_loss_W, energy_diagnostics=energy_diagnostics)
     else:
+        if active_gas_eos() != "ideal-gas" or active_gas_species_policy() != "full":
+            raise RuntimeError("指定的 PR／受限物种模型需要 Cantera，不允许经验或理想气体回退。")
         if fuel_enthalpy is not None or ox_enthalpy is not None or heat_loss_W or energy_diagnostics is not None:
             raise RuntimeError("显式端口焓、热汇及能量诊断的燃烧平衡需要 Cantera。")
         if fuel_species != "CH4":
@@ -592,6 +663,8 @@ def turbine_expansion(
         composition              {species: Y}
     """
     checkpoint()
+    if combustion_state.model.get("eos") in PR_EOS_MODELS and not (CANTERA_AVAILABLE and combustion_state.source == "cantera"):
+        raise RuntimeError("PR 涡轮必须使用对应 Cantera 状态，不允许经验膨胀回退。")
     if (combustion_state.mechanism == "nDodecane_Reitz.yaml" or _fuel_from_compositions(combustion_state.composition) == "c12h26") and not (CANTERA_AVAILABLE and combustion_state.source == "cantera"):
         raise RuntimeError("煤油涡轮膨胀需要对应 Cantera 气相状态，不提供经验回退。")
     if CANTERA_AVAILABLE and combustion_state.source == "cantera":
@@ -604,6 +677,19 @@ def turbine_expansion(
 # 3. 喷管等熵膨胀
 # =========================================================
 
+def frozen_state_at_tp(reference_state: GasState, temperature: float, pressure: float) -> GasState:
+    """Evaluate a solved local T/P with the original composition and exact EOS.
+
+    This is a property evaluation, not an isentropic expansion: a cooled nozzle
+    must retain its actual heat-loss history rather than reset to chamber entropy.
+    """
+    if not CANTERA_AVAILABLE or reference_state.source != "cantera":
+        raise ValueError("局部燃气物性需要完整的已识别热力学状态。")
+    gas = _gas_for_state(reference_state)
+    gas.TPY = temperature, pressure, _dict_to_Y(gas, reference_state.composition)
+    return _gas_to_state(gas, pressure)
+
+
 def nozzle_exit_state(
     chamber_state: GasState,
     exit_pressure: float,
@@ -615,6 +701,8 @@ def nozzle_exit_state(
     仅 Cantera 模式可用，经验模式返回 None。
     """
     checkpoint()
+    if chamber_state.model.get("eos") in PR_EOS_MODELS and not (CANTERA_AVAILABLE and chamber_state.source == "cantera"):
+        raise RuntimeError("PR 喷管必须使用保存 EOS 的完整气相状态，不允许经验膨胀回退。")
     if (chamber_state.mechanism == "nDodecane_Reitz.yaml" or _fuel_from_compositions(chamber_state.composition) == "c12h26") and not (CANTERA_AVAILABLE and chamber_state.source == "cantera"):
         raise RuntimeError("煤油喷管膨胀需要对应 Cantera 气相状态，不提供经验回退。")
     if CANTERA_AVAILABLE and chamber_state.source == "cantera":
@@ -641,6 +729,8 @@ def nozzle_performance(
     仅 Cantera 模式可用,经验模式返回 None(由调用方走理想气体 fallback)。
     """
     checkpoint()
+    if chamber_state.model.get("eos") in PR_EOS_MODELS and not (CANTERA_AVAILABLE and chamber_state.source == "cantera"):
+        raise RuntimeError("PR 喷管必须使用保存 EOS 的完整气相状态，不允许经验膨胀回退。")
     if (chamber_state.mechanism == "nDodecane_Reitz.yaml" or _fuel_from_compositions(chamber_state.composition) == "c12h26") and not (CANTERA_AVAILABLE and chamber_state.source == "cantera"):
         raise RuntimeError("煤油喷管性能需要对应 Cantera 气相状态，不提供经验回退。")
     if CANTERA_AVAILABLE and chamber_state.source == "cantera":
@@ -729,6 +819,10 @@ def _equilibrate_HP(
     checkpoint()
     if not (math.isfinite(h_target) and math.isfinite(pressure) and pressure > 0):
         raise ValueError("HP 平衡要求有限目标焓和正压力。")
+    if gas.thermo_model in PR_EOS_MODELS:
+        from lre_workbench.properties.gas_eos import equilibrate_hp
+        equilibrate_hp(gas, h_target, pressure, Y_init, context=context)
+        return
     try:
         # 1) 用 3000 K 把组分先 TP 平衡到产物,setState_HP 才能稳定收敛
         gas.TPY = 3000.0, pressure, Y_init
@@ -748,7 +842,7 @@ def _equilibrate_HP(
         T_ok = 300.0 <= gas.T <= (5000.0 if gas.name == "nDodecane_IG" else 5500.0)
         h_tol = max(0.05, 1e-8 * abs(h_target))
         h_ok = abs(gas.enthalpy_mass - h_target) < h_tol
-        if T_ok and h_ok:
+        if T_ok and h_ok and math.isclose(gas.P, pressure, rel_tol=1e-9, abs_tol=0.1):
             return
     except Exception:
         pass  # 任何异常都走回退路径
@@ -913,12 +1007,29 @@ def _cantera_chamber(
     return _gas_to_state(gas, pressure)
 
 
+def set_frozen_hp(gas, enthalpy, pressure):
+    """Frozen-composition inversion retaining the selected EOS and pressure."""
+    if gas.thermo_model in PR_EOS_MODELS:
+        from lre_workbench.properties.gas_eos import set_frozen_hp as solve
+        solve(gas, enthalpy, pressure)
+    else:
+        gas.HP = enthalpy, pressure
+
+
+def set_frozen_sp(gas, entropy, pressure):
+    if gas.thermo_model in PR_EOS_MODELS:
+        from lre_workbench.properties.gas_eos import set_frozen_sp as solve
+        solve(gas, entropy, pressure)
+    else:
+        gas.SP = entropy, pressure
+
+
 def _cantera_turbine(
     state: GasState, p_exhaust: float, eta: float,
 ) -> dict:
     """
-    用所选混合气体状态方程做冻结组分膨胀。当前是理想气体 EOS，
-    采用温度相关热容，而非固定 γ；不意味着高压非理想性已经处理。
+    用状态所保存的混合气体 EOS 做冻结组分膨胀；理想、原生 PR 与
+    PR-BM 均采用各自一致的焓、熵和温度相关热容，不套固定 γ。
 
     步骤
     ────
@@ -943,16 +1054,18 @@ def _cantera_turbine(
         raise ValueError("涡轮入口保存焓与同一模型下的 T/P/Y 不一致；不能静默重建并覆盖。")
 
     # 等熵膨胀到排气压力（冻结组分）
-    gas.SP = s_in, p_exhaust
+    set_frozen_sp(gas, s_in, p_exhaust)
     _check_gas_model_range(gas, report=False)
     h_out_s = gas.enthalpy_mass
 
     delta_h_s = h_in - h_out_s
+    if not math.isfinite(delta_h_s) or delta_h_s < 0:
+        raise ValueError("同一冻结组成 EOS 的涡轮等熵焓降无效。")
     delta_h_actual = delta_h_s * eta
     h_exhaust = h_in - delta_h_actual
 
     # 由实际排气焓反查温度
-    gas.HP = h_exhaust, p_exhaust
+    set_frozen_hp(gas, h_exhaust, p_exhaust)
     _check_gas_model_range(gas)
     T_exhaust = gas.T
 
@@ -982,7 +1095,7 @@ def _cantera_nozzle_expansion(
     s_chamber = gas.entropy_mass
 
     # 冻结等熵膨胀
-    gas.SP = s_chamber, p_exit
+    set_frozen_sp(gas, s_chamber, p_exit)
 
     return _gas_to_state(gas, p_exit)
 
@@ -1524,7 +1637,7 @@ def _cantera_nozzle_expand(
     def state_at(p: float):
         """沿等熵线膨胀到压力 p,返回 (T, ρ, V, a)。"""
         checkpoint()
-        gas.SP = s_chamber, p
+        set_frozen_sp(gas, s_chamber, p)
         if equilibrium:
             checkpoint()
             gas.equilibrate("SP")
@@ -1535,8 +1648,7 @@ def _cantera_nozzle_expand(
         h   = gas.enthalpy_mass
         V_sq = 2.0 * (h_chamber - h)              # 能量守恒 h_c = h + V²/2
         V    = _math.sqrt(max(V_sq, 0.0))
-        gamma_local = gas.cp_mass / max(gas.cv_mass, 1.0e-3)
-        a = _math.sqrt(max(gamma_local * p / max(rho, 1.0e-9), 0.0))
+        a = float(gas.sound_speed)
         return T, rho, V, a
 
     chamber_diagnostics = _nozzle_station(gas, equilibrium) if diagnostics else None
@@ -1585,8 +1697,8 @@ def _cantera_nozzle_expand(
         equilibrium = False  # gas retains the equilibrium throat composition
 
     if V_throat <= 1.0 or rho_throat <= 1.0e-6:
-        if gas.name == "nDodecane_IG":
-            raise ValueError("正十二烷喷管喉部求解无有效质量通量；不回退为常比热理想气体。")
+        if gas.name == "nDodecane_IG" or gas.thermo_model in PR_EOS_MODELS:
+            raise ValueError("所选物性模型的喷管喉部求解无有效质量通量；不回退为常比热理想气体。")
         return None
 
     mdot_per_At = rho_throat * V_throat

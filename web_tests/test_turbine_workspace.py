@@ -105,7 +105,7 @@ class TurbinePreliminaryAPITests(unittest.TestCase):
         self.app = create_app(Path(folder.name) / "workspace.sqlite3", queue_enabled=False)
         self.api = self.enterContext(client(self.app))
         self.api.post("/api/auth/setup", json={"username": "admin", "display_name": "测试", "password": TEST_PASSWORD})
-        project = self.api.post("/api/projects", json={"name": "涡轮方案", "inputs": asdict(EngineInputs())}).json()["project"]
+        project = self.api.post("/api/projects", json={"name": "涡轮方案", "inputs": asdict(EngineInputs(combustion_loss_model="adiabatic"))}).json()["project"]
         self.job_id = self.api.post(f"/api/projects/{project['id']}/jobs", json={"revision": 1}).json()["id"]
         self.raw = json.dumps(fixture(basis="unspecified"), ensure_ascii=False)
         self.app.state.store.execute("UPDATE jobs SET status='succeeded',result=? WHERE id=?", (self.raw, self.job_id))

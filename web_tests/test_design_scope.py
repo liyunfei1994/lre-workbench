@@ -10,7 +10,7 @@ import uuid
 
 from webapp.app import create_app
 from webapp.design_scope import DESIGN_SCOPE, require_supported_source
-from webapp.solver import calculate, calculate_design_job, design_readiness, input_values, presets
+from webapp.solver import calculate, calculate_design_job, design_readiness, input_values, presets, platform_defaults
 from web_tests.test_workspace import client, TEST_PASSWORD
 from lre_workbench.domain.analysis_contract import concept_design_task, concept_inputs, FFSC_INPUT_FIELDS, RETIRED_PLATFORM_FIELDS
 
@@ -28,7 +28,11 @@ class DesignScopeTests(unittest.TestCase):
         task = concept_design_task(values)
         self.assertEqual(task['schema_version'], 3)
         self.assertEqual(concept_inputs(task), values)
-        self.assertTrue(design_readiness(values)['valid'])
+        # Historical defaults remain intact; only the explicit current Web
+        # model can be submitted as a new routine design point.
+        self.assertEqual(values['combustion_loss_model'], 'legacy_temperature_rise')
+        self.assertFalse(design_readiness(values)['valid'])
+        self.assertTrue(design_readiness(platform_defaults())['valid'])
         schema = design_ui_schema()
         self.assertEqual(set(schema['defaults']), FFSC_INPUT_FIELDS)
         text = json.dumps(schema, ensure_ascii=False)
@@ -97,7 +101,7 @@ class DesignScopeAPITests(unittest.TestCase):
         response = self.admin.post("/api/auth/setup", json={
             "username": "admin", "display_name": "范围测试", "password": TEST_PASSWORD})
         self.user_id = response.json()["id"]
-        response = self.admin.post("/api/projects", json={"name": "FFSC", "inputs": {}})
+        response = self.admin.post("/api/projects", json={"name": "FFSC"})
         self.assertEqual(response.status_code, 200, response.text)
         self.project = response.json()["project"]
         self.url = "/api/projects/" + self.project["id"]

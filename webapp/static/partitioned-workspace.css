@@ -108,6 +108,11 @@
   margin-bottom: 20px;
 }
 #workspace .partitioned-workbench .analysis-heading p { max-width: 1100px; margin-top: 6px; }
+#workspace .analysis-heading-actions { display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
+#workspace .help-view :is(#toggle-parameters, #project-scope-note) { display: none; }
+#workspace .help-view :is(.analysis-heading, .workbench-breadcrumb) { width: 100%; max-width: 1500px; margin-left: auto; margin-right: auto; }
+#workspace .concept-reference-panel { max-width: 1280px; padding: 24px; }
+#workspace .concept-reference-panel > h2 { margin-top: 0; }
 
 #workspace :is(#concept-navigation, .workspace-section-tabs):not([hidden]) {
   display: flex;
@@ -145,6 +150,33 @@
 
 #concept-settings-host, .concept-settings-host { width: 100%; max-width: 1280px; min-width: 0; }
 #concept-section-content { min-width: 0; }
+#workspace .partitioned-workbench .design-run-panel {
+  width: 100%;
+  max-width: 1280px;
+  min-width: 0;
+  padding: 24px;
+}
+#workspace .partitioned-workbench .design-run-panel[hidden] { display: none; }
+#workspace .partitioned-workbench .design-run-panel > h2 { margin: 0 0 10px; }
+#workspace .partitioned-workbench .design-run-context {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) minmax(0,1.3fr) minmax(0,1.2fr);
+  gap: 16px;
+  margin-top: 24px;
+  padding: 18px;
+  border: 1px solid #d8e3eb;
+  border-radius: 5px;
+  background: #f8fbfd;
+}
+#workspace .partitioned-workbench .design-run-context > div { min-width: 0; overflow-wrap: anywhere; }
+#workspace .partitioned-workbench .design-run-context span { display: block; margin-bottom: 8px; color: #526b7c; font-size: 14px; }
+#workspace .partitioned-workbench .design-run-context strong { color: #29485e; font-size: 16px; font-weight: 600; }
+#workspace .partitioned-workbench .design-run-context button { min-height: 40px; text-align: left; }
+#workspace .partitioned-workbench .design-run-context .fine { margin: 8px 0 0; }
+#workspace .partitioned-workbench #design-run-readiness { margin-top: 20px; }
+#workspace .partitioned-workbench .design-run-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+#workspace .partitioned-workbench .design-run-actions button { min-height: 44px; }
+#workspace .partitioned-workbench #design-run-error:empty { display: none; }
 #concept-settings-host[hidden], .concept-settings-host[hidden], #concept-section-content[hidden],
 #concept-navigation[hidden], #workspace .workspace-section-tabs[hidden] { display: none; }
 #workspace .partitioned-workbench #concept-settings-host:not([hidden]) .parameter-pane,
@@ -164,7 +196,7 @@
   top: 0;
   z-index: 4;
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px 16px;
   padding: 20px 24px 18px;
   margin-bottom: 0;
@@ -174,6 +206,7 @@
 }
 #workspace .partitioned-workbench .parameter-heading > :is(.panel-heading, .fine) { grid-column: 1 / -1; margin: 0; }
 #workspace .partitioned-workbench .parameter-heading :is(input, select) { margin: 0; width: 100%; }
+#workspace .partitioned-workbench #parameter-group[hidden] { display: none; }
 #workspace .partitioned-workbench .parameter-heading h2 { font-size: 20px; margin: 0; }
 #workspace .partitioned-workbench #project-form { display: block; min-height: 0; height: auto; }
 #workspace .partitioned-workbench .parameter-scroll {
@@ -184,6 +217,12 @@
   padding: 22px 24px;
 }
 #workspace .partitioned-workbench #parameter-fields { display: grid; gap: 22px; min-width: 0; }
+#workspace .partitioned-workbench #design-readiness:not([hidden]) { margin-top: 24px; }
+#workspace .partitioned-workbench .design-group-readiness { margin-bottom: 0; }
+#workspace .partitioned-workbench #valve-group-readiness:not([hidden]) { margin: 18px 0; }
+@media(max-width:1100px) {
+  #workspace .partitioned-workbench .design-run-context { grid-template-columns: minmax(0,1fr); }
+}
 #workspace .partitioned-workbench .parameter-section {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -208,6 +247,28 @@
 #workspace .partitioned-workbench .parameter-section .parameter-label { font-weight: 500; }
 #workspace .partitioned-workbench .parameter-role { margin: 0; }
 #workspace .partitioned-workbench .parameter-section .field-help { margin-top: 0; }
+#workspace .partitioned-workbench .design-environment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px 28px;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #cddce6;
+  border-radius: 4px;
+  background: #f5f9fc;
+}
+#workspace .partitioned-workbench .design-environment-summary { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; }
+#workspace .partitioned-workbench .design-environment-summary > .fine { margin: 0; }
+#workspace .partitioned-workbench [data-design-environment-label] { color: #294f68; font-size: 18px; font-weight: 600; line-height: 1.55; }
+#workspace .partitioned-workbench .design-environment-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+#workspace .partitioned-workbench .design-environment-actions button { min-height: 44px; padding: 7px 13px; font-size: 15px; background: #fff; border-color: #b9cbd8; color: #3c6078; }
+#workspace .partitioned-workbench .design-environment-actions button[aria-pressed="true"] { border-color: #397ba2; background: #e7f1f8; color: #215674; box-shadow: inset 0 -2px #397ba2; font-weight: 600; }
+#workspace .partitioned-workbench .design-environment-note { grid-column: 1 / -1; margin: 0; padding-top: 12px; border-top: 1px solid #dce6ed; }
+#workspace .partitioned-workbench .design-primary-inputs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px 28px; min-width: 0; }
+#workspace .partitioned-workbench .parameter-inline-help { color: #596f80; font-size: 14px; line-height: 1.65; }
+#workspace .partitioned-workbench .parameter-inheritance { color: #596f80; font-size: 13px; line-height: 1.55; }
+#workspace .partitioned-workbench .parameter-inheritance[data-valid="false"] { color: #9a5429; }
+#workspace .partitioned-workbench [data-group="inlet"] .parameter-role { font-size: 12px; padding: 2px 6px; }
 #workspace .partitioned-workbench .parameter-subsection {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -236,6 +297,14 @@
 }
 #workspace .partitioned-workbench .parameter-constraint-side h4 { margin: 0; font-size: 16px; }
 #workspace .partitioned-workbench .parameter-constraint-side textarea { min-height: 78px; resize: vertical; }
+#workspace .partitioned-workbench .preburner-condition-note { padding: 12px 16px; background: #eef5f9; border-left: 3px solid #5289a6; }
+#workspace .partitioned-workbench .preburner-condition-note p { margin: 0; }
+#workspace .partitioned-workbench .preburner-condition-note p + p { margin-top: 8px; }
+#workspace .partitioned-workbench .preburner-limit-note { margin: 0; font-size: 14px; line-height: 1.75; color: #536b7e; }
+#workspace .partitioned-workbench .preburner-limit-note[data-preburner-limit-state="provisional"] { color: #866127; }
+#workspace .partitioned-workbench .preburner-basis { margin: 0; }
+#workspace .partitioned-workbench .preburner-basis summary { cursor: pointer; font-size: 14px; }
+#workspace .partitioned-workbench .preburner-basis label { margin-top: 12px; }
 #workspace .partitioned-workbench .preburner-interface-card {
   min-width: 0; padding: 16px 18px; border: 1px solid #d1dce4; border-radius: 4px; background: #f7fafc;
 }
@@ -324,6 +393,9 @@
 @container analysis (min-width: 520px) {
   #workspace .partitioned-workbench .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+@container analysis (min-width: 640px) {
+  #workspace .partitioned-workbench :is(.design-environment, .design-primary-inputs) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @container analysis (min-width: 800px) {
   #workspace .partitioned-workbench :is(.parameter-section, .parameter-subsection) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   #workspace .partitioned-workbench .preburner-interface-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -356,7 +428,11 @@
   #workspace :is(#concept-navigation, .workspace-section-tabs) button { flex: 1 1 0; min-width: 0; padding: 9px 7px; }
   #workspace .partitioned-workbench .parameter-heading { position: static; grid-template-columns: minmax(0, 1fr); padding: 18px 16px; }
   #workspace .partitioned-workbench .parameter-scroll { padding: 18px 14px; }
+  #workspace .partitioned-workbench .design-run-panel { padding: 18px 16px; }
+  #workspace .partitioned-workbench .design-run-actions button { flex: 1 1 160px; }
   #workspace .partitioned-workbench .parameter-section { padding: 16px 14px 20px; gap: 18px; }
+  #workspace .partitioned-workbench :is(.design-environment, .design-primary-inputs) { grid-template-columns: minmax(0, 1fr); }
+  #workspace .partitioned-workbench .design-environment { padding: 14px; }
   #workspace .partitioned-workbench .parameter-footer { padding: 18px 16px; }
   #workspace .partitioned-workbench .parameter-footer .editor-actions button { flex: 1 1 150px; }
   #workspace .partitioned-workbench .result-toolbar { padding: 12px; }
@@ -373,3 +449,23 @@
   #workspace .app-header .user-area .text-btn { font-size: 14px; padding: 6px 2px; }
 }
 .parameter-fixed-value{display:block;padding:12px 14px;border:1px solid #d8e2eb;border-radius:3px;background:#f4f8fb;color:#27485a;font-weight:600}
+
+/* Configuration is a read-only system description, not a parameter form. */
+#workspace .partitioned-workbench .engine-configuration { grid-template-columns: minmax(0, 1fr); }
+#workspace .partitioned-workbench .engine-configuration :is(p, dl) { margin: 0; }
+#workspace .partitioned-workbench .engine-configuration p { line-height: 1.8; }
+#workspace .partitioned-workbench .engine-configuration h3 { margin: 0 0 10px; font-size: 17px; color: #27485a; }
+#workspace .partitioned-workbench .engine-configuration-intro { color: #526b7a; }
+#workspace .partitioned-workbench .engine-configuration-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 14px; }
+#workspace .partitioned-workbench .engine-configuration-facts > div { min-width: 0; padding: 16px 18px; border: 1px solid #d7e3eb; border-radius: 4px; background: #f4f8fb; }
+#workspace .partitioned-workbench .engine-configuration-facts dt { margin-bottom: 8px; color: #526b7a; font-size: 14px; }
+#workspace .partitioned-workbench .engine-configuration-facts dd { margin: 0; font-size: 17px; font-weight: 600; color: #27485a; overflow-wrap: anywhere; }
+#workspace .partitioned-workbench .engine-configuration-section { padding-top: 18px; border-top: 1px solid #e1e8ee; }
+#workspace .partitioned-workbench .engine-configuration-section p + p { margin-top: 10px; }
+#workspace .partitioned-workbench .engine-configuration-shafts { display: grid; gap: 12px; margin-top: 14px; }
+#workspace .partitioned-workbench .engine-configuration-shafts > div { padding-left: 14px; border-left: 3px solid #80a9c0; }
+#workspace .partitioned-workbench .engine-configuration-shafts > div + div { border-left-color: #b69a69; }
+#workspace .partitioned-workbench .engine-configuration-shafts dt { margin-bottom: 5px; font-weight: 600; color: #27485a; }
+#workspace .partitioned-workbench .engine-configuration-shafts dd { margin: 0; line-height: 1.8; }
+#workspace .partitioned-workbench .engine-configuration-scope { padding: 16px 18px; border-left: 3px solid #87a4b5; background: #f4f7f9; }
+#workspace .partitioned-workbench .engine-configuration-scope p + p { margin-top: 8px; }

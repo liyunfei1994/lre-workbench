@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import {createValidationForm,buildValidationRequest,renderValidationResult,scanValues,propertyPoints} from "../webapp/static/validation.js";
+import {createValidationForm,buildValidationRequest,renderValidationResult,renderEosProgress,scanValues,propertyPoints} from "../webapp/static/validation.js";
 
 import {renderThermoCharts,buildThermoChartSvg} from "../webapp/static/validation-charts.js";
 
@@ -11,6 +11,20 @@ import {renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyCompari
 import {renderThermoStations,verifiedCeaComposition} from "../webapp/static/thermo-stations.js";
 import {renderThermodynamicApplicability} from "../webapp/static/thermo-applicability.js";
 import {renderGasHandoff} from "../webapp/static/gas-handoff.js";
+import {renderGasEosComparison} from "../webapp/static/gas-eos-comparison.js";
+import {recordModelValidity,renderModelValidity} from "../webapp/static/model-validity.js";
+
+test("EOS comparison shows the active model and residual before the report is accepted",()=>{
+  const progress={phase:"整循环燃气 EOS 对比",stage:"solving",eos:"Peng-Robinson",
+                  solver_iteration:17,solver_maximum:100,residual:.031};
+  const record={status:"running",progress};
+  assert.match(renderEosProgress(record),/PR 前段方案 · 当前阶段进度 17 \/ 100 · 验收残差 0\.031/);
+  assert.match(renderEosProgress({...record,progress:{...progress,eos:"ideal-gas"}}),/全理想方案/);
+  assert.match(renderEosProgress({...record,progress:{...progress,eos:"Peng-Robinson-Boston-Mathias"}}),/PR–BM 全燃气方案/);
+  assert.match(renderEosProgress({...record,progress:{...progress,solver_iteration:100}}),/正在核对收敛与守恒/);
+  assert.doesNotMatch(renderEosProgress({...record,progress:{...progress,solver_iteration:100}}),/完成/);
+  assert.equal(renderEosProgress({...record,status:"succeeded"}),"");
+});
 
 const clone=value=>JSON.parse(JSON.stringify(value));
 const inputs={propellant_pair:"lox_methane",cycle_type:"ffsc",pc:9.7e6,
@@ -18,6 +32,12 @@ const inputs={propellant_pair:"lox_methane",cycle_type:"ffsc",pc:9.7e6,
 function context(){return {project:{id:"p1",revision:3},dirty:true,draft:{...inputs,pc:33e6,propellant_pair:"lox_methane"},
   record:{id:"design-1",project_id:"p1",revision:2,status:"succeeded",created:1,inputs:clone(inputs),
     result:{submitted_inputs:clone(inputs),calculation:{inputs:clone(inputs),summary:{thrust_N:845000}}}}};}
+function eosContext(eos="ideal-gas"){
+  const ctx=context();
+  for(const snapshot of [ctx.record.inputs,ctx.record.result.submitted_inputs,ctx.record.result.calculation.inputs])
+    Object.assign(snapshot,{gas_eos:eos,gas_species_policy:eos==="ideal-gas"?"full":"pr_supported_v1",combustion_loss_model:"adiabatic"});
+  return ctx;
+}
 const capabilities={cantera:{available:true,version:"3.2"},cea:{available:false,reason:"RocketCEA 未安装"},
   coolprop:{available:true,version:"7.2"},refprop:{available:false,reason:"未安装 REFPROP"}};
 const result={source:{job_id:"design-1",revision:2},conservation:{kind:"conservation",status:"partial",checks:[
@@ -157,7 +177,7 @@ function mounted(fetcher,initial=context()){
   const listeners=new Map(),timers=new Map(),calls=[],notifications=[],downloads=[];
   let ctx=initial,nextTimer=1;
   const container={innerHTML:"",addEventListener(type,callback){listeners.set(type,callback);}};
-  const sandbox=vm.createContext({console,Blob,renderThermoStations,verifiedCeaComposition,renderThermoCharts,buildThermoChartSvg,renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv,renderThermodynamicApplicability,renderGasHandoff,URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
+  const sandbox=vm.createContext({console,Blob,renderThermoStations,verifiedCeaComposition,renderThermoCharts,buildThermoChartSvg,renderPropertyComparison,buildPropertyComparisonSvg,buildPropertyComparisonCsv,renderThermodynamicApplicability,renderGasHandoff,renderGasEosComparison,recordModelValidity,renderModelValidity,URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
     document:{createElement:()=>({click(){downloads.push(this.download);}})},
     setTimeout(callback){const id=nextTimer++;timers.set(id,callback);return id;},clearTimeout(id){timers.delete(id);}});
   vm.runInContext(moduleSource+"\n globalThis.mount=mountValidation;",sandbox);
@@ -176,12 +196,106 @@ function mounted(fetcher,initial=context()){
 }
 function standardAPI(path){if(path==="/validation/capabilities")return clone(capabilities);if(path==="/projects/p1/validations")return [];throw Error(`Unexpected ${path}`);}
 
+test("EOS comparison tab submits two-model rematching from saved source without draft parameters",async()=>{
+  const h=mounted(async(path,method,body)=>method==="POST"?{id:"pr-validation",status:"queued"}:standardAPI(path),eosContext());
+  await h.controller.refresh();h.tab("gas_eos_comparison");
+  assert.match(h.container.innerHTML,/运行理想气体 \/ PR 整机对比/);
+  assert.match(h.container.innerHTML,/相同受限物种集合/);
+  h.click("run");await settle();
+  const request=h.calls.find(call=>call.method==="POST");
+  assert.deepEqual(request.body,{source_job_id:"design-1",gas_eos_comparison:{enabled:true,candidate_eos:"Peng-Robinson"}});
+  h.controller.onLeave();
+});
+
+test("EOS candidate defaults use the immutable source and support BM comparison from an ideal source",()=>{
+  for(const eos of ["ideal-gas","Peng-Robinson","Peng-Robinson-Boston-Mathias"]){
+    const ctx=eosContext(eos);
+    ctx.draft.gas_eos=eos==="Peng-Robinson-Boston-Mathias"?"ideal-gas":"Peng-Robinson-Boston-Mathias";
+    ctx.draft.combustion_loss_model="legacy_temperature_rise";
+    Object.freeze(ctx.record.inputs);Object.freeze(ctx.record.result.submitted_inputs);Object.freeze(ctx.record.result.calculation.inputs);
+    const before=clone(ctx),form=Object.freeze(createValidationForm(ctx));
+    assert.equal(form.candidate_eos,eos==="Peng-Robinson-Boston-Mathias"?eos:"Peng-Robinson");
+    const request=buildValidationRequest(ctx,{...form,candidate_eos:"Peng-Robinson-Boston-Mathias"},"gas_eos_comparison");
+    assert.deepEqual(request,{source_job_id:"design-1",gas_eos_comparison:{enabled:true,candidate_eos:"Peng-Robinson-Boston-Mathias"}});
+    const omitted={...form};delete omitted.candidate_eos;
+    assert.equal(buildValidationRequest(ctx,omitted,"gas_eos_comparison").gas_eos_comparison.candidate_eos,form.candidate_eos);
+    assert.deepEqual(ctx,before);
+  }
+  const ctx=eosContext(),form=createValidationForm(ctx);
+  for(const candidate_eos of ["ideal-gas","unknown","",null,["Peng-Robinson"],{}])
+    assert.throws(()=>buildValidationRequest(ctx,{...form,candidate_eos},"gas_eos_comparison"),/候选模型/);
+  delete ctx.record.inputs;
+  ctx.record.result.submitted_inputs.gas_eos="Peng-Robinson-Boston-Mathias";
+  assert.equal(createValidationForm(ctx).candidate_eos,"Peng-Robinson-Boston-Mathias");
+});
+
+test("EOS comparison requires explicit adiabatic source evidence rather than current draft or form values",()=>{
+  for(const loss of [undefined,"legacy_temperature_rise","unknown",null]){
+    const ctx=eosContext();
+    if(loss===undefined)delete ctx.record.inputs.combustion_loss_model;
+    else ctx.record.inputs.combustion_loss_model=loss;
+    ctx.draft.combustion_loss_model="adiabatic";
+    const before=clone(ctx),form={...createValidationForm(ctx),combustion_loss_model:"adiabatic"};
+    assert.throws(()=>buildValidationRequest(ctx,form,"gas_eos_comparison"),/采用当前设计模型.*新的设计点记录/);
+    assert.deepEqual(buildValidationRequest(ctx,form,"conservation"),{source_job_id:"design-1"});
+    assert.ok(buildValidationRequest(ctx,form,"thermochemistry").thermochemistry);
+    assert.deepEqual(ctx,before);
+  }
+});
+
+test("changing the EOS candidate updates its scope and sends a separate source-bound request",async()=>{
+  const ctx=eosContext(),before=clone(ctx);
+  const h=mounted((path,method)=>method==="POST"?{id:"bm-comparison",status:"queued"}:standardAPI(path),ctx);
+  h.tab("gas_eos_comparison");
+  assert.match(h.container.innerHTML,/data-validation-field="candidate_eos"/);
+  assert.match(h.container.innerHTML,/Peng–Robinson \/ Boston–Mathias 修正/);
+  assert.match(h.container.innerHTML,/候选模型范围：预燃室与涡轮采用 PR/);
+  assert.match(h.container.innerHTML,/不是 PR 状态方程的理论物种数上限/);
+  assert.doesNotMatch(h.container.innerHTML,/先选择已完成的 PR–BM 设计记录/);
+  h.changeField("candidate_eos","Peng-Robinson-Boston-Mathias");
+  assert.match(h.container.innerHTML,/候选模型范围：预燃室、涡轮、主燃烧室、冷却燃气侧与喷管均采用 PR–BM/);
+  await h.controller.refresh();
+  assert.match(h.container.innerHTML,/<option value="Peng-Robinson-Boston-Mathias" selected>/);
+  h.click("run");await settle();
+  assert.deepEqual(h.calls.find(call=>call.method==="POST").body,{source_job_id:"design-1",gas_eos_comparison:{enabled:true,candidate_eos:"Peng-Robinson-Boston-Mathias"}});
+  assert.deepEqual(ctx,before);h.controller.onLeave();
+});
+
+test("legacy temperature sources disable only EOS reruns while saved comparison records remain readable",async()=>{
+  const ctx=eosContext();ctx.record.inputs.combustion_loss_model="legacy_temperature_rise";
+  const saved={id:"saved-pr-check",project_id:"p1",revision:2,status:"succeeded",source_job_id:"design-1",
+    request:{gas_eos_comparison:{enabled:true,candidate_eos:"Peng-Robinson-Boston-Mathias"}},
+    result:{gas_eos_comparison:{status:"unavailable",reason:"历史校核已保存"}}};
+  const before=clone(ctx),savedBefore=clone(saved);
+  const h=mounted(path=>path==="/validation/capabilities"?capabilities:path==="/projects/p1/validations"?[saved]:saved,ctx);
+  await h.controller.refresh();
+  assert.match(h.container.innerHTML,/data-validation-action="run" disabled/);
+  assert.match(h.container.innerHTML,/采用当前设计模型/);
+  assert.match(h.container.innerHTML,/历史校核已保存/);
+  h.click("run");await settle();
+  assert.equal(h.calls.filter(call=>call.method==="POST").length,0);
+  h.tab("conservation");
+  assert.doesNotMatch(h.container.innerHTML,/data-validation-action="run" disabled/);
+  h.tab("gas_eos_comparison");h.click("export");
+  assert.deepEqual(h.downloads,["validation-saved-pr-check.json"]);
+  assert.deepEqual(ctx,before);assert.deepEqual(saved,savedBefore);h.controller.onLeave();
+});
+
+test("a source change resets the candidate before submitting a new EOS comparison",async()=>{
+  const h=mounted((path,method)=>method==="POST"?{id:"new-source-check",status:"queued"}:standardAPI(path),eosContext());
+  h.tab("gas_eos_comparison");h.changeField("candidate_eos","Peng-Robinson");
+  const next=eosContext("Peng-Robinson-Boston-Mathias");next.record.id="design-bm";
+  const before=clone(next);h.setContext(next);h.click("run");await settle();
+  assert.deepEqual(h.calls.find(call=>call.method==="POST").body,{source_job_id:"design-bm",gas_eos_comparison:{enabled:true,candidate_eos:"Peng-Robinson-Boston-Mathias"}});
+  assert.deepEqual(next,before);h.controller.onLeave();
+});
+
 test("mount shows source differences, missing dependencies and all five tabs without touching engine data",async()=>{
   const ctx=context(),before=clone(ctx),h=mounted(standardAPI,ctx);
   await h.controller.refresh();
   assert.match(h.container.innerHTML,/方案 v2/);assert.match(h.container.innerHTML,/当前草稿或方案版本/);
   assert.match(h.container.innerHTML,/RocketCEA 未安装/);assert.match(h.container.innerHTML,/REFPROP/);
-  for(const tab of ["gas_handoff","thermochemistry","conservation","properties","experiment"])assert.match(h.container.innerHTML,new RegExp(`data-validation-tab="${tab}"`));
+  for(const tab of ["gas_handoff","gas_eos_comparison","thermochemistry","conservation","properties","experiment"])assert.match(h.container.innerHTML,new RegExp(`data-validation-tab="${tab}"`));
   h.tab("experiment");
   assert.match(h.container.innerHTML,/data-validation-field="conditions_confirmed" type="checkbox" >/);
   assert.match(h.container.innerHTML,/液氧 \/ 甲烷/);
@@ -192,6 +306,60 @@ test("mount shows source differences, missing dependencies and all five tabs wit
   assert.match(h.container.innerHTML,/质量流量与轴功率闭合/);
   assert.doesNotMatch(h.container.innerHTML,/质量流量、推力|推力闭合/);
   assert.deepEqual(ctx,before);assert.ok(h.calls.every(call=>call.method==="GET"));
+  h.controller.onLeave();
+});
+
+test("running EOS comparison shows pending report text only for its selected active record",async()=>{
+  const ctx=context(),before=clone(ctx),active={id:"v-eos",project_id:"p1",revision:2,status:"running",
+    request:{source_job_id:"design-1",gas_eos_comparison:{enabled:true}}};
+  const h=mounted(path=>{
+    if(path==="/validation/capabilities")return clone(capabilities);
+    if(path==="/projects/p1/validations")return [clone(active)];
+    if(path==="/validations/v-eos")return clone(active);
+    throw Error(`Unexpected ${path}`);
+  },ctx);
+  await h.controller.refresh();
+  assert.match(h.container.innerHTML,/aria-selected="true" data-validation-tab="gas_eos_comparison"/);
+  assert.match(h.container.innerHTML,/正在分别求解并核对两套模型，完成后显示对比/);
+  assert.doesNotMatch(h.container.innerHTML,/尚未运行理想气体 \/ PR 整机对比/);
+  delete active.request.gas_eos_comparison;
+  active.request.thermochemistry={enabled:true};
+  await h.controller.refresh();
+  assert.doesNotMatch(h.container.innerHTML,/正在分别求解并核对两套模型/);
+  assert.match(h.container.innerHTML,/尚未运行理想气体 \/ PR 整机对比/);
+  assert.deepEqual(ctx,before);
+  h.controller.onLeave();
+});
+
+test("polling and refreshing the same EOS record preserve the user's chosen tab",async()=>{
+  const record={id:"v-eos",project_id:"p1",revision:2,status:"running",
+    request:{source_job_id:"design-1",gas_eos_comparison:{enabled:true}}};
+  const before=clone(record),h=mounted(path=>path==="/validation/capabilities"?clone(capabilities):
+    path==="/projects/p1/validations"?[clone(record)]:clone(record));
+  await h.controller.refresh();
+  assert.match(h.container.innerHTML,/aria-selected="true" data-validation-tab="gas_eos_comparison"/);
+  h.tab("properties");await h.tick();
+  assert.match(h.container.innerHTML,/aria-selected="true" data-validation-tab="properties"/);
+  await h.controller.refresh();
+  assert.match(h.container.innerHTML,/aria-selected="true" data-validation-tab="properties"/);
+  assert.deepEqual(record,before);
+  h.controller.onLeave();
+});
+
+test("explicit selection opens EOS records identified by their saved result",async()=>{
+  const old={id:"v-cea",project_id:"p1",revision:2,status:"succeeded"},
+    eos={id:"v-eos",project_id:"p1",revision:2,status:"succeeded",result:{gas_eos_comparison:{status:"unavailable",reason:"模型未闭合"}}};
+  const before=clone(eos),h=mounted(path=>{
+    if(path==="/validation/capabilities")return clone(capabilities);
+    if(path==="/projects/p1/validations")return [clone(old),clone(eos)];
+    return clone(path==="/validations/v-eos"?eos:old);
+  });
+  await h.controller.refresh();
+  assert.match(h.container.innerHTML,/aria-selected="true" data-validation-tab="thermochemistry"/);
+  h.record("v-eos");await settle();
+  assert.match(h.container.innerHTML,/aria-selected="true" data-validation-tab="gas_eos_comparison"/);
+  assert.match(h.container.innerHTML,/模型未闭合/);
+  assert.deepEqual(eos,before);
   h.controller.onLeave();
 });
 
@@ -544,4 +712,16 @@ test("baseline controls name pure propellant temperatures and direct actual main
   assert.match(h.container.innerHTML,/纯燃料入口温度/);assert.match(h.container.innerHTML,/纯氧化剂入口温度/);
   assert.match(h.container.innerHTML,/纯推进剂一次燃烧是独立理论性能基线/);
   assert.match(h.container.innerHTML,/不复制涡轮排气温度/);h.controller.onLeave();
+});
+
+test("withdrawn BM history remains visible while all new validation submissions are disabled",async()=>{
+  const ctx=context();
+  ctx.record.result.environment={gas_model:{eos:"Peng-Robinson-Boston-Mathias",eos_model:{version:"pr_boston_mathias_v1"}}};
+  const before=clone(ctx),h=mounted(standardAPI,ctx);
+  await h.controller.refresh();h.tab("gas_eos_comparison");
+  assert.match(h.container.innerHTML,/物理模型已撤回 · 结果无效/);
+  assert.match(h.container.innerHTML,/data-validation-action="run" disabled/);
+  h.click("run");await settle();
+  assert.equal(h.calls.filter(call=>call.method==="POST").length,0);
+  assert.deepEqual(ctx,before);h.controller.onLeave();
 });

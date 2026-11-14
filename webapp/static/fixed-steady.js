@@ -8,7 +8,8 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const date = value => value ? new Date(value * 1000).toLocaleString("zh-CN", {hour12:false}) : "—";
 export const FIXED_BOUNDARIES = Object.freeze([
   {key:"ambient_pressure",label:"环境压力",unit:"MPa",factor:1e-6,zero:true},
-  {key:"tank_pressure_pa",label:"贮箱压力",unit:"MPa",factor:1e-6},
+  {key:"fuel_tank_pressure_pa",label:"燃料贮箱出口绝对压力",unit:"MPa",factor:1e-6,fallback:"tank_pressure_pa"},
+  {key:"ox_tank_pressure_pa",label:"液氧贮箱出口绝对压力",unit:"MPa",factor:1e-6,fallback:"tank_pressure_pa"},
   {key:"fuel_inlet_temp",label:"燃料入口温度",unit:"K",factor:1},
   {key:"ox_inlet_temp",label:"氧化剂入口温度",unit:"K",factor:1},
 ]);
@@ -16,7 +17,12 @@ const LEGACY_BUDGET_FIELDS = [
   {key:"inlet_pressure",label:"历史增压出口压力要求（未采纳为边界）",unit:"MPa",factor:1e-6},
   {key:"feed_line_dp_pa",label:"历史管路压降预算（未采纳为边界）",unit:"MPa",factor:1e-6,zero:true},
 ];
-const displayedBoundaries=task=>task?.schema_version===1 ? [...FIXED_BOUNDARIES,...LEGACY_BUDGET_FIELDS] : FIXED_BOUNDARIES;
+const SHARED_BOUNDARIES=[FIXED_BOUNDARIES[0],{key:"tank_pressure_pa",label:"历史共用贮箱出口绝对压力",unit:"MPa",factor:1e-6},...FIXED_BOUNDARIES.slice(3)];
+const displayedBoundaries=task=>{
+  const values=task?.operating_conditions?.boundaries||{};
+  const fields=("tank_pressure_pa" in values && !("fuel_tank_pressure_pa" in values) && !("ox_tank_pressure_pa" in values))?SHARED_BOUNDARIES:FIXED_BOUNDARIES;
+  return task?.schema_version===1?[...fields,...LEGACY_BUDGET_FIELDS]:fields;
+};
 
 export function fixedSteadyForm(task) {
   const boundaries=task?.operating_conditions?.boundaries || {};
@@ -28,7 +34,7 @@ export function buildFixedSteadyRequest(sourceJobId, form) {
   if(!sourceJobId)throw new Error("请先选择已完成的概念设计记录。");
   const boundaries={};
   for(const field of FIXED_BOUNDARIES){
-    const raw=form?.[field.key], value=String(raw??"").trim()==="" ? NaN : Number(raw);
+    const raw=form?.[field.key]??(field.fallback?form?.[field.fallback]:undefined), value=String(raw??"").trim()==="" ? NaN : Number(raw);
     if(!Number.isFinite(value) || (field.zero ? value<0 : value<=0))
       throw new Error(`${field.label}必须是${field.zero?"非负":"正"}有限数值。`);
     boundaries[field.key]=value*(1/field.factor);

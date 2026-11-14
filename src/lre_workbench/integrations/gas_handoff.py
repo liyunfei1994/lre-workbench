@@ -66,8 +66,31 @@ def load_verified_gas_model(model: dict):
     raw = (Path(ct.__file__).resolve().parent / "data" / filename).read_bytes()
     if hashlib.sha256(raw).hexdigest() != digest:
         raise ValueError("当前热化学文件 SHA-256 与计算记录不符；不能重算该记录。")
-    gas = ct.Solution(yaml=raw.decode("utf-8"), name=phase)
     expected_eos = model.get("chemical_reference_eos") if model.get("eos") == "HEOS" else model.get("eos")
+    candidate = (expected_eos in ("Peng-Robinson", "Peng-Robinson-Boston-Mathias")
+                 or model.get("species_policy") == "pr_supported_v1"
+                 or model.get("eos_parameter_sha256") is not None
+                 or model.get("eos_model_sha256") is not None)
+    if candidate:
+        from lre_workbench.properties.thermochemistry import _require_candidate_fingerprints
+        # HEOS ports use only the explicitly saved ideal chemical reference;
+        # their copied gas-model declarations do not change the liquid EOS.
+        _require_candidate_fingerprints(dict(model, eos=expected_eos), required=True)
+        from lre_workbench.properties.gas_eos import build_gas
+        gas, actual = build_gas(Path(filename).stem, eos=expected_eos,
+                               species_policy=model["species_policy"])
+        keys = ("species_policy_sha256", "eos_parameter_sha256")
+        if (expected_eos == "Peng-Robinson-Boston-Mathias"
+                or (model.get("eos") != "HEOS" and model.get("eos_model_sha256") is not None)):
+            keys += ("eos_model_sha256",)
+        for key in keys:
+            if not model.get(key) or model[key] != actual.get(key):
+                raise ValueError(f"保存的燃气物种／EOS 参数身份不一致：{key}。")
+        # Independent diagnostics must not mutate the production thread cache.
+        gas = (gas.clone() if expected_eos == "Peng-Robinson-Boston-Mathias"
+               else ct.Solution(yaml=gas.write_yaml(), name=gas.name))
+    else:
+        gas = ct.Solution(yaml=raw.decode("utf-8"), name=phase)
     if expected_eos and expected_eos != gas.thermo_model:
         raise ValueError("保存的燃气 EOS 与热化学相定义不符。")
     expected_reference = ("cantera_ndodecane_coolprop_600K_ideal_reference_v2" if filename == "nDodecane_Reitz.yaml"
@@ -86,11 +109,21 @@ def _record_model(state, environment, *, pure=False):
     filename = metadata.get("thermochemical_data") or physics.get("mechanism")
     # A record-level fingerprint applies only to the exact same named file.
     digest = environment.get("mechanism_sha256") if filename == physics.get("mechanism") else None
+    # The v2 liquid enthalpy contract uses ideal-species standard formation
+    # enthalpy as its zero, irrespective of the combustion-mixture EOS. Only
+    # infer that reference from the saved, recognized contract, never from PR
+    # being selected elsewhere in the engine or from current input defaults.
+    reference = metadata.get("reference_id")
+    expected_reference = ("cantera_ndodecane_coolprop_600K_ideal_reference_v2"
+                          if filename == "nDodecane_Reitz.yaml" else
+                          f"cantera_{Path(filename).stem}_coolprop_298p15K_ideal_reference_v2"
+                          if filename in ("gri30.yaml", "gri30_highT.yaml") else None)
+    chemical_reference_eos = "ideal-gas" if pure and expected_reference and reference == expected_reference else None
     return {"mechanism": filename, "phase": physics.get("phase"),
             "mechanism_sha256": digest, "cantera_version": _dict(environment.get("dependencies")).get("cantera"),
             "eos": scope.get("pure_fluid_backend") if pure else scope.get("gas_eos"),
-            "chemical_reference_eos": scope.get("gas_eos") if pure else None,
-            "enthalpy_reference_id": metadata.get("reference_id"),
+            "chemical_reference_eos": chemical_reference_eos,
+            "enthalpy_reference_id": reference,
             "composition_basis": metadata.get("composition_basis", "mass_fraction"),
             "identity_source": "saved_record_environment", "phase_set": [physics.get("phase")],
             "equilibrium_scope": "pure_reactant" if pure else "gas_phase_only",
@@ -134,7 +167,10 @@ def _station(key, label, state, environment, gas_cache):
         checks.append(_check(f"{key}.reference_identity_consistency", f"{label}：参考身份一致性",
                              status="fail", reason="端口 reference_id 与其保存的物性模型身份冲突。"))
     try:
-        cache_key = (model.get("mechanism"), model.get("phase"), model.get("mechanism_sha256"), model.get("eos"))
+        cache_key = (model.get("mechanism"), model.get("phase"), model.get("mechanism_sha256"), model.get("eos"),
+                     model.get("species_policy"),
+                     model.get("species_policy_sha256"), model.get("eos_parameter_sha256"), model.get("eos_model_sha256"),
+                     model.get("chemical_reference_eos"), model.get("enthalpy_reference_id"))
         if cache_key not in gas_cache:
             gas_cache[cache_key] = load_verified_gas_model(model)
         gas = gas_cache[cache_key]

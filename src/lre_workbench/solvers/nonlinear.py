@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from lre_workbench.runtime.tasks import checkpoint
+from lre_workbench.solvers.monitor import MonitorCallbackError
 
 
 @dataclass
@@ -118,8 +119,8 @@ def _vector(value, size, name, *, positive=False, finite=True):
 
 def solve_nonlinear(fun, x0, lower, upper, *, residual_scales,
                     variable_scales, diff_steps=None, tol=1e-4, max_iter=50,
-                    backend="newton", names=None, progress_callback=None,
-                    max_nfev=None, variable_names=None, variable_units=None,
+                    backend="newton", names=None, progress_callback=None, accepted_callback=None,
+                    max_nfev=None, variable_names=None, variable_units=None, evaluation_callback=None,
                     equation_units=None, equation_components=None, equation_labels=None,
                     max_steps=None, residual_tolerances=None,
                     broyden_refresh_interval=8, diff_step_shrink_attempts=0):
@@ -130,6 +131,10 @@ def solve_nonlinear(fun, x0, lower, upper, *, residual_scales,
     units; ``None`` chooses sqrt(machine epsilon) times the larger of the
     current absolute variable and its scale.  Inward/shorter probes are used
     at bounds. ``progress_callback(point)`` receives accepted trace points.
+    ``accepted_callback(point, payload)`` observes that exact accepted state;
+    observers must treat the payload as read-only. No extra model call occurs.
+    ``evaluation_callback(context)`` identifies a model evaluation before its
+    nested closures run; trials and finite-difference probes are not accepted iterates.
 
     Invalid input raises ValueError.  Ordinary model failures return a failed
     result with the last accepted state; cooperative cancellation propagates.
@@ -250,6 +255,8 @@ def solve_nonlinear(fun, x0, lower, upper, *, residual_scales,
             raise _EvaluationBudgetReached()
         nfev += 1
         evaluation_counts[stage] = evaluation_counts.get(stage, 0) + 1
+        if evaluation_callback is not None:
+            evaluation_callback(dict(stage=stage, evaluation=nfev, variable=variable))
         try:
             raw, payload = fun(at.tolist())
             raw = np.asarray(raw, dtype=float)
@@ -268,6 +275,8 @@ def solve_nonlinear(fun, x0, lower, upper, *, residual_scales,
             if not np.isfinite(merit):
                 raise ValueError("nonfinite squared residual norm")
             return _Evaluation(at.copy(), raw.copy(), scaled, payload)
+        except MonitorCallbackError:
+            raise
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             total_failure_count += 1
@@ -295,6 +304,8 @@ def solve_nonlinear(fun, x0, lower, upper, *, residual_scales,
                      elapsed_seconds=perf_counter() - started,
                      x=value.x.tolist(), nfev=nfev, merit=value.merit, **detail)
         points.append(point)
+        if accepted_callback is not None:
+            accepted_callback(deepcopy(point), value.payload)
         if progress_callback is not None:
             progress_callback(deepcopy(point))
 

@@ -24,7 +24,8 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                          wall_thickness_m=0.5e-3, channel_table=None,
                          material_boundaries_m=(),
                          nozzle_contour_method="legacy_log_v1",
-                         nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0):
+                         nozzle_initial_angle_deg=35.0, nozzle_exit_angle_deg=10.0,
+                         surface_only=False):
     """Return channel-boundary nodes and cells in coolant-flow order.
 
     ``s_m`` is distance along the coolant path; ``x_m`` remains the common gas
@@ -49,12 +50,13 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
     cover = eps if cover_eps == 0 else float(cover_eps)
     if not math.isfinite(cover) or not 1 < cover <= eps:
         raise ValueError("cooling coverage must lie in (1, expansion_ratio]")
-    if int(n_channels) != n_channels or n_channels < 1:
+    if not surface_only and (int(n_channels) != n_channels or n_channels < 1):
         raise ValueError("channel count must be a positive integer")
     for name, val in (("channel_width_m", channel_width_m),
                       ("channel_height_m", channel_height_m),
                       ("wall_thickness_m", wall_thickness_m)):
-        _positive(name, val)
+        if not surface_only:
+            _positive(name, val)
 
     # n_cyl changes with refinement; the former fixed 14 cells prevented a
     # meaningful complete-domain grid-convergence check.
@@ -116,7 +118,7 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                                area_ratio=(r/r_t)**2, area_m2=math.pi*r*r,
                                cooling_covered=x <= points[-1][0]+1e-12))
 
-    if channel_table:
+    if channel_table and not surface_only:
         from lre_workbench.components.chambers.design import parse_channel_table, resolve_channel_distribution
         rows = parse_channel_table(channel_table) if isinstance(channel_table, str) else channel_table
         if not rows:
@@ -135,6 +137,9 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
 
     nodes = []
     for i, (x, r) in enumerate(points):
+        if surface_only:
+            nodes.append(dict(x_m=x, r_m=r, area_ratio=(r/r_t)**2))
+            continue
         n = int(distribution["n"][i]) if distribution else int(n_channels)
         w = float(distribution["w_m"][i]) if distribution else channel_width_m * r / r_t
         h = float(distribution["h_m"][i]) if distribution else channel_height_m
@@ -153,12 +158,14 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
     for a, b in zip(nodes, nodes[1:]):
         ds = math.hypot(b["x_m"]-a["x_m"], b["r_m"]-a["r_m"])
         b["s_m"] = a["s_m"] + ds
-        cell = {key: 0.5*(a[key]+b[key]) for key in (
+        cell = {key: 0.5*(a[key]+b[key]) for key in (("x_m", "r_m", "s_m") if surface_only else (
             "x_m", "r_m", "s_m", "A_flow_m2", "D_h_m", "width_m",
-            "height_m", "wall_thickness_m", "pitch_m", "rib_m")}
+            "height_m", "wall_thickness_m", "pitch_m", "rib_m"))}
         cell.update(ds_m=ds, dA_hot_m2=math.pi*(a["r_m"]+b["r_m"])*ds,
                     area_ratio=(cell["r_m"]/r_t)**2,
-                    n_channels=a["n_channels"], supersonic=cell["x_m"] > x_throat)
+                    supersonic=cell["x_m"] > x_throat)
+        if not surface_only:
+            cell["n_channels"] = a["n_channels"]
         cells.append(cell)
     return dict(version=3, source=contour["source"],
                 nozzle_contour_method=contour["nozzle_contour_method"],
@@ -182,4 +189,13 @@ def build_regen_geometry(*, r_t, r_c, L_cyl, expansion_ratio, cover_eps=0.0,
                 cover_eps=cover, expansion_ratio=eps,
                 path_length_m=nodes[-1]["s_m"],
                 hot_area_m2=sum(cell["dA_hot_m2"] for cell in cells),
-                channel_distribution="table" if distribution else "width_proportional_to_radius")
+                channel_distribution=None if surface_only else "table" if distribution else "width_proportional_to_radius")
+
+
+def build_hot_wall_geometry(**kwargs):
+    """Covered hot surface only: no channel, material or hydraulic assumptions."""
+    forbidden = {"n_channels", "channel_width_m", "channel_height_m", "wall_thickness_m",
+                 "channel_table", "material_boundaries_m", "surface_only", "counterflow"}
+    if forbidden.intersection(kwargs):
+        raise ValueError("Hot-wall estimate does not accept channel or material geometry")
+    return build_regen_geometry(**kwargs, surface_only=True, counterflow=False)

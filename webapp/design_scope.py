@@ -26,6 +26,8 @@ def require_supported_design(values):
 
 def require_supported_source(source):
     """Check saved identities and topology before reusing an archived result."""
+    from webapp.model_validity import require_reusable_model
+    require_reusable_model(source)
     inputs = source.get("inputs", {})
     require_supported_design(json.loads(inputs) if isinstance(inputs, str) else inputs)
     result = source.get("result")

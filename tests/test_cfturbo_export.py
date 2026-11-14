@@ -148,6 +148,47 @@ class CFturboExportTests(unittest.TestCase):
             self.assertEqual(returned, destination.read_text(encoding="utf-8"))
             self.assertEqual(returned, text)
 
+    def test_legacy_bar_pressures_and_si_turbine_pressures_display_in_mpa(self):
+        text = build_cfturbo_markdown(result_fixture())
+        self.assertIn("节点压升 Δp | 39.200 | MPa", text)
+        self.assertIn("入口节点压力 p | 0.800 | MPa", text)
+        self.assertIn("| 压力 [MPa] | 0.800 | 40.000 |", text)
+        self.assertIn("入口节点压力 p（口径待确认） | 9.000 | MPa", text)
+        self.assertIn("出口节点压力 p（口径待确认） | 0.500 | MPa", text)
+        self.assertNotIn("bar", text)
+        self.assertEqual(self.props.call_args_list[0].args, ("Oxygen", 95., 8e5))
+
+    def test_si_pressure_wins_over_inconsistent_engineering_unit_copies(self):
+        result = result_fixture()
+        result.components["ox_pump"].outputs.update(
+            p_in_Pa=1.25e6, p_out_Pa=42e6, delta_p_Pa=40.75e6,
+            p_in_MPa=7, p_out_MPa=8, delta_p_MPa=9)
+        before = dict(result.components["ox_pump"].outputs)
+        text = build_cfturbo_markdown(result).split("### 甲烷")[0]
+        self.assertIn("| 压力 [MPa] | 1.250 | 42.000 |", text)
+        self.assertIn("节点压升 Δp | 40.750 | MPa", text)
+        self.assertEqual(self.props.call_args_list[0].args, ("Oxygen", 95., 1.25e6))
+        self.assertEqual(result.components["ox_pump"].outputs, before)
+
+    def test_mpa_fallback_and_legacy_turbine_zero_preserve_units(self):
+        result = result_fixture()
+        result.components["ox_pump"].outputs.update(
+            p_in_Pa=None, p_in_MPa=1.2, p_out_MPa=41, delta_p_MPa=39.8)
+        turbine = result.components["ox_preburner_turbine"].outputs
+        del turbine["p_in_Pa"], turbine["p_out_Pa"]
+        turbine.update(p_in_bar=90, p_out_bar=0)
+        text = build_cfturbo_markdown(result)
+        self.assertIn("| 压力 [MPa] | 1.200 | 41.000 |", text)
+        self.assertIn("节点压升 Δp | 39.800 | MPa", text)
+        self.assertIn("出口节点压力 p（口径待确认） | 0.000 | MPa", text)
+        self.assertEqual(self.props.call_args_list[0].args, ("Oxygen", 95., 1.2e6))
+
+    def test_vapor_pressure_is_converted_from_property_si_to_mpa(self):
+        self.props.return_value = {"rho": 1100, "mu": .0002, "nu": .2, "lam": .1,
+                                   "cp": 1700, "pv": 101325}
+        text = build_cfturbo_markdown(result_fixture())
+        self.assertIn("Vapor pressure pv | 0.101325 | MPa", text)
+
     def test_pump_reference_head_and_available_suction_are_not_design_certification(self):
         result = result_fixture()
         result.components["ox_pump"].outputs.update(head_m=4000, npsh_available_m=25,

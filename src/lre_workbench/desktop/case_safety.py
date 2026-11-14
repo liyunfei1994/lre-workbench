@@ -133,6 +133,7 @@ class CaseSafetyMixin:
 
     def _case_recovery_snapshot(self):
         snapshot = self._case_edit_state()
+        snapshot["pressure_display_unit"] = "MPa"
         path = getattr(self, "_case_path", None)
         snapshot["saved_path"] = str(path) if path is not None else None
         snapshot["saved_inputs"] = deepcopy(self._case_baseline)
@@ -218,6 +219,14 @@ class CaseSafetyMixin:
         for key in ("raw_inputs", "extra_inputs", "analysis_inputs"):
             if not isinstance(baseline.get(key), dict):
                 raise ValueError("草稿保存基准不完整")
+        # Older recovery files contain bar text in these three controls,
+        # unlike the Pa values in normal saved cases. Convert both draft
+        # and baseline once, preserving unfinished input text and the file.
+        from lre_workbench.desktop.pressure_units import recovery_pressure_text
+        source_unit = snapshot.get("pressure_display_unit", "bar")
+        raw = recovery_pressure_text(raw, source_unit)
+        baseline = deepcopy(baseline)
+        baseline["raw_inputs"] = recovery_pressure_text(baseline["raw_inputs"], source_unit)
         saved_path = snapshot.get("saved_path")
         if saved_path is not None and not isinstance(saved_path, str):
             raise ValueError("草稿方案路径不正确")

@@ -1,0 +1,77 @@
+/* Run controls and the durable monitoring view share a responsive workspace. */
+#workspace #design-run-panel { max-width: none; background: transparent; border: 0; padding: 0; container: solver-run / inline-size; }
+.design-run-layout { display: grid; grid-template-columns: minmax(0,1fr); align-items: start; gap: 20px; }
+.design-run-controls { min-width: 0; padding: 24px; background: #fff; border: 1px solid #d4dfe7; border-radius: 5px; }
+@container solver-run (min-width: 1050px) {
+  .design-run-layout { grid-template-columns: minmax(340px,.8fr) minmax(540px,1.2fr); }
+  #workspace .partitioned-workbench .design-run-controls .design-run-context { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 16px; padding: 14px; }
+  #workspace .partitioned-workbench .design-run-controls .design-run-context > div:last-child { grid-column: 1 / -1; }
+}
+.solver-monitor { width: 100%; min-width: 0; border: 1px solid #ccd9e2; border-radius: 6px; background: #fff; color: #294356; overflow-wrap: anywhere; container: solver-monitor / inline-size; }
+.solver-monitor .sm-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; background: #edf4f8; border-bottom: 1px solid #d5e0e8; }
+.solver-monitor .sm-header h2 { margin: 0; font-size: 21px; }
+.solver-monitor .sm-header p { margin: 4px 0 0; font-size: 14px; color: #526f82; }
+.solver-monitor .sm-header > span { padding: 4px 9px; border: 1px solid #b9ccd8; border-radius: 4px; font-size: 14px; white-space: nowrap; }
+.solver-monitor .sm-source { padding: 12px 16px; border-bottom: 1px solid #dce6ec; }
+.solver-monitor label { margin: 0; display: block; font-size: 14px; }
+.solver-monitor select { width: 100%; min-width: 0; min-height: 36px; margin: 4px 0 6px; font-size: 14px; }
+.solver-monitor [data-sm-version] > strong { display: inline-block; margin-right: 14px; font-size: 15px; }
+.solver-monitor [data-sm-version] > span { font-size: 13px; color: #5a7384; }
+.solver-monitor .sm-note { margin: 5px 0; font-size: 13px; line-height: 1.6; color: #526f82; }
+#workspace #solver-monitor .sm-source .sm-id { margin: 4px 0 0; padding: 0; border: 0; background: transparent; font-size: 13px; }
+#workspace #solver-monitor .sm-source .sm-id summary { padding: 0; font-size: 14px; line-height: 1.5; }
+.solver-monitor .sm-id code { display: block; margin: 5px 0; overflow-wrap: anywhere; }
+.solver-monitor .sm-source-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.solver-monitor .sm-source-actions button { min-height: 32px; padding: 5px 10px; font-size: 13px; }
+.solver-monitor .sm-connection-error { padding: 10px; background: #fff4e5; color: #82521d; border-left: 3px solid #c29450; font-size: 14px; line-height: 1.7; }
+.solver-monitor .sm-body { padding: 12px 16px 16px; min-width: 0; }
+.solver-monitor .sm-layer-state { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.solver-monitor .sm-layer-state > div { padding: 7px 9px; border: 1px solid #dce5ec; background: #f7fafc; }
+.solver-monitor .sm-layer-state span { display: block; color: #607b8e; font-size: 13px; margin-bottom: 2px; }
+.solver-monitor .sm-layer-state strong { font-size: 13px; font-weight: 600; }
+.solver-monitor .sm-chart-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 10px; }
+.solver-monitor .sm-chart { margin: 8px 0 18px; border: 1px solid #d6e1e9; border-radius: 4px; overflow: hidden; }
+.solver-monitor .sm-chart figcaption { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; padding: 10px 12px; background: #f5f8fa; border-bottom: 1px solid #e0e8ed; font-size: 14px; }
+.solver-monitor .sm-chart figcaption span { color: #5b7587; font-size: 13px; }
+.solver-monitor .sm-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 12px 0; font-size: 13px; }
+.solver-monitor .sm-legend i { display: inline-block; width: 15px; height: 3px; vertical-align: middle; margin-right: 5px; }
+.solver-monitor .sm-series-0 { background: #247aa4; }
+.solver-monitor .sm-series-1 { background: #a16a28; }
+.solver-monitor .sm-series-2 { background: #358574; }
+.solver-monitor .sm-series-3 { background: #82629c; }
+.solver-monitor [hidden] { display: none !important; }
+.solver-monitor .sm-chart svg { display: block; width: 100%; height: auto; min-height: 190px; font-family: "Segoe UI","Microsoft YaHei",sans-serif; }
+.solver-monitor .sm-chart svg text { fill: #597283; font-size: 14px; }
+.solver-monitor .sm-chart .sm-note { padding: 0 12px 8px; }
+.solver-monitor .sm-grid { stroke: #dfe8ee; stroke-width: 1; }
+.solver-monitor .sm-threshold { stroke: #ab6e33; stroke-width: 1.4; stroke-dasharray: 6 4; }
+.solver-monitor .sm-chart svg .sm-threshold-label { fill: #825824; }
+.solver-monitor .sm-empty-chart { padding: 24px 18px; border: 1px dashed #bccedb; background: #f7fafc; margin: 12px 0; font-size: 15px; }
+.solver-monitor .sm-empty-chart p { margin: 8px 0 0; line-height: 1.75; font-size: 14px; color: #617b8d; }
+.solver-monitor .sm-events { margin-top: 16px; font-size: 13px; }
+.solver-monitor .sm-events summary { font-size: 14px; font-weight: 600; }
+.solver-monitor .sm-table-scroll { max-height: 350px; overflow: auto; margin-top: 12px; }
+.solver-monitor .sm-events table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.solver-monitor .sm-events th { background: #edf3f7; text-align: left; }
+.solver-monitor .sm-events :is(th,td) { padding: 8px; vertical-align: top; border-bottom: 1px solid #e0e7ec; }
+.solver-monitor .sm-events td span { color: #658092; }
+.solver-monitor .sm-values { margin-top: 5px; font-size: 13px; line-height: 1.6; color: #597283; }
+@container solver-monitor (min-width: 700px) {
+  .solver-monitor .sm-layer-state { grid-template-columns: repeat(4,minmax(0,1fr)); }
+  .solver-monitor .sm-header > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+  .solver-monitor .sm-header p { margin: 0; }
+  .solver-monitor .sm-source { display: grid; grid-template-columns: minmax(0,1fr) auto; column-gap: 12px; row-gap: 6px; }
+  .solver-monitor .sm-source > label { grid-column: 1; grid-row: 1; }
+  .solver-monitor .sm-source .sm-source-actions { grid-column: 2; grid-row: 1; align-self: end; margin: 0 0 6px; }
+  .solver-monitor .sm-source > [data-sm-version] { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 12px; }
+  .solver-monitor .sm-source > [data-sm-version] > strong { margin: 0; }
+  .solver-monitor .sm-source > [data-sm-version] > .sm-note { order: 2; flex-basis: 100%; margin: 0; }
+  #workspace #solver-monitor .sm-source .sm-id { margin: 0; }
+  .solver-monitor .sm-source > [data-sm-connection] { grid-column: 1 / -1; grid-row: 3; margin: 0; }
+  .solver-monitor .sm-chart-controls { margin-top: 6px; }
+}
+@media (max-width: 650px) {
+  .design-run-controls { padding: 16px; }
+  .solver-monitor :is(.sm-header,.sm-source,.sm-body) { padding: 14px; }
+  .solver-monitor .sm-chart-controls { grid-template-columns: minmax(0,1fr); gap: 0; }
+}

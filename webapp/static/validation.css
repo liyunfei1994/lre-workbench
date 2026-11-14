@@ -93,6 +93,14 @@
 .validation-chart-toolbar>div:last-child { display:flex; gap:7px; }
 .validation-data-details { padding:10px!important; background:#fff!important; border:1px solid #d1dbe3!important; border-radius:0!important; margin:0!important; }
 .validation-data-details>summary { font-size:12px!important; color:#324d61!important; }
+.eos-comparison { display:flex; flex-direction:column; gap:12px; min-width:0; }
+.eos-comparison h3,.eos-comparison h4 { margin:0; color:#324d61; }
+.eos-comparison h3 { font-size:14px; }
+.eos-run-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.eos-run { display:flex; flex-direction:column; gap:8px; min-width:0; padding:12px; border:1px solid #d1dbe3; background:#f7fafc; }
+.eos-run>.validation-badge { align-self:flex-start; }
+.eos-station[open] { display:flex; flex-direction:column; gap:10px; }
+@media(max-width:760px) { .eos-run-grid { grid-template-columns:minmax(0,1fr); } }
 .validation-data-details .validation-metric { margin:10px 0!important; }
 .validation-thermo-layout .validation-output { gap:12px; }
 @media(max-width:1200px) { .validation-scan-fields { grid-template-columns:repeat(3,minmax(0,1fr)); } }

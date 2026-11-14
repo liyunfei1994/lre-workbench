@@ -30,7 +30,8 @@ def closure_fixture():
 
 def source_fixture():
     # This analytic ledger uses specified heat/pressure, not a spatial solution.
-    inputs = asdict(EngineInputs(cooling_channel_auto_size=0.0, cooling_bartz_mode=0.0, of_ratio=2))
+    inputs = asdict(EngineInputs(combustion_loss_model="adiabatic",
+                                cooling_channel_auto_size=0.0, cooling_bartz_mode=0.0, of_ratio=2))
     states, components, closure = closure_fixture()
     components["nozzle"] = {"outputs": {"At_m2": .05}}
     return {"id": "design", "project_id": "project", "revision": 3, "created": 1,

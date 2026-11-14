@@ -1,6 +1,10 @@
 // Presentation rules never migrate stored EngineInputs. Only an explicit mode
 // change writes the two legacy flags, keeping drafts, imports and undo lossless.
 import {renderPressureWorkspace} from "./pressure-design.js";
+import {renderValveConfiguration} from "./valve-configuration.js";
+import {thermoModelDecisionState} from "./thermochemistry-model.js";
+import {renderPreburnerConditions,renderPreburnerLimitSetup,preburnerLimitSetupState} from "./preburner-design.js";
+export {applyThermochemistryBaseline,selectThermochemistryModel} from "./thermochemistry-model.js";
 const escape = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 export const PREBURNER_MODE_KEY = "preburner_design_mode";
 
@@ -19,6 +23,7 @@ export function renderAnalysisParameterRoles(catalog, mode, {currentReference=fa
 }
 
 function fixedModeNote(field, id) {
+  if(field.show_fixed_mode_note === false)return "";
   const description=field.analysis_modes?.fixed_hardware_steady?.description;
   return description?`<span class="field-help field-mode-role"${id?` id="${escape(id)}"`:""}>固定硬件稳态：${escape(description)}</span>`:"";
 }
@@ -46,6 +51,7 @@ export function platformInputValues(inputs) {
 
 export function mergeInputDefaults(defaults, inputs, savedSnapshot = false) {
   inputs=platformInputValues(inputs);
+  if(!savedSnapshot&&!Object.keys(inputs).length)return {...defaults};
   const result = {...defaults, ...inputs};
   if(savedSnapshot && Object.hasOwn(defaults,"chamber_inner_wall_material") && !Object.hasOwn(inputs,"chamber_inner_wall_material"))
     result.chamber_inner_wall_material="grcop84";
@@ -57,6 +63,13 @@ export function mergeInputDefaults(defaults, inputs, savedSnapshot = false) {
     if(Object.hasOwn(defaults,key) && !Object.hasOwn(inputs,key))result[key]=legacy;
   if(Object.hasOwn(defaults,"nozzle_contour_method") && !Object.hasOwn(inputs,"nozzle_contour_method")) result.nozzle_contour_method="legacy_log_v1";
   if (savedSnapshot && Object.hasOwn(defaults, "methane_thermo_dataset") && !Object.hasOwn(inputs, "methane_thermo_dataset")) result.methane_thermo_dataset = "gri30";
+  if(savedSnapshot||Object.keys(inputs).length){
+    // An omitted historical setting must not inherit the new design preset.
+    for(const [key,legacy] of Object.entries({gas_eos:"ideal-gas",combustion_loss_model:"legacy_temperature_rise"}))
+      if(Object.hasOwn(defaults,key)&&!Object.hasOwn(inputs,key))result[key]=legacy;
+    if(Object.hasOwn(defaults,"gas_species_policy")&&!Object.hasOwn(inputs,"gas_species_policy"))
+      result.gas_species_policy=savedSnapshot?"full":"auto";
+  }
   if(Object.hasOwn(defaults,"wall_thermal_dataset_id") && !Object.hasOwn(inputs,"wall_thermal_dataset_id") &&
       (savedSnapshot || Object.hasOwn(inputs,"chamber_inner_wall_material"))) {
     const supported={grcop84:"grcop84_ellis2000_extruded_high_fe_v1",grcop42:"grcop42_chen2023_lpbf_v1",cuzr:"cuzr_qi2024_heat_treated_v1"};
@@ -70,13 +83,17 @@ export function methaneThermoSummary(inputs, catalog = []) {
   const dataset = catalog.find(item => item.id === id);
   const names = {gri30:"GRI30（历史数据）", gri30_highT:"GRI30 high-T"};
   const legacyLoss = (inputs.combustion_loss_model ?? "legacy_temperature_rise") === "legacy_temperature_rise";
+  const eos = inputs.gas_eos ?? "ideal-gas";
+  const fullPR = eos === "Peng-Robinson-Boston-Mathias";
+  const restricted = inputs.gas_species_policy === "pr_supported_v1" || (["Peng-Robinson","Peng-Robinson-Boston-Mathias"].includes(eos) && (inputs.gas_species_policy ?? "auto") === "auto");
+  const eosLabel = {"ideal-gas":"理想气体混合物", "Peng-Robinson":"PR 预燃室/涡轮 · 受限候选", "Peng-Robinson-Boston-Mathias":"PR–BM 全燃气流程 · 受限候选"}[eos] || `未识别：${eos}`;
   const spatialCooling = Boolean(inputs.cooling_bartz_mode);
   const chamber = legacyLoss ? "化学平衡后温升折减（历史兼容）" :
     inputs.combustion_loss_model === "adiabatic" ?
       (spatialCooling ? "化学平衡（给定压力与焓）" : "化学平衡（计入给定冷却吸热）") : "未识别的经验修正设置";
   const rows = [["甲烷热化学", names[id] || `未识别：${id}`], ["主燃烧室", chamber],
     ["主喷管热侧", spatialCooling ? "冻结组成 · 沿程冷却" : "冻结组成 · 绝热膨胀"],
-    ["燃气状态方程", dataset?.gas_eos === "ideal-gas" ? "理想气体混合物" : dataset?.gas_eos || "数据未读取"]];
+    ["燃气状态方程", eosLabel], ["主室 / 喷管", fullPR ? "Peng–Robinson–Boston–Mathias" : "理想气体混合物"], ["燃气物种范围", restricted ? "PR 参数支持的受限集合" : "所选热化学文件的完整集合"]];
   const range = dataset?.common_temperature_range_K;
   const rangeText = Array.isArray(range) && range.length === 2 && range.every(Number.isFinite) ? `${range[0]}–${range[1]} K` : "未读取";
   const source = /^https:\/\//i.test(dataset?.source_url || "") ?
@@ -85,7 +102,10 @@ export function methaneThermoSummary(inputs, catalog = []) {
     "文件说明：Joseph Shepherd 依据 NASA TM-4513 更新高温热力学多项式，并非仅放宽温区。" : "";
   const historical = id === "gri30";
   const details = `<p class="fine">当前参数所用文件：${escape(dataset?.file || id)}；Cantera ${escape(dataset?.cantera_version || "版本未读取")}。${source}</p>` +
-    `<p class="fine">${escape(dataset?.species_count ?? "未读取")} 种物种声明温区的交集：${escape(rangeText)}。交集外需逐物种检查，不代表所有物种都已越界。${escape(update)}</p>` +
+    `<p class="fine">热化学源文件 ${escape(dataset?.species_count ?? "未读取")} 种物种声明温区的交集：${escape(rangeText)}。交集外需逐物种检查，不代表所有物种都已越界。${escape(update)}</p>` +
+    (eos === "Peng-Robinson" ? '<p class="fine">预燃室和涡轮采用 Peng–Robinson，主燃烧室及喷管保留理想气体模型。主室接收 PR 涡轮排气的实际焓与组成后重新求解，整机随之重新匹配；本候选不覆盖主室/喷管高温真实气体。</p>' : "") +
+    (fullPR ? '<p class="fine">预燃室、冻结组成涡轮、主燃烧室、冷却燃气侧及喷管统一采用 Peng–Robinson–Boston–Mathias，按实际排气焓与组成重新匹配整机。Boston–Mathias 高温 alpha 修正以独立模型身份保存，不改写旧标准 PR 记录；仍需独立高压验证。</p>' : "") +
+    (restricted ? '<p class="fine">本方案采用已登记 PR 参数的 16 种受限物种集合，实际物种清单随结果保存。该集合不覆盖缺少参数的自由基及完整高温解离；它不同于源文件的完整物种范围。在“热力学校核 → 理想气体 / PR”中，两端使用相同受限集合，对比全理想方案与来源记录所声明 PR 候选的整机匹配结果。</p>' : "") +
     '<p class="fine">高温热数据提供物种焓、熵和比热；不能据此认定高压状态方程、反应速率、输运或积碳模型已验证。系统纯流体物性使用 CoolProp 的 HEOS 模型；REFPROP 对照在“热力学校核”中单独进行。</p>' +
     (legacyLoss ? '<p class="fine">此方案保留历史温升折减；升级热化学数据不会自动改变该模型。</p>' : "") +
     (historical ? '<p class="fine">旧方案继续使用其原数据复现。使用 high-T 时先建立草稿，点击“保存方案”生成新版本；旧版本和已保存结果保留。</p>' : '<p class="fine">此摘要对应当前参数。已保存结果使用各自记录的数据版本，修改后需重新计算。</p>');
@@ -103,6 +123,7 @@ export function upgradeCoolingModelDraft(inputs) {
 }
 
 function renderCoolingModel(inputs) {
+  if(inputs.cooling_bartz_mode===2)return `<section class="cooling-methods" aria-label="概略热负荷计算方法"><h3>概略受热面 → 沿程热流估算 → 吸热功率 → 循环反馈</h3><p>在热面参考壁温假设下计算燃气侧对流与简化辐射热流，按覆盖面积积分。燃气状态与喉部尺度随循环迭代，冷却剂出口由吸热功率与焓平衡确定；压降使用单独的工程估计。</p><p>参考壁温不是求得壁温或允许温度。本模式不需要通道宽深和材料，不判定冷却能力；后续详细模型再求实际壁温、冷却剂沿程状态及水力压降。</p><button type="button" data-setup-group="thermal_geometry">设置概略型面与冷却范围 →</button></section>`;
   const spatial=typeof inputs.cooling_bartz_mode === "number" && Number.isFinite(inputs.cooling_bartz_mode) && inputs.cooling_bartz_mode>0;
   const budget=inputs.cooling_bartz_mode===0;
   if(spatial){
@@ -130,7 +151,7 @@ function renderCoolingModel(inputs) {
       <details><summary>关联式、数值设置与适用范围</summary>
         <dl><dt>冷却剂换热</dt><dd>雷诺数不大于 2300 时，努塞尔数取 4.36；2300～3000 区间插值；不小于 3000 时采用 Dittus–Boelter 关联式。喉部换热标定系数及其依据在“再生冷却通道设计”中设置。</dd>
         <dt>水力计算</dt><dd>摩擦系数随雷诺数与相对粗糙度计算。局部损失系数在通道参数中设置，进出口集流腔按零速度边界处理。</dd>
-        <dt>数值求解</dt><dd>每段联立求解压力与比焓，再与燃气侧及循环迭代。轴向网格分辨率在“数值求解”中设置，应通过网格加密检查结果变化。</dd>
+        <dt>数值求解</dt><dd>每段联立求解压力与比焓，再与燃气侧及循环迭代。轴向网格分辨率在“总体设计点计算 → 求解设置”中设置，应通过网格加密检查结果变化。</dd>
         <dt>适用范围</dt><dd>当前采用单相冷却剂模型。未求解壁体储热、周向温差、两相流、甲烷裂解与积碳；近临界换热恶化未采用专用关联式。材料数据温区与设计壁温限值分别校核。</dd></dl>
       </details>
     </section>`;
@@ -141,34 +162,68 @@ function renderCoolingModel(inputs) {
     (methane?'<button type="button" data-upgrade-cooling>建立准一维冷却草稿</button><p class="field-help">切换后请核对型面、通道与材料，保存为新版本并重新计算。既有记录保留。</p>':'<p class="field-help">煤油替代工质尚未接入统一准一维冷却；当前仅保留预算模型兼容能力。</p>')+'</div>';
 }
 
-function renderChamberModel(inputs) {
-  const mode=inputs.combustion_loss_model;
-  const correction=mode==="adiabatic" ? '<p>经验温升修正未启用。</p>' :
-    mode==="legacy_temperature_rise" ? '<p class="notice warning">当前方案启用历史温升折减。输出状态经过经验修正，设置见下方“历史兼容设置”。</p>' :
-      '<p class="notice warning">经验温升修正设置缺失或无效，请检查下方“历史兼容设置”。</p>';
-  const inlet=inputs.cycle_type==="ffsc" ? "两股涡轮排气的质量流量、组分与比焓，以及指定的主燃烧室压力。" :
-    "燃料与氧化剂实际入口的质量流量、组分与比焓，以及指定的主燃烧室压力。";
-  return `<section class="chamber-model-summary" aria-label="当前主燃烧室模型">
-    <h3>化学平衡（给定压力与焓）</h3>
-    <p>零维热力学模型。在给定压力下，按元素守恒和能量守恒求解化学平衡状态。</p>
-    <dl><dt>计算输入</dt><dd>${inlet}</dd><dt>计算输出</dt><dd>燃气温度、平衡组分、比热、比热比及平均摩尔质量。</dd>
-    <dt>能量约束</dt><dd>入口比焓包含化学生成焓与热状态贡献，按质量流量加权。冷却换热按所选再生冷却模型计入能量收支。</dd>
-    <dt>模型范围</dt><dd>采用理想气体混合物假设，考虑平衡解离。未求解空间混合、有限速率反应及燃烧不稳定性。</dd></dl>
-    ${correction}
-    <details><summary>压力与焓约束说明</summary>
-      <p>“给定压力与焓”指本次平衡计算的约束条件。温度与产物组分由求解得到，主燃烧室压力可随设计工况改变。</p>
-      <p>给定冷却预算时，从入口焓流中扣除规定的吸热量。准一维冷却模式下，先求未扣除再生换热的平衡参考状态，再由热侧沿程模型扣除对应换热量。</p>
-      <p>此处提供一个基础化学平衡模型。历史温升折减属于附加经验修正。喷管膨胀过程的组分假设在喷管模型中单独定义。</p>
-      <p>方法说明见 <a href="https://www.cantera.org/stable/python/thermo.html#cantera.ThermoPhase.equilibrate" target="_blank" rel="noopener noreferrer">Cantera 化学平衡约束</a>。
-      <a href="https://www.nasa.gov/glenn/research/chemical-equilibrium-with-applications/" target="_blank" rel="noopener noreferrer">NASA 化学平衡计算程序说明</a>可作为方法参考，当前计算由 Cantera 执行。</p>
-    </details>
-  </section>`;
+function renderThermochemistryDecisions(group,inputs) {
+  const model=thermoModelDecisionState(inputs);
+  const eosField=group.fields.find(field=>field.key==="gas_eos");
+  const selector=eosField?`<div class="thermochemistry-model-selector">${renderParameterField({...eosField,show_role:false,inline_help:"选择模型同时采用其物种配置，不附加温升折减；保存并重新计算后生效。"},inputs,{compact:true})}</div>`:"";
+  const facts=[
+    ["计算工具",model.backendLabel],
+    ["燃烧计算","化学平衡（压力与焓约束）；预燃室与主燃烧室分别求解",model.loss==="adiabatic"?"combustion_loss_model":null],
+    ["应用范围",model.coverageLabel],
+    ["当前化学物种",`${model.speciesLabel}。参与平衡的候选物种，实际含量由计算确定。`,"gas_species_policy"],
+    ["热化学数据",`${model.datasetLabel} · ${model.knownDataset?model.datasetId+".yaml":"标识待核对"}；物种标准态热数据采用分段 NASA7 多项式。`],
+    ["膨胀组分处理","涡轮：冻结入口组成；冷却燃气侧与喷管：主室组成冻结"],
+    ["纯推进剂物性","CoolProp HEOS：氧、甲烷的供给、泵与冷却剂状态。后端及文献来源见物性资料。"],
+    ["气体输运","源文件的分子输运参数与 mixture-averaged 模型；与 NASA 热数据及 EOS 分开核查，高压输运尚未验证。"],
+    ["壁面热物性",`${inputs.wall_thermal_dataset_id||"未指定内衬数据集"}；${inputs.cooling_bartz_mode===1?"详细冷却中使用导热率，制造状态与温区按结果核对":"当前模式不求解壁面导热，保留为部件草案"}`],
+  ];
+  if(!model.knownEos)facts.push(["物性模型标识",String(model.eos)]);
+  if(model.lossEnabled){
+    facts.push(["旧版本温度修正","化学平衡计算后按原系数折减主燃烧室温升","combustion_loss_model"]);
+    facts.push(["原温升折减系数",Object.hasOwn(inputs,"combustion_efficiency")?String(inputs.combustion_efficiency):"未记录","combustion_efficiency"]);
+  }else if(!model.knownLoss)facts.push(["温度修正设置",model.lossLabel,"combustion_loss_model"]);
+  const invalid=!model.knownEos||!model.knownSpecies||!model.knownDataset||!model.knownLoss;
+  const notice=model.runnableSupported?"":`<div class="thermochemistry-configuration-error" role="note"><b>${invalid?"计算模型设置无效，不能提交设计点。":"当前保存配置与所选模型不匹配，不能提交设计点。"}</b><p>${model.unsupportedFull?"PR 参数未覆盖完整物种范围。":""}原设置与已有计算记录保留。</p></div>`;
+  const research=model.realGas?'<div class="thermochemistry-decision-limits" role="note"><b>研究模型</b><p>当前 PR 模型实现覆盖 16 种气相物种，不含 H、O、OH 等解离物种。求解较慢，高压混合物的预测尚未完成试验验证。</p></div>':"";
+  const propellant=Object.hasOwn(inputs,"propellant_pair")?inputs.propellant_pair:"lox_methane";
+  const canAdopt=inputs.cycle_type==="ffsc"&&propellant==="lox_methane";
+  let action="";
+  if(!model.runnableSupported&&canAdopt){
+    action=model.knownEos&&model.knownDataset
+      ? `<div class="thermochemistry-baseline-action"><button type="button" data-thermochemistry-apply="${escape(model.eos)}">应用所选模型配置</button><p>采用${model.realGas?"当前 PR 参数覆盖的 16 种候选物种":"源数据的完整 53 种候选物种"}，不附加温升折减；保留所选热化学数据。操作只更新当前设置，确认并保存为新版本后重新计算，已有记录不变。</p></div>`
+      : '<div class="thermochemistry-baseline-action"><button type="button" data-thermochemistry-baseline>恢复默认模型配置</button><p>改用理想气体混合物、GRI30 高温数据及 53 种候选物种，不附加温升折减。操作只更新当前设置，确认并保存为新版本后重新计算，已有记录不变。</p></div>';
+  }
+  return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend><section class="thermochemistry-decision" aria-label="当前工质与热物性模型"><header class="thermochemistry-decision-header"${eosField?"":' data-field="gas_eos"'}><div><p class="fine">当前计算模型</p><h3>${escape(model.profileLabel)}</h3></div></header>${selector}<dl class="thermochemistry-decision-facts">${facts.map(([label,value,key])=>`<dt>${escape(label)}</dt><dd${key?` data-field="${escape(key)}"`:""}>${escape(value)}</dd>`).join("")}</dl>${notice}${research}${action}${model.datasetId==="gri30"?'<button type="button" data-thermo-upgrade>使用 high-T 建立新版草稿</button>':""}<div class="thermochemistry-reference-link"><button type="button" data-property-open="gas">数据来源、物种与性质曲线</button><button type="button" data-property-open="record">本次计算实际使用依据</button><button type="button" data-help-chapter="properties">物性方法与参考态说明</button></div></section></fieldset>`;
 }
 const ROLE_LABELS = {
   design_input:"设计输入", boundary:"边界条件", model_assumption:"模型假设",
   constraint:"约束", initial_guess:"迭代初值", component_sizing:"部件选型",
   solver_setting:"求解设置", legacy:"历史兼容", result:"计算结果",
 };
+
+export function designEnvironment(inputs) {
+  const pressure = inputs?.ambient_pressure;
+  if (pressure === 0) return {key:"vacuum", label:"真空"};
+  if (pressure === 101325) return {key:"sea_level", label:"标准海平面"};
+  if (Number.isFinite(pressure) && pressure > 0) return {key:"custom", label:"自定义背压"};
+  return {key:"invalid", label:"环境压力无效"};
+}
+
+// A shortcut changes only the existing absolute-pressure input, never the case's
+// thrust, Isp estimate, history or model identity.
+export function selectDesignEnvironment(inputs, mode) {
+  if (!["sea_level", "vacuum"].includes(mode)) throw new Error("请选择标准海平面或真空环境。");
+  const pressure = mode === "sea_level" ? 101325 : 0;
+  return inputs.ambient_pressure === pressure ? inputs : {...inputs, ambient_pressure:pressure};
+}
+
+export function refreshDesignEnvironment(root, inputs) {
+  const environment = designEnvironment(inputs);
+  for (const label of root.querySelectorAll("[data-design-environment-label]")) label.textContent = environment.label;
+  for (const button of root.querySelectorAll("[data-design-environment]"))
+    button.setAttribute("aria-pressed", String(button.dataset.designEnvironment === environment.key));
+  return environment;
+}
 
 export function preburnerMode(inputs) {
   if (Number(inputs.use_target_preburner_temp ?? 1) >= .5) return "temperature";
@@ -260,12 +315,45 @@ export function parameterValue(field, inputs) {
   if (field.key === PREBURNER_MODE_KEY && field.virtual) return preburnerMode(inputs);
   if (field.virtual && field.pump_speed_key) return pumpSpeedMode(field, inputs);
   if (field.virtual && field.turbine_stages_key) return turbineStageMode(field, inputs);
-  const value = preburnerStatusValue(field.key, inputs[field.key]);
+  const inherited = parameterInheritance(field, inputs);
+  const value = inherited ? inherited.value : preburnerStatusValue(field.key, inputs[field.key]);
   return value == null ? "" : typeof value === "number" ? Number((value * (field.factor || 1)).toPrecision(12)) : value;
 }
 
+// Effective values are a presentation of the saved fallback contract. Opening
+// or saving an unrelated field must not materialize nullable per-side overrides.
+export function parameterInheritance(field, inputs = {}) {
+  if (!field.nullable || !field.show_effective_value || !field.fallback_key) return null;
+  const inherited = inputs[field.key] == null;
+  const fallback = inputs[field.fallback_key], value = inherited ? fallback : inputs[field.key];
+  const fallbackText = Number.isFinite(fallback)
+    ? `${Number((fallback * (field.factor || 1)).toPrecision(12))}${field.unit ? ` ${field.unit}` : ""}` : "";
+  const valid = Number.isFinite(value);
+  const text = inherited
+    ? valid ? `沿用共用设定：${fallbackText}。编辑后采用本路独立设定。`
+      : "共用设定缺失或无效，请填写本路数值。"
+    : !valid ? "本路独立设定无效，请填写有限数值。"
+      : `本路独立设定。${fallbackText ? `清空后沿用共用设定：${fallbackText}。` : "共用设定缺失或无效，不能留空。"}`;
+  return {inherited, value, valid, text};
+}
+
+export function refreshParameterInheritance(root, fields, inputs) {
+  if (!root?.querySelectorAll) return;
+  const byKey = new Map(fields.map(field => [field.key, field]));
+  for (const note of root.querySelectorAll("[data-parameter-inheritance]")) {
+    const field = byKey.get(note.dataset.parameterInheritance);
+    if (!field) continue;
+    const state = parameterInheritance(field, inputs);
+    if (!state) continue;
+    note.textContent = state.text;
+    note.dataset.inherited = String(state.inherited);
+    note.dataset.valid = String(state.valid);
+  }
+}
+
 export function parameterLayoutDependency(key, groups) {
-  return [PREBURNER_MODE_KEY, "use_target_preburner_temp", "use_target_preburner_mr", "cycle_type", "propellant_pair", "combustion_loss_model", "chamber_inner_wall_material", "wall_thermal_dataset_id", "wall_manufacturing_state"].includes(key) || groups.some(group => group.fields.some(field =>
+  return [PREBURNER_MODE_KEY, "use_target_preburner_temp", "use_target_preburner_mr", "cycle_type", "propellant_pair", "combustion_loss_model", "gas_eos", "gas_species_policy", "chamber_inner_wall_material", "wall_thermal_dataset_id", "wall_manufacturing_state"].includes(key) || groups.some(group => group.fields.some(field =>
+    (field.show_effective_value && [field.key, field.fallback_key].includes(key)) ||
     [...(field.visibility?.all || []), ...(field.visibility?.any || [])].some(condition => condition.key === key)));
 }
 
@@ -274,7 +362,7 @@ function renderWallDatasetInfo(field, inputs) {
   const dataset=field.dataset_catalog.find(item=>item.dataset_id===inputs.wall_thermal_dataset_id);
   if(!dataset)return '<p class="field-help">当前数据集未识别；不会自动换成另一种材料。</p>';
   const materialConflict=dataset.material_id && inputs.chamber_inner_wall_material && dataset.material_id!==inputs.chamber_inner_wall_material;
-  const identityNote=materialConflict ? `<p class="notice warning" role="alert">内衬材料与默认热物性数据集不一致：配置为 ${escape(inputs.chamber_inner_wall_material)}，本数据集属于 ${escape(dataset.material_id)}。请在“推力室·结构与材料”选择对应内衬，或在此选择与原材料一致的数据集；新计算前必须修正。历史结果和当前草稿不会自动改写。</p>` : "";
+  const identityNote=materialConflict ? `<p class="notice warning" role="alert">内衬材料与默认热物性数据集不一致：配置为 ${escape(inputs.chamber_inner_wall_material)}，本数据集属于 ${escape(dataset.material_id)}。请在本组的“燃气侧内衬材料”选择对应材料，或选择与原材料一致的数据集；材料、数据集和制造状态分别核对，新计算前必须修正。历史结果和当前草稿不会自动改写。</p>` : "";
   const state=inputs.wall_manufacturing_state || "unspecified";
   const manufacturing=dataset.manufacturing_state || {},expected=manufacturing.state_id;
   const match=state==="unspecified" ? "方案制造状态未确认" : state===expected ? "方案制造状态与数据匹配" : "方案制造状态与数据不匹配";
@@ -295,45 +383,102 @@ function renderWallDatasetInfo(field, inputs) {
 
 export function parameterSearchText(field, inputs, groupTitle = "") {
   const view = parameterPresentation(field, inputs);
-  return [view.label, view.full_label, view.key, view.unit, view.role_label, view.help,
+  return [view.label, view.full_label, view.key, view.unit, view.role_label, view.help, view.inline_help,
     view.provenance?.label, view.provenance?.detail, groupTitle].join(" ").toLocaleLowerCase();
 }
 
-export function renderParameterField(field, inputs, {compact = false} = {}) {
+function renderParameterHelp(view, id) {
+  const sections=Array.isArray(view.help_sections)?view.help_sections:[];
+  const identity=id?` id="${escape(id)}"`:"";
+  if(sections.length)return `<span class="field-help"${identity}>${sections.map(section=>`<span class="field-help"><b>${escape(section.label)}：</b>${escape(section.text)}</span>`).join("")}</span>`;
+  return view.help?`<span class="field-help"${identity}>${escape(view.help)}</span>`:"";
+}
+
+export function renderParameterField(field, inputs, {compact = false, expanded = new Set()} = {}) {
   const view = parameterPresentation(field, inputs), value = parameterValue(view, inputs);
+  if(view.custom_editor === "valve_configuration")return renderValveConfiguration(inputs,view,{expanded});
   if(view.custom_editor === "channel_distribution")return "";
   if(view.read_only && view.key==="cooling_bartz_mode")return `<div class="cooling-methods-field" data-field="cooling_bartz_mode" data-role="model_assumption">${renderCoolingModel(inputs)}</div>`;
   const virtualMode = view.virtual && view.key === PREBURNER_MODE_KEY;
   const legacy = virtualMode && value === "legacy_free_split";
   const helpId = `parameter-help-${view.key}`;
-  const help = (view.help ? `<span class="field-help" id="${escape(helpId)}">${escape(view.help)}</span>` : "") + fixedModeNote(view,view.help?null:helpId);
+  const mainHelp = renderParameterHelp(view,helpId);
+  const help = mainHelp + fixedModeNote(view,mainHelp?null:helpId);
+  const inlineHelpId = `parameter-inline-help-${view.key}`;
+  const inlineHelp = compact && view.inline_help ? `<span class="field-help parameter-inline-help" id="${escape(inlineHelpId)}">${escape(view.inline_help)}</span>` : "";
+  const inheritance = parameterInheritance(view, inputs), inheritanceId = `parameter-inheritance-${view.key}`;
+  const inheritanceNote = inheritance ? `<span class="field-help parameter-inheritance" id="${escape(inheritanceId)}" data-parameter-inheritance="${escape(view.key)}" data-inherited="${inheritance.inherited}" data-valid="${inheritance.valid}" aria-live="polite">${escape(inheritance.text)}</span>` : "";
+  // Full definitions are in the manual. Reference only help actually rendered
+  // beside this control, never an ID belonging to a different document view.
+  const describedBy = [!compact && help ? helpId : "", inlineHelp ? inlineHelpId : "", inheritanceNote ? inheritanceId : ""].filter(Boolean).join(" ");
+  const description = describedBy ? ` aria-describedby="${escape(describedBy)}"` : "";
   const evidence = view.provenance?.label ? `<span class="field-provenance" title="${escape(view.provenance.detail || view.provenance.label)}">依据：${escape(view.provenance.label)}</span>` : "";
   const options = view.choices || [];
   const numeric = typeof view.default === "number" || ["number", "int"].includes(view.type);
-  const inherited = view.nullable && Number.isFinite(inputs[view.fallback_key])
+  const inherited = inheritance ? "清空后沿用共用设定" : view.nullable && Number.isFinite(inputs[view.fallback_key])
     ? `沿用统一预算：${Number((inputs[view.fallback_key] * (view.factor || 1)).toPrecision(8))} ${view.unit || ""}` : view.placeholder || "";
-  const control = view.read_only ? `<output class="parameter-fixed-value"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>${escape(options.find(choice=>String(value)===String(choice.value))?.label??value)}</output>` :
-    view.choices ? `<select data-input="${escape(view.key)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>` +
+  const control = view.read_only ? `<output class="parameter-fixed-value"${description}>${escape(options.find(choice=>String(value)===String(choice.value))?.label??value)}</output>` :
+    view.choices ? `<select data-input="${escape(view.key)}"${description}>` +
     (legacy ? '<option value="legacy_free_split" selected disabled>历史模式：自由分流（保留）</option>' :
       options.some(choice => String(value) === String(choice.value)) ? "" : `<option value="" disabled selected>${escape(value==="" && view.empty_choice_label ? view.empty_choice_label : `无效值：${value}`)}</option>`) +
     options.map(choice => `<option value="${escape(choice.value)}"${String(value) === String(choice.value) ? " selected" : ""}>${escape(choice.label)}</option>`).join("") + "</select>" :
-    view.multiline ? `<textarea rows="${view.key.endsWith("_preburner_temp_limit_basis") ? 2 : 5}" data-input="${escape(view.key)}"${help ? ` aria-describedby="${escape(helpId)}"` : ""}>${escape(value)}</textarea>` :
-    `<input type="${numeric ? "number" : "text"}"${numeric ? ` step="any"${view.nullable ? "" : " required"}` : ""} data-input="${escape(view.key)}" value="${escape(value)}"${inherited ? ` placeholder="${escape(inherited)}"` : ""}${help ? ` aria-describedby="${escape(helpId)}"` : ""}>`;
-  return `<label data-field="${escape(view.key)}" data-role="${escape(view.role || "")}" title="${escape(view.full_label || view.label)}"><span class="parameter-label">${escape(view.label)}${view.unit ? ` <span class="unit">[${escape(view.unit)}]</span>` : ""}</span>${view.role_label && !compact ? `<span class="parameter-role">${escape(view.role_label)}</span>` : ""}${control}${compact ? "" : help + evidence}${legacy ? '<span class="parameter-legacy-note" role="note">当前方案保留旧版自由分流模式与参数。选择指定温度或指定氧燃质量比后才转换；加载时不会自动转换。</span>' : ""}</label>${renderWallDatasetInfo(view,inputs)}`;
+    view.multiline ? `<textarea rows="${view.key.endsWith("_preburner_temp_limit_basis") ? 2 : 5}" data-input="${escape(view.key)}"${description}>${escape(value)}</textarea>` :
+    `<input type="${numeric ? "number" : "text"}"${numeric ? ` step="any"${view.nullable ? "" : " required"}` : ""} data-input="${escape(view.key)}" value="${escape(value)}"${inherited ? ` placeholder="${escape(inherited)}"` : ""}${description}>`;
+  return `<label data-field="${escape(view.key)}" data-role="${escape(view.role || "")}" title="${escape(view.full_label || view.label)}"><span class="parameter-label">${escape(view.label)}${view.unit ? ` <span class="unit">[${escape(view.unit)}]</span>` : ""}</span>${view.role_label && (!compact || view.show_role) ? `<span class="parameter-role">${escape(view.role_label)}</span>` : ""}${control}${inheritanceNote}${compact ? inlineHelp : help + evidence}${legacy ? '<span class="parameter-legacy-note" role="note">当前方案保留旧版自由分流模式与参数。选择指定温度或指定氧燃质量比后才转换；加载时不会自动转换。</span>' : ""}</label>${renderWallDatasetInfo(view,inputs)}`;
 }
 
-function renderParameterNotes(fields, inputs) {
-  const notes = fields.map(field => parameterPresentation(field, inputs)).filter(view => view.help || view.provenance?.label || view.analysis_modes?.fixed_hardware_steady?.description);
+function renderParameterNotes(fields, inputs, groupId) {
+  const notes = fields.map(field => parameterPresentation(field, inputs)).filter(view => view.help || view.help_sections?.length || view.provenance?.label || view.analysis_modes?.fixed_hardware_steady?.description);
   if (!notes.length) return "";
-  return `<details class="parameter-notes"><summary>参数说明与依据</summary><dl>${notes.map(view =>
-    `<dt>${escape(view.label)}</dt><dd>${view.help ? `<span class="field-help" id="parameter-help-${escape(view.key)}">${escape(view.help)}</span>` : ""}${fixedModeNote(view,view.help?null:`parameter-help-${view.key}`)}${view.provenance?.label ? `<span class="field-provenance" title="${escape(view.provenance.detail || view.provenance.label)}">依据：${escape(view.provenance.label)}</span>` : ""}</dd>`
-  ).join("")}</dl></details>`;
+  return `<div class="parameter-help-link"><button type="button" data-help-chapter="${escape(`parameter:${groupId}`)}">参数定义与依据</button></div>`;
+}
+
+// Read-only documentation uses the same presentation metadata as the editor.
+// It deliberately does not render custom editors, selected values or actions.
+export function renderParameterReference(group, inputs = {}) {
+  if(!group)return '<p class="fine">尚未选择参数组。</p>';
+  const notes=(Array.isArray(group.fields)?group.fields:[]).filter(field=>parameterVisible(field,inputs)).map(field=>parameterPresentation(field,inputs));
+  const introduction=[group.summary,group.description,group.notes_intro,group.initials_help].filter(Boolean);
+  const sections=(Array.isArray(group.sections)?group.sections:[]).filter(section=>section.description).map(section=>`<p class="fine"><b>${escape(section.title)}：</b>${escape(section.description)}</p>`).join("");
+  const entries=notes.map(view=>{
+    const definition=renderParameterHelp(view)|| (view.inline_help?`<span class="field-help">${escape(view.inline_help)}</span>`:"");
+    const source=[view.provenance?.label,view.provenance?.detail].filter(Boolean);
+    const provenance=[...new Set(source)].map(text=>`<span class="field-provenance">${escape(text)}</span>`).join("");
+    const choices=Array.isArray(view.choices)&&view.choices.length?`<p class="fine">${view.read_only?"记录取值":"可选项"}：${view.choices.map(choice=>escape(choice.label)).join("；")}。</p>`:"";
+    return `<dt>${escape(view.full_label||view.label)}${view.unit?` <span class="unit">[${escape(view.unit)}]</span>`:""}${view.role_label?` <span class="parameter-role">${escape(view.role_label)}</span>`:""}</dt><dd>${definition||'<span class="field-help">详细定义尚未登记。</span>'}${fixedModeNote(view)}${provenance?`<div class="parameter-reference-source"><b>依据与来源</b>${provenance}</div>`:""}${choices}</dd>`;
+  }).join("");
+  return `${introduction.map(text=>`<p class="fine">${escape(text)}</p>`).join("")}${sections}<dl class="parameter-reference">${entries}</dl>${notes.length?"":'<p class="fine">当前模式没有适用参数。</p>'}`;
 }
 
 export function parameterGroups(groups, inputs) {
-  return groups.filter(group => parameterCompatible(group, inputs)).map(group => ({...group,
-    fields:group.fields.filter(field => parameterVisible(field, inputs)),
-  })).filter(group => group.fields.length);
+  const configuration = group => group.id === "cycle" && group.fields.every(field => field.read_only);
+  const visible = groups.filter(group => configuration(group) || parameterCompatible(group, inputs)).map(group => ({...group,
+    fields:configuration(group) ? group.fields.filter(field => !field.hidden) : group.fields.filter(field => parameterVisible(field, inputs)),
+  }));
+  const initialization = visible.find(group => group.collect_initial_guesses);
+  if(initialization){
+    const keys=new Set(initialization.fields.map(field=>field.key));
+    for(const group of visible){
+      if(group===initialization)continue;
+      group.fields=group.fields.filter(field=>{
+        if(parameterPresentation(field,inputs).role!=="initial_guess")return true;
+        if(!keys.has(field.key)){initialization.fields.push({...field,initialization_origin:group.id});keys.add(field.key);}
+        return false;
+      });
+    }
+  }
+  for(const group of visible){
+    if(group.workflow_stage!=="components")continue;
+    group.deferred_design=group.design_dependency==="sizing" || (group.design_dependency==="cooling" && inputs.cooling_bartz_mode!==1);
+  }
+  for(const group of visible)if(group.id==="thermal_geometry" && inputs.cooling_bartz_mode===0){group.deferred_design=true;group.requires_review=false;}
+  for(const group of visible)if(group.optional_configuration){
+    const active=["ox","fuel"].filter(side=>["provisional","documented"].includes(inputs[`${side}_preburner_temp_limit_status`]));
+    group.configuration_label=active.length?`已启用 ${active.length} 项限值`:"未设置限值";
+  }
+  return visible.filter(group => group.fields.length || group.shared_geometry_group).map(group=>group.numerical_configuration?{...group,
+    configuration_label:group.fields.every(field=>Object.is(inputs[field.key],field.default))?"采用默认":"已自定义",
+  }:group);
 }
 
 function renderChannelGeometryInfo(group, inputs) {
@@ -359,15 +504,42 @@ function renderChannelGeometryInfo(group, inputs) {
   return `<div class="channel-geometry-source"><p class="fine">几何来源：沿程通道表（${rows.length} 个断点）。</p>${note}<details><summary>查看保存的通道几何</summary><p class="fine">x 从喷注面起算；物理锚点随型面定位。宽、深、壁厚沿 x 线性插值，表两端之外沿用端值。未填列采用解析器默认值，不继承被覆盖的标量；当前内核要求各断点通道数相同。几何适用性由运行时统一校验。</p><div class="table-wrap"><table><thead><tr><th>定位</th><th>x / mm</th><th>N</th><th>宽 / mm</th><th>深 / mm</th><th>壁厚 / mm</th></tr></thead><tbody>${body}</tbody></table></div></details></div>`;
 }
 
+function renderEngineConfiguration(group, inputs, embedded = false, expanded = false) {
+  // Configuration identity belongs to the loaded scheme. Do not substitute
+  // current defaults for missing or unsupported historical identities.
+  const supported = inputs?.cycle_type === "ffsc" && inputs?.propellant_pair === "lox_methane";
+  const identities = [
+    ["propellant_pair", "推进剂组合", "lox_methane", "液氧／甲烷"],
+    ["cycle_type", "循环形式", "ffsc", "全流量补燃循环（FFSC）"],
+  ];
+  const facts = identities.map(([key, label, recognized, description]) => {
+    const value = inputs?.[key];
+    const display = value === recognized ? description : value == null || value === "" ? "未记录" : String(value);
+    return `<div data-field="${key}" data-role="configuration"><dt id="configuration-label-${key}">${label}</dt><dd><output aria-labelledby="configuration-label-${key}">${escape(display)}</output></dd></div>`;
+  }).join("");
+  const explanation = supported
+    ? `<section class="engine-configuration-section" aria-labelledby="configuration-shafts"><h3 id="configuration-shafts">轴系驱动关系</h3><p>氧侧与燃料侧采用独立轴系，每侧涡轮与对应主泵同轴。</p><dl class="engine-configuration-shafts"><div><dt>氧侧轴系</dt><dd>富氧预燃燃气驱动氧侧涡轮，涡轮轴功用于驱动液氧主泵。</dd></div><div><dt>燃料侧轴系</dt><dd>富燃预燃燃气驱动燃料侧涡轮，涡轮轴功用于驱动甲烷主泵。</dd></div></dl></section>
+      <section class="engine-configuration-section" aria-labelledby="configuration-gas-path"><h3 id="configuration-gas-path">燃气通路</h3><p>两路预燃燃气分别经对应涡轮膨胀做功，随后进入主燃烧室混合并完成燃烧，燃气经主喷管排出。</p><p>系统连接关系见工程视图区。部件状态与流量取自计算记录，需在设计点计算完成后查看。</p></section>
+      <section class="engine-configuration-scope" aria-labelledby="configuration-scope"><h3 id="configuration-scope">建模范围</h3><p>当前设计工作区采用液氧／甲烷全流量补燃构型，循环形式与轴系连接为给定条件。尚不支持切换循环形式或自由装配部件拓扑。</p><p>总体设计采用系统级集中参数热力匹配；冷却沿程与喷管由各自模型计算，部件几何用于概念与初步设计。这里无需选择全局二维或三维。</p><p>本页定义设计点目标与环境边界。物性、效率和部件设置通过任务树或系统图进入；数值方法与初值在“设计点求解”中设置。</p></section>`
+    : `<section class="engine-configuration-scope" aria-labelledby="configuration-scope"><h3 id="configuration-scope">构型信息待核对</h3><p>方案记录的构型信息不完整，或超出当前设计工作区支持范围。此处保留原始标识；轴系驱动关系与燃气通路暂不作说明。</p></section>`;
+  const content=`<p class="engine-configuration-intro">当前发动机定义 · 方案构型为给定条件</p><dl class="engine-configuration-facts">${facts}</dl><details class="engine-definition-help" data-definition-help="engine-definition"${expanded?" open":""}><summary>循环原理与建模范围</summary>${explanation}</details>`;
+  return embedded?`<section class="engine-configuration engine-definition" aria-label="发动机定义">${content}</section>`:`<fieldset class="parameter-section engine-configuration" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${content}</fieldset>`;
+}
+
 export function renderParameterGroups(groups, inputs, expanded = new Set()) {
   return groups.map(group => {
+    if (group.id === "cycle") return renderEngineConfiguration(group, inputs);
+    if (group.id === "chamber_chemistry") return renderThermochemistryDecisions(group,inputs);
+    if(group.shared_geometry_group && !group.fields.length)return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend><p>总体估算与部件设计共用同一份型面及冷却范围。请在共享定义中修改，保存后重新计算以更新尺寸与热负荷。</p><button type="button" data-setup-group="${escape(group.shared_geometry_group)}">查看及修改概略型面与冷却范围 →</button><p class="fine">通道宽深、壁厚和材料在部件设计中单独定义。共享型面不表示硬件已冻结或冷却能力已校核。</p></fieldset>`;
     const standard = [], seeds = [], numeric = [];
+    const primaryInitials = new Set(Array.isArray(group.primary_initials) ? group.primary_initials : []);
     for (const field of group.fields) {
-      (parameterPresentation(field, inputs).role === "initial_guess" ? seeds : field.advanced ? numeric : standard).push(field);
+      if(group.engine_definition && field.read_only)continue;
+      (group.collect_initial_guesses || primaryInitials.has(field.key) ? standard : parameterPresentation(field, inputs).role === "initial_guess" ? seeds : field.advanced ? numeric : standard).push(field);
     }
     const initialHelp = group.initials_help || "用于启动求解，折叠仅为简化日常操作。初值会影响收敛过程；同一物理解分支充分收敛后，结果应在容差范围内一致。";
     const advanced = !seeds.length ? "" : group.initials_inline
-      ? `<section class="parameter-subsection parameter-initials"><h3>${escape(group.initials_title || "启动估计")}</h3><p class="fine">${escape(initialHelp)}</p>${seeds.map(field => renderParameterField(field, inputs, {compact:true})).join("")}${renderParameterNotes(seeds, inputs)}</section>`
+      ? `<section class="parameter-subsection parameter-initials"><h3>${escape(group.initials_title || "启动估计")}</h3><p class="fine">${escape(initialHelp)}</p>${seeds.map(field => renderParameterField(field, inputs, {compact:true})).join("")}${renderParameterNotes(seeds, inputs, group.id)}</section>`
       : `<details class="parameter-initials" data-initials="${escape(group.id)}"${expanded.has(group.id) ? " open" : ""}><summary>高级设置 · 迭代初值（${seeds.length}）</summary><p class="fine">${escape(initialHelp)}</p>${seeds.map(field => renderParameterField(field, inputs)).join("")}</details>`;
     const numericKey = group.id + "-numerics";
     const numericOnly=numeric.every(field=>field.role==="solver_setting");
@@ -378,11 +550,27 @@ export function renderParameterGroups(groups, inputs, expanded = new Set()) {
     const contextText=contexts.map(context=>`<p class="fine wall-configuration-context">${escape(context.label)}：${escape(context.labels?.[inputs[context.key]] || inputs[context.key] || "未指定")}。${escape(context.note)}</p>`).join("");
     const compact = group.compact === true || ["design", "inlet"].includes(group.id);
     const controls = group.pressure_workspace
-      ? renderPressureWorkspace(group, inputs, field => renderParameterField(field, inputs, {compact:true}), selected => renderParameterNotes(selected, inputs))
+      ? renderPressureWorkspace(group, inputs, field => renderParameterField(field, inputs, {compact:true}), selected => renderParameterNotes(selected, inputs, group.id))
+      : group.id === "design" && standard.some(field => field.key === "ambient_pressure")
+        ? renderDesignInputs(group, standard, inputs, {compact,expanded})
       : renderParameterSections(group, standard, inputs, {compact,expanded});
-    const notes = compact && !group.section_notes && !group.pressure_workspace ? renderParameterNotes(standard, inputs) : "";
-    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.summary ? `<p class="fine">${escape(group.summary)}</p>` : ""}${group.description && !compact ? `<p class="fine">${escape(group.description)}</p>` : ""}${group.id==="chamber_chemistry" ? renderChamberModel(inputs) : ""}${renderChannelGeometryInfo(group, inputs)}${controls}${contextText}${notes}${advanced}${numerics}</fieldset>`;
+    const notes = (compact && !group.section_notes && !group.pressure_workspace ? renderParameterNotes(standard, inputs, group.id) : "") + (group.id==="cooling" && inputs.cooling_bartz_mode===2 ? renderCoolingModel(inputs) : "");
+    const related=group.initialization_link?'<div class="parameter-related"><button type="button" data-setup-group="initialization">查看相关迭代初值 →</button></div>':group.collect_initial_guesses?'<div class="parameter-related"><button type="button" data-setup-group="design">发动机定义与设计工况</button><button type="button" data-setup-group="preburner_design">预燃室热力匹配条件</button></div>':"";
+    return `<fieldset class="parameter-section" data-group="${escape(group.id)}"><legend>${escape(group.title)}</legend>${group.engine_definition?renderEngineConfiguration(group,inputs,true,expanded.has("engine-definition")):""}${group.summary ? `<p class="fine">${escape(group.summary)}</p>` : ""}${group.description && !compact ? `<p class="fine">${escape(group.description)}</p>` : ""}${renderChannelGeometryInfo(group, inputs)}${controls}${contextText}${notes}${advanced}${numerics}${related}</fieldset>`;
   }).join("");
+}
+
+function renderDesignInputs(group, fields, inputs, options) {
+  const environment = designEnvironment(inputs);
+  const pressure = fields.find(field => field.key === "ambient_pressure");
+  const primary = ["thrust","pc","of_ratio","target_isp"].map(key => fields.find(field => field.key === key)).filter(Boolean);
+  const primaryKeys = new Set(["ambient_pressure", ...primary.map(field => field.key)]);
+  const shortcuts = [["sea_level","标准海平面"],["vacuum","真空"]].map(([key,label]) =>
+    `<button type="button" data-design-environment="${key}" aria-pressed="${environment.key === key}">${label}</button>`).join("");
+  return `<section class="design-environment" aria-label="设计工作环境"><div class="design-environment-summary"><span class="fine">当前设计环境</span><strong data-design-environment-label aria-live="polite">${escape(environment.label)}</strong><div class="design-environment-actions" role="group" aria-label="环境快捷选择">${shortcuts}</div></div>${renderParameterField(pressure,inputs,options)}<p class="fine design-environment-note">环境压力按绝对压力输入（MPa），可直接填写自定义背压。目标推力对应当前设计环境，切换环境后应重新核定；总流量的数值估计在“总体设计点计算 → 初始化”中管理。</p></section>`+
+    `<div class="design-primary-inputs">${primary.map(field => renderParameterField(field,inputs,options)).join("")}</div>`+
+    (group.section_notes ? renderParameterNotes([pressure,...primary],inputs,group.id) : "")+
+    renderParameterSections(group,fields.filter(field => !primaryKeys.has(field.key)),inputs,options);
 }
 
 function renderCoolingModelInputs(inputs) {
@@ -397,7 +585,7 @@ function renderParameterSections(group, fields, inputs, options = {}) {
   if (!Array.isArray(group.sections)) return fields.map(render).join("");
   const rendered=new Set(), sections=[];
   for (const section of group.sections) {
-    if(["preburner-interfaces","preburner-results","cooling-input-summary"].includes(section.context)){
+    if(section.context==="cooling-input-summary"){
       sections.push(`<section class="parameter-subsection" data-parameter-section="${escape(section.id)}"><h3>${escape(section.title)}</h3><div data-${section.context}></div></section>`);
       continue;
     }
@@ -407,16 +595,22 @@ function renderParameterSections(group, fields, inputs, options = {}) {
     selected.forEach(field=>rendered.add(field.key));
     const fieldGroups=Array.isArray(section.field_groups)?section.field_groups:[];
     const groupedKeys=new Set(fieldGroups.flatMap(item=>item.keys||[]));
-    const content=fieldGroups.length?`<div class="parameter-constraint-columns">${fieldGroups.map(item=>`<section class="parameter-constraint-side"><h4>${escape(item.title)}</h4>${selected.filter(field=>(item.keys||[]).includes(field.key)).map(render).join("")}</section>`).join("")}</div>`+selected.filter(field=>!groupedKeys.has(field.key)).map(render).join(""):selected.map(render).join("");
+    const content=fieldGroups.length?`<div class="parameter-constraint-columns">${fieldGroups.map(item=>{
+      const sideFields=selected.filter(field=>(item.keys||[]).includes(field.key));
+      const preburnerSide=["preburner_design","engineering_constraints"].includes(group.id)&&["ox","fuel"].includes(item.side);
+      const basis=preburnerSide&&sideFields.find(field=>field.key.endsWith("_temp_limit_basis"));
+      const body=sideFields.filter(field=>field!==basis).map(render).join("");
+      const basisKey=`${group.id}:${item.side}:basis`;
+      const setup=preburnerSide?preburnerLimitSetupState(inputs,item.side):null;
+      return `<section class="parameter-constraint-side"${preburnerSide?` data-preburner-limit-side="${escape(item.side)}"`:""}><h4>${escape(item.title)}</h4>${body}${preburnerSide?renderPreburnerLimitSetup(inputs,item.side):""}${basis?`<details class="preburner-basis" data-parameter-fold="${escape(basisKey)}"${options.expanded?.has(basisKey)||setup.needsBasis?" open":""}><summary>${escape(setup.basisLabel)}</summary>${render(basis)}</details>`:""}</section>`;
+    }).join("")}</div>`+selected.filter(field=>!groupedKeys.has(field.key)).map(render).join(""):selected.map(render).join("");
     const context = section.context === "cooling-channel-inputs" ? '<div data-cooling-channel-inputs data-field="cooling_channel_table_json"></div>'
-      : section.context === "cooling-model-inputs" ? renderCoolingModelInputs(inputs) : "";
-    const body=`${section.description?`<p class="fine">${escape(section.description)}</p>`:""}${context}${content}${group.section_notes?renderParameterNotes(selected,inputs):""}`;
+      : section.context === "cooling-model-inputs" ? renderCoolingModelInputs(inputs)
+      : section.context === "preburner-conditions" ? renderPreburnerConditions(preburnerMode(inputs)) : "";
+    const body=`${section.description?`<p class="fine">${escape(section.description)}</p>`:""}${context}${content}${group.section_notes?renderParameterNotes(selected,inputs,group.id):""}`;
     const foldKey=`${group.id}:${section.id}`;
-    const constraintLabels={unset:"未设置",provisional:"设计暂定",documented:"依据已登记"};
-    const status=group.id==="preburner_design"&&section.id==="limits"
-      ? `<span class="parameter-optional-status">${[["ox","富氧"],["fuel","富燃"]].map(([side,label])=>`${label}：${constraintLabels[preburnerStatusValue(`${side}_preburner_temp_limit_status`,inputs[`${side}_preburner_temp_limit_status`])]||"状态无效"}`).join(" · ")}</span>` : "";
     sections.push(section.collapsed
-      ? `<details class="parameter-optional" data-parameter-fold="${escape(foldKey)}" data-parameter-section="${escape(section.id)}"${options.expanded?.has(foldKey)?" open":""}><summary>${escape(section.title)}${status}</summary><div class="parameter-subsection">${body}</div></details>`
+      ? `<details class="parameter-optional" data-parameter-fold="${escape(foldKey)}" data-parameter-section="${escape(section.id)}"${options.expanded?.has(foldKey)?" open":""}><summary>${escape(section.title)}</summary><div class="parameter-subsection">${body}</div></details>`
       : `<section class="parameter-subsection" data-parameter-section="${escape(section.id)}"><h3>${escape(section.title)}</h3>${body}</section>`);
   }
   // Search filtering and future schema additions must never drop an otherwise

@@ -42,9 +42,9 @@ def _mach_from_area_ratio(AR, gamma, supersonic):
                   100.0 if supersonic else 0.999999999)
 
 
-def _bartz_sigma_local(gamma, T_w, T_c, M):
-    half = 1 + (gamma-1)*M*M/2
-    return (0.5*(T_w/T_c)*half+0.5)**(-0.68)*half**(-0.12)
+def _bartz_sigma_local(gamma, T_w, T_c, M, *, total_static_ratio=None):
+    ratio = 1 + (gamma-1)*M*M/2 if total_static_ratio is None else total_static_ratio
+    return (0.5*(T_w/T_c)*ratio+0.5)**(-0.68)*ratio**(-0.12)
 
 
 def _hot_state(cell, *, gamma, T_c, pc, mu_g, cp_g, Pr_g, supplied=None):
@@ -60,7 +60,51 @@ def _hot_state(cell, *, gamma, T_c, pc, mu_g, cp_g, Pr_g, supplied=None):
             raise ValueError(f"invalid hot-side {key}")
     if not math.isfinite(data["M"]) or data["M"] < 0 or data["gamma"] <= 1:
         raise ValueError("invalid hot-side Mach number or gamma")
+    if "total_static_temperature_ratio" in data:
+        ratio = data["total_static_temperature_ratio"]
+        if (not math.isfinite(ratio) or ratio < 1
+                or not math.isclose(ratio, data["T0_K"]/data["T_static_K"], rel_tol=1e-9)):
+            raise ValueError("hot-side total/static temperature ratio conflicts with the supplied state")
     return data
+
+
+def hot_wall_flux(cell, hot, wall_temperature_K, *, mdot_total, r_t, pc,
+                  gas_emissivity, throat_upstream_radius_m, heat_transfer_enabled=True):
+    """Shared Bartz convection and declared grey-gas radiation at a given wall T.
+
+    This function has no cold-side data and makes no cooling-capability claim.
+    Detailed cooling solves wall T; conceptual heating prescribes a reference T.
+    """
+    dt = 2*r_t
+    if not math.isfinite(throat_upstream_radius_m) or throat_upstream_radius_m <= 0:
+        raise ValueError("Bartz requires a positive actual upstream throat curvature radius")
+    curvature_factor = (dt/throat_upstream_radius_m)**0.1
+    hg_base = (0.026/dt**0.2)*(hot["mu_Pas"]**0.2*hot["cp_JkgK"]/hot["Pr"]**0.6)*(mdot_total/(math.pi*r_t*r_t))**0.8*curvature_factor
+    sigma = _bartz_sigma_local(hot["gamma"], wall_temperature_K, hot["T0_K"], hot["M"],
+                              total_static_ratio=hot.get("total_static_temperature_ratio"))
+    hg = hg_base*cell["area_ratio"]**(-0.9)*sigma
+    eps = gas_emissivity*min(hot["p_Pa"]/pc, 1.0)
+    qc = hg*(hot["T_aw_K"]-wall_temperature_K) if heat_transfer_enabled else 0.0
+    qr = eps*_SIGMA_SB*(hot["T_static_K"]**4-wall_temperature_K**4) if heat_transfer_enabled else 0.0
+    return hg, qc, qr
+
+
+def remap_hot_side(hot_side_profile, cells):
+    """Remap an iteration seed only; the final flow is solved on this mesh."""
+    keys = ("T_static_K", "T_aw_K", "T0_K", "p_Pa", "M", "cp_JkgK", "mu_Pas", "Pr", "gamma")
+    source = sorted(hot_side_profile, key=lambda row: row["x_m"])
+    xs = [row["x_m"] for row in source]
+    if not source or any(not math.isfinite(x) for x in xs) or any(a >= b for a,b in zip(xs,xs[1:])):
+        raise ValueError("Invalid physical coordinates for hot-side trial remapping")
+    flags = {"total_static_temperature_ratio" in row for row in source}
+    if len(flags) != 1:
+        raise ValueError("hot-side trial remapping mixes total/static temperature definitions")
+    remapped = [dict(x_m=c["x_m"], **{k: float(np.interp(c["x_m"], xs,
+                [row[k] for row in source])) for k in keys}) for c in cells]
+    if True in flags:
+        for row in remapped:
+            row["total_static_temperature_ratio"] = row["T0_K"]/row["T_static_K"]
+    return remapped
 
 
 def _wall_heat(cell, bulk, hot, *, mdot_coolant, mdot_total, r_t, pc,
@@ -76,14 +120,6 @@ def _wall_heat(cell, bulk, hot, *, mdot_coolant, mdot_total, r_t, pc,
     nu = (1-blend)*4.36 + blend*0.023*re**0.8*pr**0.4
     hc_base = nu*k/cell["D_h_m"]
     enhancement = htc_enhancement if abs(cell["x_m"]-x_throat) < r_t else 1.0
-    dt = 2*r_t
-    if not math.isfinite(throat_upstream_radius_m) or throat_upstream_radius_m <= 0:
-        raise ValueError("Bartz requires a positive actual upstream throat curvature radius")
-    # Effective Bartz curvature = the canonical UPSTREAM contour arc. It is
-    # neither the chamber radius r_c nor the downstream throat arc radius.
-    curvature_factor = (dt/throat_upstream_radius_m)**0.1
-    hg_base = (0.026/dt**0.2)*(hot["mu_Pas"]**0.2*hot["cp_JkgK"]/hot["Pr"]**0.6)*(mdot_total/(math.pi*r_t*r_t))**0.8*curvature_factor
-    eps = gas_emissivity*min(hot["p_Pa"]/pc, 1.0)
     tb = bulk["T_K"]
     def conductivity(t):
         value = float(k_wall_func(t) if k_wall_func is not None else wall_conductivity)
@@ -100,10 +136,9 @@ def _wall_heat(cell, bulk, hot, *, mdot_coolant, mdot_total, r_t, pc,
         from scipy.integrate import quad
         return quad(conductivity, a, b, epsabs=1e-6, epsrel=1e-9)[0]
     def gas_heat(tw):
-        hg = hg_base*cell["area_ratio"]**(-0.9)*_bartz_sigma_local(hot["gamma"], tw, hot["T0_K"], hot["M"])
-        qc = hg*(hot["T_aw_K"]-tw) if heat_transfer_enabled else 0.0
-        qr = eps*_SIGMA_SB*(hot["T_static_K"]**4-tw**4) if heat_transfer_enabled else 0.0
-        return hg, qc, qr
+        return hot_wall_flux(cell, hot, tw, mdot_total=mdot_total, r_t=r_t, pc=pc,
+            gas_emissivity=gas_emissivity, throat_upstream_radius_m=throat_upstream_radius_m,
+            heat_transfer_enabled=heat_transfer_enabled)
     def values(tw):
         tf = .5*(tb+tw)
         kfin = conductivity(tf)
@@ -247,8 +282,14 @@ def march_regen_circuit(*, mdot_coolant, T_in, p_in, mdot_total, pc, T_c, gamma,
         source_x = [row["x_m"] for row in source]
         if not source or any(not math.isfinite(x) for x in source_x) or any(a >= b for a,b in zip(source_x,source_x[1:])):
             raise ValueError("Invalid physical coordinates for hot-side trial remapping")
+        ratio_flags = {"total_static_temperature_ratio" in row for row in source}
+        if len(ratio_flags) != 1:
+            raise ValueError("hot-side trial remapping mixes total/static temperature definitions")
         hot_side_profile = [dict(x_m=cell["x_m"], **{key: float(np.interp(cell["x_m"], source_x,
             [row[key] for row in source])) for key in keys}) for cell in geom["cells"]]
+        if True in ratio_flags:
+            for row in hot_side_profile:
+                row["total_static_temperature_ratio"] = row["T0_K"]/row["T_static_K"]
     if hot_side_profile is not None and len(hot_side_profile) != len(geom["cells"]):
         raise ValueError("hot-side states must align exactly with common geometric cells")
     inlet = state_tp("CH4",T_in,p_in,transport=True)

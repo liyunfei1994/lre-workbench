@@ -20,7 +20,7 @@ V5.3.2 改动（2026-05）：
    · 所有 QSS 样式随选项实时更新。
 5. 流程拓扑图重设计（Raptor 2 风格）：
    · 彩色填充区域区分流体类型。
-   · 各节点显示实际计算压力（bar）和温度（K）。
+   · 各节点显示实际计算压力（MPa）和温度（K）。
    · 新增右侧图例，与 Raptor 2 示意图风格一致。
 
 V5.3 历史改动：
@@ -351,6 +351,7 @@ COMPONENT_HIDE_IF_PRESENT = {
     "turbine_power_W": "turbine_power_MW",
     "heat_load_W": "heat_load_MW",
     "delta_p_Pa": "delta_p_MPa",
+    "delta_p_bar": "delta_p_MPa",
     "dp_ox_Pa": "dp_ox_MPa",
     "dp_fuel_Pa": "dp_fuel_MPa",
     # V5.3.6 新增：预燃室喷注器压降（保留 MPa，隐藏 Pa/bar 重复）
@@ -360,6 +361,18 @@ COMPONENT_HIDE_IF_PRESENT = {
 }
 
 COMPONENT_VALUE_SCALE = {
+    # Legacy result keys retain their stored unit; only the presentation changes.
+    "p_in_bar": 0.1,
+    "p_out_bar": 0.1,
+    "delta_p_bar": 0.1,
+    "injector_dp_bar": 0.1,
+    "tank_pressure_bar": 0.1,
+    "boost_out_pressure_bar": 0.1,
+    "main_pump_inlet_pressure_bar": 0.1,
+    "boost_pump_dp_bar": 0.1,
+    "delta_p_Pa": 1e-6,
+    "injector_dp_Pa": 1e-6,
+    "preburner_pressure_Pa": 1e-6,
     "power_W": 1e-6,
     "turbine_power_W": 1e-6,
     "heat_load_W": 1e-6,
@@ -388,8 +401,8 @@ COMPONENT_SPECIFIC_LABELS = {
     "ox_pump": {
         "p_in_MPa": "泵入口压力 [MPa]",
         "p_out_MPa": "泵出口压力 [MPa]",
-        "p_in_bar": "泵入口压力 [bar]",
-        "p_out_bar": "泵出口压力 [bar]",
+        "p_in_bar": "泵入口压力 [MPa]",
+        "p_out_bar": "泵出口压力 [MPa]",
         "T_in_K": "泵入口温度 [K]",
         "T_out_K": "泵出口温度 [K]",
         "eta": "泵效率 [-]",
@@ -397,8 +410,8 @@ COMPONENT_SPECIFIC_LABELS = {
     "fuel_pump": {
         "p_in_MPa": "泵入口压力 [MPa]",
         "p_out_MPa": "泵出口压力 [MPa]",
-        "p_in_bar": "泵入口压力 [bar]",
-        "p_out_bar": "泵出口压力 [bar]",
+        "p_in_bar": "泵入口压力 [MPa]",
+        "p_out_bar": "泵出口压力 [MPa]",
         "T_in_K": "泵入口温度 [K]",
         "T_out_K": "泵出口温度 [K]",
         "eta": "泵效率 [-]",
@@ -4238,6 +4251,7 @@ class MainWindow(QMainWindow):
         "turb_fuel_disk_material",  "turb_fuel_housing_material",
         # V19：冷却通道沿程分布表（JSON 串，推力室设计工作区维护）
         "cooling_channel_table_json",
+        "cooling_estimate_basis",
         "turb_ox_stage_work_fractions", "turb_fuel_stage_work_fractions",
     }
     # V10：整数字段
@@ -5007,8 +5021,8 @@ class MainWindow(QMainWindow):
             left=0.10, right=0.97, top=0.93, bottom=0.12,
         )
         panels = [
-            (0, 0, "液氧流路 · 压力 [bar]"),
-            (0, 1, "燃料流路 · 压力 [bar]"),
+            (0, 0, "液氧流路 · 压力 [MPa]"),
+            (0, 1, "燃料流路 · 压力 [MPa]"),
             (1, 0, "液氧流路 · 温度 [K]"),
             (1, 1, "燃料流路 · 温度 [K]"),
         ]
@@ -5038,7 +5052,7 @@ class MainWindow(QMainWindow):
                     continue
                 st = states[key]
                 xs.append(i)
-                ps.append(st.pressure / 1e5)
+                ps.append(st.pressure / 1e6)
                 ts.append(st.temperature)
                 lbls.append(lbl)
             return xs, ps, ts, lbls
@@ -5057,7 +5071,7 @@ class MainWindow(QMainWindow):
                 ax.plot(vx, vy, "o-", color=color, lw=2.2, ms=6, zorder=5)
                 for xi, yi in zip(vx, vy):
                     ax.annotate(
-                        f"{yi:.0f}", (xi, yi),
+                        (f"{yi:.3g}" if ylabel == "P [MPa]" else f"{yi:.0f}"), (xi, yi),
                         textcoords="offset points", xytext=(0, 7),
                         ha="center", fontsize=8, color=color, fontweight="bold",
                     )
@@ -5069,15 +5083,15 @@ class MainWindow(QMainWindow):
             ax.tick_params(axis="y", labelsize=8)
             ax.grid(True, alpha=0.25, linestyle="--", color="#CBD5E1")
 
-        _draw_one(self._sf_axes["p_lox"], lox_xs, lox_ps, lox_lbls, LOX_COL, "P [bar]")
-        _draw_one(self._sf_axes["p_ch4"], ch4_xs, ch4_ps, ch4_lbls, CH4_COL, "P [bar]")
+        _draw_one(self._sf_axes["p_lox"], lox_xs, lox_ps, lox_lbls, LOX_COL, "P [MPa]")
+        _draw_one(self._sf_axes["p_ch4"], ch4_xs, ch4_ps, ch4_lbls, CH4_COL, "P [MPa]")
         _draw_one(self._sf_axes["t_lox"], lox_xs, lox_ts, lox_lbls, LOX_COL, "T [K]")
         _draw_one(self._sf_axes["t_ch4"], ch4_xs, ch4_ts, ch4_lbls, CH4_COL, "T [K]")
 
         # Re-apply titles (cla() clears them)
         titles = [
-            ("p_lox", "液氧流路 · 压力 [bar]"),
-            ("p_ch4", "燃料流路 · 压力 [bar]"),
+            ("p_lox", "液氧流路 · 压力 [MPa]"),
+            ("p_ch4", "燃料流路 · 压力 [MPa]"),
             ("t_lox", "液氧流路 · 温度 [K]"),
             ("t_ch4", "燃料流路 · 温度 [K]"),
         ]
@@ -5116,7 +5130,7 @@ class MainWindow(QMainWindow):
         """
         V5.3.6 新增：压降瀑布图。
 
-        每段绘成一个水平条，长度 = 该段压力（bar），颜色编码：
+        每段绘成一个水平条，长度 = 该段压力（MPa），颜色编码：
           ・蓝/橙 = 增压（泵升）
           ・红    = 损失（管路、冷却套、喷注器、阀门、涡轮膨胀）
           ・绿    = 终点（主燃烧室）
@@ -5129,11 +5143,11 @@ class MainWindow(QMainWindow):
 
         st = results.states
 
-        def bar(p):
-            return p / 1e5 if isinstance(p, (int, float)) and not isinstance(p, bool) and math.isfinite(p) else None
+        def mpa(p):
+            return p / 1e6 if isinstance(p, (int, float)) and not isinstance(p, bool) and math.isfinite(p) else None
 
-        def state_bar(key):
-            return bar(getattr(st.get(key), "pressure", None))
+        def state_mpa(key):
+            return mpa(getattr(st.get(key), "pressure", None))
 
         closure = getattr(results, "steady_closure", {}) or {}
         branch_rows = (closure.get("feed_network") or {}).get("branches") or []
@@ -5141,16 +5155,16 @@ class MainWindow(QMainWindow):
         def steps_for(side, branch_id):
             fuel = side == "fuel"
             steps = [
-                ("储箱", state_bar("fuel_tank" if fuel else "lox_tank"), "#94a3b8", "+"),
-                ("主泵入口", state_bar("fuel_pump_inlet" if fuel else "lox_pump_inlet"), "#cbd5e1", "−"),
-                ("主泵出口", state_bar("fuel_after_pump" if fuel else "lox_after_pump"), "#D97706" if fuel else "#2563EB", "+"),
+                ("储箱", state_mpa("fuel_tank" if fuel else "lox_tank"), "#94a3b8", "+"),
+                ("主泵入口", state_mpa("fuel_pump_inlet" if fuel else "lox_pump_inlet"), "#cbd5e1", "−"),
+                ("主泵出口", state_mpa("fuel_after_pump" if fuel else "lox_after_pump"), "#D97706" if fuel else "#2563EB", "+"),
             ]
             if fuel:
-                steps.append(("再生冷却后", state_bar("fuel_after_cooling"), "#10b981", "−"))
+                steps.append(("再生冷却后", state_mpa("fuel_after_cooling"), "#10b981", "−"))
             matches = [row for row in branch_rows if isinstance(row, dict) and row.get("id") == branch_id]
             if len(matches) == 1:
                 row = matches[0]
-                source, line, valve = (bar(row.get(key)) for key in ("source_pressure_Pa", "line_drop_Pa", "valve_drop_Pa"))
+                source, line, valve = (mpa(row.get(key)) for key in ("source_pressure_Pa", "line_drop_Pa", "valve_drop_Pa"))
                 after_line = source - line if None not in (source, line) else None
                 before_injector = after_line - valve if None not in (after_line, valve) else None
                 steps += [("基础管阀后（集总）", after_line, "#fb923c", "−"),
@@ -5160,9 +5174,9 @@ class MainWindow(QMainWindow):
                 # these nodes from a single common loss or from zero defaults.
                 steps.append(("支路压降记录缺失", None, "#fb923c", "−"))
             steps += [
-                ("预燃室喷注器后", state_bar(f"{side}_preburner_outlet"), "#f87171", "−"),
-                ("涡轮排气", state_bar(f"{side}_turbine_exhaust"), "#ef4444", "−"),
-                ("主燃烧室", state_bar("main_chamber"), "#22c55e", "·"),
+                ("预燃室喷注器后", state_mpa(f"{side}_preburner_outlet"), "#f87171", "−"),
+                ("涡轮排气", state_mpa(f"{side}_turbine_exhaust"), "#ef4444", "−"),
+                ("主燃烧室", state_mpa("main_chamber"), "#22c55e", "·"),
             ]
             return steps
 
@@ -5184,7 +5198,7 @@ class MainWindow(QMainWindow):
                               linewidth=0.6, alpha=0.92, height=0.72)
             ax.set_yticks(ypos)
             ax.set_yticklabels(labels, fontsize=8.5)
-            ax.set_xlabel("压力 [bar]", fontsize=9)
+            ax.set_xlabel("压力 [MPa]", fontsize=9)
             ax.tick_params(axis="x", labelsize=8)
             ax.grid(True, axis="x", alpha=0.25, linestyle="--", color="#CBD5E1")
             # V10：右侧留白 1.18 → 1.25，容纳"数值 + 压差"两行标注，避免被坐标轴裁掉
@@ -5198,17 +5212,17 @@ class MainWindow(QMainWindow):
             prev = None
             for i, (lbl, val, col, sign) in enumerate(steps):
                 y = ypos[i]
-                has_delta = (prev is not None and i > 0 and abs(val - prev) > 0.5)
+                has_delta = (prev is not None and i > 0 and abs(val - prev) > 0.05)
                 # 有压差时数值上移半行、给下行压差让位；无压差时垂直居中
                 val_dy = 0.22 if has_delta else 0.0
-                ax.text(val + xmax * 0.012, y + val_dy, f"{val:.1f} bar",
+                ax.text(val + xmax * 0.012, y + val_dy, f"{val:.2f} MPa",
                         va="center", ha="left", fontsize=8, color="#111827",
                         fontweight="bold")
                 if has_delta:
                     diff = val - prev
                     ddot = "▲" if diff > 0 else "▼"
                     dcol = "#16a34a" if diff > 0 else "#dc2626"
-                    ax.text(val + xmax * 0.012, y - 0.24, f"{ddot}{abs(diff):.1f}",
+                    ax.text(val + xmax * 0.012, y - 0.24, f"{ddot}{abs(diff):.2f}",
                             va="center", ha="left", fontsize=7.5,
                             color=dcol, fontweight="bold")
                 prev = val

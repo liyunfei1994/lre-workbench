@@ -41,6 +41,13 @@ class HotStateModel:
         self.summary = calculation['summary']
         self.components = calculation['components']
         self.states = calculation['states']
+        gas_stations = ('main_chamber', 'nozzle_exit', 'ox_preburner_outlet', 'fuel_preburner_outlet',
+                        'ox_turbine_exhaust', 'fuel_turbine_exhaust', 'gg_outlet', 'gg_turbine_exhaust')
+        station_models = [((self.states.get(key) or {}).get('metadata') or {}).get('model') or {}
+                          for key in gas_stations]
+        if (self.inputs.get('gas_eos', 'ideal-gas') != 'ideal-gas'
+                or any(model.get('eos') not in (None, 'ideal-gas') for model in station_models)):
+            raise ValueError('局部固定几何节流与热态瞬态仅支持理想燃气稳态来源。请选择理想气体设计记录。')
         self.gg = self.inputs['cycle_type'] == 'gg'
         self.single = self.gg and self.inputs['gg_layout'] == 'single_shaft'
         self.ambient = self.inputs['ambient_pressure']

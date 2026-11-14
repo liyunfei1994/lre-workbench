@@ -42,12 +42,13 @@ class FixedSteadyContractTests(unittest.TestCase):
         source = source_fixture()
         task = configuration(source)
         self.assertEqual(set(task["operating_conditions"]["boundaries"]),
-                         {"ambient_pressure", "tank_pressure_pa", "fuel_inlet_temp", "ox_inlet_temp"})
+                         {"ambient_pressure", "fuel_tank_pressure_pa", "ox_tank_pressure_pa", "fuel_inlet_temp", "ox_inlet_temp"})
         self.assertEqual(task["hardware"]["payload"]["valves"], {})
         self.assertEqual(task["operating_conditions"]["controls"], {"valve_openings": {}})
         self.assertEqual(task["operating_conditions"]["control_targets"], {})
         assumptions = task["legacy_design_assumptions"]
-        self.assertEqual(set(assumptions), {"inlet_pressure", "feed_line_dp_pa"})
+        self.assertEqual(len(assumptions), 8)
+        self.assertTrue(all(not row["adopted_as_boundary"] for row in assumptions.values()))
         for key, role in (("inlet_pressure", "design_target"), ("feed_line_dp_pa", "model_assumption")):
             self.assertEqual(assumptions[key]["value"], source["result"]["calculation"]["inputs"][key])
             self.assertEqual(assumptions[key]["role"], role)

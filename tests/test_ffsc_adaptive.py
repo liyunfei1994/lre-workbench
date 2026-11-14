@@ -152,7 +152,8 @@ class AdaptivePathTests(unittest.TestCase):
                 ox_preburner_T_combustion_K=self.model.inputs.ox_preburner_temp_target + offset,
                 fuel_preburner_T_combustion_K=self.model.inputs.fuel_preburner_temp_target + offset,
                 ox_preburner_pressure_ratio=2, fuel_preburner_pressure_ratio=2)
-            result.states = {"fuel_after_cooling": SimpleNamespace(temperature=350, enthalpy=-4.7e6, composition={}),
+            result.states = {"branch_fuel_to_opb": SimpleNamespace(temperature=300, enthalpy=-4.8e6, composition={}),
+                             "fuel_after_cooling": SimpleNamespace(temperature=350, enthalpy=-4.7e6, composition={}),
                              "lox_after_pump": SimpleNamespace(temperature=90, enthalpy=-4e5, composition={})}
             return x, result
         with patch.object(self.model, "solve_cycle", side_effect=solve), \

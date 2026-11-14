@@ -43,7 +43,8 @@ class NozzleGeometry:
     nozzle_contour_method: str = "legacy_log_v1"
     angle_source: str = "historical_log_rule_unvalidated"
     coordinate_origin: str = "nozzle_throat"
-    wall_thickness_mm: float = 0.0          # 喷管壁(含再生冷却层)总厚度
+    wall_thickness_mm: float | None = 0.0  # 概略热面模型不提供壁厚
+    geometry_scope: str = "component_geometry"
     inner_surface_area_m2: float = 0.0      # 燃气侧内表面积(用于热流分析)
     throat_axial_position_m: float = 0.0    # 喉部相对于燃烧室入口的轴向位置
     num_contour_points: int = 0             # 离散点数
@@ -57,19 +58,20 @@ class ChamberGeometry:
     length_m: float                  # 圆柱段长度
     volume_m3: float                 # 圆柱段体积
     l_star_m: float                  # 特征长度 L*
-    wall_thickness_mm: float         # 估算壁厚 (总厚度)
+    wall_thickness_mm: float | None  # 概略热面模型不提供壁厚
     contraction_ratio: float
 
     # ── V7.1 新增:CAD 建模必需字段 ──────────────────
     cylindrical_section_length_m: float = 0.0   # 圆柱段净长 (= length_m,显式输出)
-    inner_wall_thickness_mm: float = 0.0        # 内壁(GRCop-84/铜合金)厚度
-    cooling_channel_height_mm: float = 0.0      # 冷却通道径向高度
-    cooling_channel_width_mm: float = 0.0       # 冷却通道周向宽度
-    outer_wall_thickness_mm: float = 0.0        # 外壳(Inconel-718)厚度
-    num_cooling_channels: int = 0               # 再生冷却通道数
+    inner_wall_thickness_mm: float | None = 0.0
+    cooling_channel_height_mm: float | None = 0.0
+    cooling_channel_width_mm: float | None = 0.0
+    outer_wall_thickness_mm: float | None = 0.0
+    num_cooling_channels: int | None = 0
     inner_surface_area_m2: float = 0.0          # 燃气侧总内表面积
     dome_radius_m: float = 0.0                  # 喷注端 dome 半径(等于 rc 时为平 dome)
     chamber_to_convergent_blend_radius_m: float = 0.0  # 圆柱段到收缩段过渡圆弧
+    geometry_scope: str = "component_geometry"
 
 
 @dataclass

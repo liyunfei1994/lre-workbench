@@ -66,7 +66,8 @@ function workflowMarkup(design) {
 
 /** A reviewable parameter sheet, not an automatically importable CFturbo project. */
 export function buildPumpHandoffCsv(handoff,source={}) {
-  if(!handoff || !["partial"].includes(handoff.status))return "";
+  if(!handoff || handoff.export_allowed===false || !["partial"].includes(handoff.status))return "";
+  if(!sourceIdentityMatches(source,handoff.source))return "";
   const cell=value=>{
     if(finite(value))return String(value);
     let text=typeof value==="string"?value:"";
@@ -76,6 +77,7 @@ export function buildPumpHandoffCsv(handoff,source={}) {
   const rows=[["record_id","group","parameter_id","parameter","value","unit","status","source","cfturbo_target","note"]];
   const groups=[...list(handoff.groups),...list(handoff.components).map(c=>({id:c.id,title:c.label,fields:c.fields}))];
   for(const group of groups)for(const field of list(group?.fields))rows.push([String(source?.record_id || ""),group.title || group.id,field?.id,field?.label,scalar(field?.value),field?.unit,fieldState(field),field?.source,field?.target,field?.note]);
+  if(source?.project_id)for(let i=0;i<rows.length;i++)rows[i].push(...(i===0?["project_id","revision","mode"]:[source.project_id,source.revision,source.mode]));
   return rows.map(row=>row.map(cell).join(",")).join("\r\n")+"\r\n";
 }
 
@@ -107,11 +109,13 @@ export function buildPumpSvg(pump) {
 }
 
 export function buildPumpCsv(pump) {
+  if(pump?.export_allowed===false)return "";
   const data=inspectPumpGeometry(pump); if (!data.valid) return "";
   return "boundary,point_index,z_m,r_m\r\n"+["hub","shroud"].flatMap(key=>data[key].map(([z,r],i)=>`${key},${i},${z},${r}`)).join("\r\n")+"\r\n";
 }
 
 export function buildPumpDxf(pump) {
+  if(pump?.export_allowed===false)return "";
   const data=inspectPumpGeometry(pump); if (!data.valid) return "";
   const lines=[0,"SECTION",2,"HEADER",9,"$ACADVER",1,"AC1015",9,"$INSUNITS",70,6,9,"$MEASUREMENT",70,1,0,"ENDSEC",0,"SECTION",2,"ENTITIES"];
   for (const key of ["hub","shroud"]) {lines.push(0,"LWPOLYLINE",100,"AcDbEntity",8,key.toUpperCase(),100,"AcDbPolyline",90,data[key].length,70,0); for (const [z,r] of data[key]) lines.push(10,z,20,r);}
@@ -119,6 +123,7 @@ export function buildPumpDxf(pump) {
 }
 
 export function buildPumpPointTxt(pump,boundary) {
+  if(pump?.export_allowed===false)return "";
   const data=inspectPumpGeometry(pump); if (!data.valid || !["hub","shroud"].includes(boundary)) return "";
   return data[boundary].map(([z,r])=>`${z}\t${r}`).join("\r\n")+"\r\n";
 }
@@ -139,6 +144,7 @@ export function buildPumpMesh(pump, segments=40, cutaway=false) {
 }
 
 export function buildPumpObj(pump) {
+  if(pump?.export_allowed===false)return "";
   const mesh=buildPumpMesh(pump); if (!mesh.vertices.length) return "";
   const lines=["# Preliminary representative-stage hydraulic flow boundary; units: m", "# Cartesian coordinates: x=r*cos(theta), y=r*sin(theta), z=axial", "# Open surfaces only. No blades, wall thickness, inducer, volute or solid body."];
   mesh.vertices.forEach(p=>lines.push(`v ${p.join(" ")}`));let boundary=null;
@@ -146,23 +152,81 @@ export function buildPumpObj(pump) {
   return lines.join("\n")+"\n";
 }
 
-export function buildPumpJson(pump, source={}, handoff=null) {
-  if(handoff && handoff.status!=="partial")return "";
-  return JSON.stringify({schema_version:1,kind:"preliminary_pump_geometry_exchange",source,pump,...(handoff?{design_handoff:handoff}:{}),exchange:{length_unit:"m",drawing_dimension_unit:"mm",coordinate_origin:"impeller_eye_inlet",rotation_axis:"z",csv:"boundary,point_index,z_m,r_m",txt:"separate hub/shroud files; no header; two columns z_m r_m",dxf:"X=z, Y=r, Z=0; INSUNITS=6 (metres); two open meridional polylines",obj:"X=r*cos(theta), Y=r*sin(theta), Z=z; open hub/shroud surfaces",usage:"CFTurbo: manually enter design point and dimensions. NX/UG: import reference curves or surface mesh after checking units. Not a proprietary project file, blade design or manufacturing solid."}},null,2)+"\n";
+export function buildPumpJson(pump, source={}, handoff=null, traceability=null) {
+  if(pump?.export_allowed===false || handoff?.export_allowed===false || traceability?.status==="conflict" || !inspectPumpGeometry(pump).valid || (handoff && handoff.status!=="partial"))return "";
+  if(!sourceIdentityMatches(source,pump?.source,handoff?.source,traceability?.source))return "";
+  return JSON.stringify({schema_version:1,kind:"preliminary_pump_geometry_exchange",source,pump,...(traceability?{traceability}:{}),...(handoff?{design_handoff:handoff}:{}),exchange:{length_unit:"m",drawing_dimension_unit:"mm",coordinate_origin:"impeller_eye_inlet",rotation_axis:"z",csv:"boundary,point_index,z_m,r_m",txt:"separate hub/shroud files; no header; two columns z_m r_m",dxf:"X=z, Y=r, Z=0; INSUNITS=6 (metres); two open meridional polylines",obj:"X=r*cos(theta), Y=r*sin(theta), Z=z; open hub/shroud surfaces",usage:"CFTurbo: manually enter design point and dimensions. NX/UG: import reference curves or surface mesh after checking units. Not a proprietary project file, blade design or manufacturing solid."}},null,2)+"\n";
+}
+
+const SOURCE_KEYS=["project_id","revision","record_id","mode"];
+const EXPORT_FORMATS=["csv","dxf","obj","json","hub-txt","shroud-txt","handoff-csv"];
+const identityValue=value=>value!==undefined && value!==null && value!=="";
+function sourceIdentityMatches(...sources) {
+  return SOURCE_KEYS.every(key=>{
+    const values=sources.map(source=>source?.[key]).filter(identityValue);
+    return values.every(value=>value===values[0]);
+  });
+}
+
+/** Enforce identity even if a disabled button is triggered programmatically. */
+export function canExportPump(model,side,extension) {
+  if(!sides.includes(side) || !EXPORT_FORMATS.includes(extension))return false;
+  const pump=model?.pumps?.[side],trace=model?.traceability,handoff=model?.design_handoff?.pumps?.[side];
+  if(pump?.export_allowed===false || trace?.status==="conflict" || handoff?.status==="conflict" || handoff?.export_allowed===false)return false;
+  if(!sourceIdentityMatches(model?.source,pump?.source,trace?.source,handoff?.source))return false;
+  if(trace?.geometry_sha256?.[side] && trace.geometry_sha256[side]!==pump?.geometry_sha256)return false;
+  if(extension==="handoff-csv")return handoff?.status==="partial";
+  if(extension==="json" && handoff && handoff.status!=="partial")return false;
+  return inspectPumpGeometry(pump).valid;
 }
 
 export function pumpExportFilename(model,side,extension) {
-  const key=sides.includes(side)?side:"unknown",record=String(model?.source?.record_id || model?.pumps?.[key]?.source?.record_id || "unrecorded").replace(/[^a-zA-Z0-9_-]/g,"_").slice(0,80);
-  if (extension==="handoff-csv") return `pump-${key}-${record}-cfturbo-parameters.csv`;
-  if (["hub-txt","shroud-txt"].includes(extension)) return `pump-${key}-${record}-${extension.slice(0,-4)}.txt`;
-  return `pump-${key}-${record}.${["csv","dxf","obj","json"].includes(extension)?extension:"txt"}`;
+  const safe=value=>String(value).replace(/[^a-zA-Z0-9_-]/g,"_").slice(0,80);
+  const key=sides.includes(side)?side:"unknown",source=model?.source || {},record=safe(source.record_id || model?.pumps?.[key]?.source?.record_id || "unrecorded");
+  const context=source.project_id?`${safe(source.project_id)}-v${safe(source.revision ?? "unknown")}-${record}`:record;
+  const base=`pump-${key}-${context}`;
+  if(extension==="handoff-csv")return `${base}-cfturbo-parameters.csv`;
+  if(["hub-txt","shroud-txt"].includes(extension))return `${base}-${extension.slice(0,-4)}.txt`;
+  return `${base}.${["csv","dxf","obj","json"].includes(extension)?extension:"txt"}`;
 }
 
-function renderPump(pump,side,handoff,design) {
-  const data=inspectPumpGeometry(pump),notes=list(pump?.notes),checks=list(pump?.checks),blocked=handoff?.status==="conflict";
+/** Hash the exact downloaded bytes, including the parameter CSV BOM. */
+export async function buildPumpExport(model,side,extension,crypto=globalThis.crypto) {
+  if(!canExportPump(model,side,extension))return null;
+  // Freeze before awaiting: switching projects cannot relabel pending bytes.
+  const snapshot=JSON.parse(JSON.stringify(model)),pump=snapshot.pumps[side],source=snapshot.source || {},handoff=snapshot.design_handoff?.pumps?.[side];
+  const trace=snapshot.traceability || {status:"legacy",source,issues:["旧记录未保存完整设计追溯证据。"]};
+  let text={csv:buildPumpCsv,dxf:buildPumpDxf,obj:buildPumpObj,json:p=>buildPumpJson(p,source,handoff,trace),"hub-txt":p=>buildPumpPointTxt(p,"hub"),"shroud-txt":p=>buildPumpPointTxt(p,"shroud"),"handoff-csv":()=>"\uFEFF"+buildPumpHandoffCsv(handoff,source)}[extension](pump);
+  if(!text)return null;
+  const identity=JSON.stringify({source,pump_side:side,geometry_sha256:pump.geometry_sha256});
+  if(extension==="dxf")text=`999\r\n${identity}\r\n`+text;
+  if(extension==="obj")text=`# ${identity}\n`+text;
+  if(!crypto?.subtle)throw new Error("当前浏览器无法生成文件校验值，请通过 localhost 或 HTTPS 打开工作台后导出。");
+  const bytes=new TextEncoder().encode(text),digest=await crypto.subtle.digest("SHA-256",bytes);
+  const filename=pumpExportFilename(snapshot,side,extension);
+  const manifest={schema_version:1,kind:"pump_export_traceability",source,pump_side:side,traceability:trace,
+    geometry_sha256:pump.geometry_sha256 || null,method_id:pump.assumptions?.method_id || null,
+    design_point:pump.design_point,assumptions:pump.assumptions,dimensions:pump.dimensions,
+    exchange:{length_unit:"m",coordinate_origin:"impeller_eye_inlet",rotation_axis:"z",meridional_columns:["z_m","r_m"],dxf_axes:"X=z, Y=r, Z=0",obj_axes:"X=r*cos(theta), Y=r*sin(theta), Z=z",scope:"representative-stage flow boundaries; no blades or manufacturing solid"},
+    artifact:{filename,format:extension,encoding:"UTF-8",size_bytes:bytes.byteLength,sha256:Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,"0")).join("")}};
+  return {filename,text,type:extension==="json"?"application/json":extension==="handoff-csv"?"text/csv;charset=utf-8":"text/plain;charset=utf-8",
+    manifestFilename:filename+".trace.json",manifestText:JSON.stringify(manifest,null,2)+"\n"};
+}
+
+function traceabilityMarkup(model) {
+  const source=model?.source || {},trace=model?.traceability,status=["verified","legacy","conflict"].includes(trace?.status)?trace.status:"legacy";
+  const statusLabel={verified:"来源一致",legacy:"历史记录 · 追溯信息不完整",conflict:"来源冲突 · 暂停导出"}[status];
+  const fields=[["方案",source.project_id || "未记录"],["输入版本",identityValue(source.revision)?`v${source.revision}`:"未记录"],["稳态记录",source.record_id || "未记录"],["求解类型",source.mode==="concept_design"?"概念设计点":source.mode || "未记录"]];
+  const hashes=[["概念输入",trace?.submitted_inputs_sha256],["求解输入",trace?.calculation_inputs_sha256],["泵求解输出",trace?.pump_outputs_sha256]];
+  const steady=trace?.steady || {},gates=list(steady.gates);
+  return `<section class="pg-trace pg-trace-${status}" aria-label="方案级设计追溯"><div class="pg-trace-heading"><strong>概念输入 → 稳态设计点 → 泵子午面 → CAD 交接</strong><span>${statusLabel}</span></div><dl>${fields.map(([label,value])=>`<div><dt>${label}</dt><dd>${escape(value)}</dd></div>`).join("")}</dl>${status==="legacy"?'<p>此记录未保存完整来源证据；导出说明将保留缺项，不补用当前草稿。</p>':""}${list(trace?.issues).length?`<ul>${trace.issues.map(issue=>`<li>${escape(issue)}</li>`).join("")}</ul>`:""}<details><summary>输入与求解证据</summary><p>稳态状态：${escape(steady.status || "未记录")}；工程校核：${escape(steady.validation_status || "未记录")}。来源一致性不代表部件性能验证通过。</p>${gates.length?`<ul>${gates.map(gate=>`<li>${escape(gate.label || gate.id)}：${escape(gate.status || "未记录")}</li>`).join("")}</ul>`:""}<dl class="pg-trace-hashes">${hashes.map(([label,value])=>`<div><dt>${label}</dt><dd><code>${escape(value || "未保存")}</code></dd></div>`).join("")}</dl></details><p>每次导出附带同名 .trace.json，记录输入快照、求解证据、几何标识与文件校验值；请成对保留。</p></section>`;
+}
+
+function renderPump(pump,side,handoff,design,model) {
+  const data=inspectPumpGeometry(pump),notes=list(pump?.notes),checks=list(pump?.checks),blocked=pump?.export_allowed===false || model?.traceability?.status==="conflict" || handoff?.status==="conflict" || !canExportPump(model,side,"csv") && data.valid;
   const checkLabel=status=>({pass:"一致性检查通过",not_evaluated:"尚未评估",warning:"需要复核",fail:"未通过"}[status] || "状态未记录");
   const visual=data.valid?`<div class="pg-views" role="group" aria-label="几何视图"><button type="button" data-pg-view="2d" aria-pressed="true">二维子午面</button><button type="button" data-pg-view="3d" aria-pressed="false">三维流道边界</button><span>等比例 · 代表级</span></div><div class="pg-viewport" data-pg-panel="2d">${buildPumpSvg(pump)}</div><div class="pg-viewport pg-three" data-pg-panel="3d" hidden><canvas data-pg-canvas tabindex="0" aria-label="泵轮毂与轮盖三维流道边界，拖动或方向键旋转，滚轮或加减键缩放，Home 键复位"></canvas><div class="pg-three-controls"><span>拖动旋转 · 滚轮缩放</span><button type="button" data-pg-cutaway aria-pressed="true">剖开 ¼</button><button type="button" data-pg-wireframe aria-pressed="false">线框</button><button type="button" data-pg-zoom="in" aria-label="放大三维视图">＋</button><button type="button" data-pg-zoom="out" aria-label="缩小三维视图">−</button><button type="button" data-pg-reset>复位视角</button></div><p class="pg-error" data-pg-canvas-error hidden>三维画布不可用，仍可查看二维剖面和导出坐标。</p></div>`:`<p class="pg-unavailable">${escape(data.reason)}</p><p class="pg-muted">保留已知系统设计点；缺少的假设和坐标不会由前端默认值补齐。</p>`;
-  const exports=data.valid?`<div class="pg-exports">${["csv","dxf","obj","json","hub-txt","shroud-txt"].map(ext=>`<button type="button" data-pg-export="${ext}"${ext==="json"&&handoff&&handoff.status!=="partial"?" disabled":""}>${({csv:"坐标 CSV",dxf:"二维 DXF",obj:"三维 OBJ",json:"尺寸与设计点 JSON","hub-txt":"轮毂 TXT","shroud-txt":"轮盖 TXT"})[ext]}</button>`).join("")}</div>`:"";
+  const exports=data.valid?`<div class="pg-exports">${["csv","dxf","obj","json","hub-txt","shroud-txt"].map(ext=>`<button type="button" data-pg-export="${ext}"${!canExportPump(model,side,ext)?" disabled":""}>${({csv:"坐标 CSV",dxf:"二维 DXF",obj:"三维 OBJ",json:"尺寸与设计点 JSON","hub-txt":"轮毂 TXT","shroud-txt":"轮盖 TXT"})[ext]}</button>`).join("")}</div>`:"";
   const point=pump?.design_point || {},metrics=[["入口体积流量 Q",finite(point.volume_flow_m3_s)?point.volume_flow_m3_s*1000:null,"L/s"],["参考总扬程 H",point.total_head_m,"m"],["轴转速 n",point.shaft_speed_rpm,"rpm"],["设定主泵级数",point.stages,"级"]];
   const componentChain=list(handoff?.components).length?`<div class="pg-component-chain" aria-label="部件建模任务顺序">${handoff.components.map(component=>`<div><span>${escape(component?.label || component?.id)}</span><small>${FIELD_STATES[fieldState(component)]}</small></div>`).join("")}</div>`:"";
   return `<article class="pg-pump" data-pg-pump="${side}"${side==="fuel"?" hidden":""}>
@@ -170,7 +234,7 @@ function renderPump(pump,side,handoff,design) {
     <div class="pg-metrics">${metrics.map(([label,value,unit])=>`<div><span>${label}</span><strong>${number(value)} <small>${unit}</small></strong></div>`).join("")}</div>
     ${handoff?.summary?`<p class="pg-handoff-summary">${escape(handoff.summary)}</p>`:""}
     ${componentChain}
-    <div class="pg-workspace"><div class="pg-model">${visual}<p class="pg-scope">本图表示叶轮流道的轮毂与轮盖边界，未设计叶片、诱导轮、扩压器、蜗壳及实体壁厚。多级泵显示等扬程假设下的一个代表级，轴向长度不等于整泵总长。</p></div><aside class="pg-inspector"><h4>代表级主尺寸 <span>mm</span></h4><dl class="pg-data">${rows(pump?.dimensions,DIMENSIONS)}</dl><h4>坐标与设计记录交接</h4>${exports}<p class="pg-muted">坐标采用 m；子午面为 z / r，旋转轴为 z。所有格式使用本条记录的同一组坐标。</p>${handoff?`<button type="button" class="pg-handoff-export" data-pg-export="handoff-csv"${handoff.status!=="partial"?" disabled":""}>CFturbo 参数 CSV</button><p class="pg-muted">含设计点、单位、来源和待设计项；供逐项录入与核对。</p>`:""}</aside></div>
+    <div class="pg-workspace"><div class="pg-model">${visual}<p class="pg-scope">本图表示叶轮流道的轮毂与轮盖边界，未设计叶片、诱导轮、扩压器、蜗壳及实体壁厚。多级泵显示等扬程假设下的一个代表级，轴向长度不等于整泵总长。</p></div><aside class="pg-inspector"><h4>代表级主尺寸 <span>mm</span></h4><dl class="pg-data">${rows(pump?.dimensions,DIMENSIONS)}</dl><h4>坐标与设计记录交接</h4>${exports}<p class="pg-muted">坐标采用 m；子午面为 z / r，旋转轴为 z。所有格式使用本条记录的同一组坐标。</p>${handoff?`<button type="button" class="pg-handoff-export" data-pg-export="handoff-csv"${!canExportPump(model,side,"handoff-csv")?" disabled":""}>CFturbo 参数 CSV</button><p class="pg-muted">含设计点、单位、来源和待设计项；供逐项录入与核对。</p>`:""}<p class="pg-export-status" data-pg-download-status role="status" aria-live="polite"></p></aside></div>
     <div class="pg-section-tabs" role="group" aria-label="泵设计资料"><button type="button" data-pg-tab="parameters" aria-pressed="true">设计点与 CFturbo 参数</button><button type="button" data-pg-tab="components" aria-pressed="false">部件与叶片设计</button><button type="button" data-pg-tab="method" aria-pressed="false">方法与依据</button></div>
     <section data-pg-section="parameters"><h4>本记录的系统设计点</h4>${handoff?handoffGroups(handoff):`<dl class="pg-data">${rows(point,DESIGN)}</dl><p class="pg-muted">本记录未生成 CFturbo 参数交接清单。这里只展示已保存的系统量。</p>`}<p class="pg-muted">${escape(point.head_scope || "参考扬程 H = Δp / (ρ入口g)，未计进出口速度头修正；用于代表级概念定尺寸。")}</p></section>
     <section data-pg-section="components" hidden>${componentMarkup(handoff)}${list(handoff?.missing).length?`<details class="pg-parameter-group"><summary>待补充的设计条件<span>${handoff.missing.length} 项</span></summary><ul class="pg-notes">${handoff.missing.map(item=>`<li>${escape(item)}</li>`).join("")}</ul></details>`:""}</section>
@@ -180,7 +244,7 @@ function renderPump(pump,side,handoff,design) {
 
 export function renderPumpGeometry(model) {
   const source=model?.source || {},design=model?.design_handoff;
-  return `<section class="pump-geometry" data-pump-geometry><div class="pg-title"><div><span class="pg-eyebrow">PUMP DESIGN / CFTURBO HANDOFF</span><h2>泵设计与建模交接</h2><p>循环设计点 · 部件设计条件 · 代表级子午面与坐标</p></div><code>${escape(source.record_id || "未指定记录")}</code></div><div class="pg-select" role="group" aria-label="泵选择">${sides.map(side=>`<button type="button" data-pg-side="${side}" aria-pressed="${side==="ox"}">${escape(model?.pumps?.[side]?.label || (side==="ox"?"液氧泵":"甲烷泵"))}</button>`).join("")}</div>${sides.map(side=>renderPump(model?.pumps?.[side],side,design?.pumps?.[side],design)).join("")}</section>`;
+  return `<section class="pump-geometry" data-pump-geometry><div class="pg-title"><div><span class="pg-eyebrow">PUMP DESIGN / CFTURBO HANDOFF</span><h2>泵设计与建模交接</h2><p>循环设计点 · 部件设计条件 · 代表级子午面与坐标</p></div><code>${escape(source.record_id || "未指定记录")}</code></div>${traceabilityMarkup(model)}<div class="pg-select" role="group" aria-label="泵选择">${sides.map(side=>`<button type="button" data-pg-side="${side}" aria-pressed="${side==="ox"}">${escape(model?.pumps?.[side]?.label || (side==="ox"?"液氧泵":"甲烷泵"))}</button>`).join("")}</div>${sides.map(side=>renderPump(model?.pumps?.[side],side,design?.pumps?.[side],design,model)).join("")}</section>`;
 }
 
 function saveFile(text,type,name,doc) {
@@ -194,9 +258,22 @@ export function mountPumpGeometry(container,model) {
   for (const side of sides) {
     const pump=model?.pumps?.[side],data=inspectPumpGeometry(pump),panel=root.querySelector(`[data-pg-pump="${side}"]`);if(!panel) continue;
     const handoff=model?.design_handoff?.pumps?.[side];
-    listen(panel,"click",event=>{const button=event.target?.closest?.("button");if(!button||!panel.contains(button))return;
+    listen(panel,"click",async event=>{const button=event.target?.closest?.("button");if(!button||!panel.contains(button))return;
       if(["parameters","components","method"].includes(button.dataset.pgTab)){for(const tab of panel.querySelectorAll("[data-pg-tab]"))tab.setAttribute("aria-pressed",String(tab.dataset.pgTab===button.dataset.pgTab));for(const section of panel.querySelectorAll("[data-pg-section]"))section.hidden=section.dataset.pgSection!==button.dataset.pgTab;}
-      if(button.dataset.pgExport==="handoff-csv"){const text=buildPumpHandoffCsv(handoff,model?.source);if(text)saveFile("\uFEFF"+text,"text/csv;charset=utf-8",pumpExportFilename(model,side,"handoff-csv"),root.ownerDocument);}
+      const extension=button.dataset.pgExport;
+      if(EXPORT_FORMATS.includes(extension)){
+        if(disposed || button.disabled || !canExportPump(model,side,extension))return;
+        const status=panel.querySelector("[data-pg-download-status]");button.disabled=true;
+        if(status)status.textContent="正在生成导出文件与追溯说明…";
+        try{
+          const bundle=await buildPumpExport(model,side,extension,win.crypto);
+          if(disposed || !bundle || !canExportPump(model,side,extension))return;
+          saveFile(bundle.text,bundle.type,bundle.filename,root.ownerDocument);
+          saveFile(bundle.manifestText,"application/json",bundle.manifestFilename,root.ownerDocument);
+          if(status)status.textContent="已生成数据文件和 .trace.json 追溯说明。若浏览器拦截多个下载，请允许此站点下载后重试。";
+        }catch(error){if(!disposed && status)status.textContent="导出失败："+(error?.message || "无法生成追溯说明，请重试。");}
+        finally{if(!disposed)button.disabled=!canExportPump(model,side,extension);}
+      }
     });
     if(!data.valid) continue;
     const canvas=panel.querySelector("[data-pg-canvas]");let ctx=null;try{ctx=canvas?.getContext?.("2d");}catch{}
@@ -213,7 +290,7 @@ export function mountPumpGeometry(container,model) {
     const setZoom=factor=>{zoom=Math.max(.4,Math.min(3,zoom*factor));schedule();};
     listen(panel,"click",event=>{const button=event.target?.closest?.("button");if(!button||!panel.contains(button))return;
       if(["2d","3d"].includes(button.dataset.pgView)){for(const tab of panel.querySelectorAll("[data-pg-view]"))tab.setAttribute("aria-pressed",String(tab.dataset.pgView===button.dataset.pgView));for(const p of panel.querySelectorAll("[data-pg-panel]"))p.hidden=p.dataset.pgPanel!==button.dataset.pgView;schedule();}
-      const ext=button.dataset.pgExport;if(["csv","dxf","obj","json","hub-txt","shroud-txt"].includes(ext)){const text={csv:buildPumpCsv,dxf:buildPumpDxf,obj:buildPumpObj,json:p=>buildPumpJson(p,model?.source,handoff),"hub-txt":p=>buildPumpPointTxt(p,"hub"),"shroud-txt":p=>buildPumpPointTxt(p,"shroud")}[ext](pump);if(text)saveFile(text,ext==="json"?"application/json":"text/plain;charset=utf-8",pumpExportFilename(model,side,ext),root.ownerDocument);}
+
       if(button.hasAttribute("data-pg-cutaway")){cutaway=!cutaway;button.setAttribute("aria-pressed",String(cutaway));mesh=buildPumpMesh(pump,36,cutaway);schedule();}
       if(button.hasAttribute("data-pg-wireframe")){wireframe=!wireframe;button.setAttribute("aria-pressed",String(wireframe));schedule();}
       if(button.dataset.pgZoom)setZoom(button.dataset.pgZoom==="in"?1.15:1/1.15);if(button.hasAttribute("data-pg-reset")){yaw=.65;pitch=-.25;zoom=1;schedule();}

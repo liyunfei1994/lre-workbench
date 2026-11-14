@@ -47,9 +47,10 @@ class PressureBudgetConsumerTests(unittest.TestCase):
         for axis, key, position in (("lox", "ox_to_opb", 3), ("ch4", "fuel_to_fpb", 4)):
             values = window._wf_axes[axis].barh.call_args.args[1]
             branch = branches[key]
-            after_line = (branch["source_pressure_Pa"] - branch["line_drop_Pa"]) / 1e5
+            window._wf_axes[axis].set_xlabel.assert_called_once_with("压力 [MPa]", fontsize=9)
+            after_line = (branch["source_pressure_Pa"] - branch["line_drop_Pa"]) / 1e6
             self.assertAlmostEqual(values[position], after_line)
-            self.assertAlmostEqual(values[position + 1], after_line - branch["valve_drop_Pa"] / 1e5)
+            self.assertAlmostEqual(values[position + 1], after_line - branch["valve_drop_Pa"] / 1e6)
 
     def test_missing_branch_loss_is_unavailable_not_zero_or_a_reused_common_value(self):
         result, window = self.fixture()

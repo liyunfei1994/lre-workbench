@@ -17,12 +17,14 @@ from __future__ import annotations
 
 from lre_workbench.domain.models import ComponentResult, FlowState, ValidationError, _check_range
 from lre_workbench.properties.thermochemistry import chamber_equilibrium, gas_flow_metadata, validate_gas_streams
+from lre_workbench.properties.datasets import gas_eos_scope, active_gas_eos, active_gas_species_policy
 
 
 class MainChamber:
     def __init__(self, pressure: float, mdot_total: float, gamma: float,
                  molar_mass: float, chamber_temp_guess: float,
-                 combustion_efficiency: float = 1.0, heat_loss_W: float = 0.0):
+                 combustion_efficiency: float = 1.0, heat_loss_W: float = 0.0,
+                 gas_eos_override: str | None = None):
         _check_range("MainChamber.pressure（燃烧室压力）",
                      pressure, lo=0, lo_inclusive=False)
         _check_range("MainChamber.mdot_total（总质量流量）",
@@ -45,8 +47,13 @@ class MainChamber:
         _check_range("MainChamber.heat_loss_W", heat_loss_W, lo=0)
         self.heat_loss_W = heat_loss_W
         self.gas_state = None   # evaluate() 后由 cycle.py 传给 Nozzle
+        self.gas_eos_override = gas_eos_override
 
     def evaluate(self, ox_stream: FlowState, fuel_stream: FlowState) -> tuple[FlowState, ComponentResult]:
+        with gas_eos_scope(self.gas_eos_override or active_gas_eos(), active_gas_species_policy()):
+            return self._evaluate(ox_stream, fuel_stream)
+
+    def _evaluate(self, ox_stream: FlowState, fuel_stream: FlowState) -> tuple[FlowState, ComponentResult]:
         """
         计算主燃烧室平衡状态。
 
@@ -58,7 +65,8 @@ class MainChamber:
         经验模式：
             · 焓混合 + 温度猜测（与 V3 一致）
         """
-        handoff = validate_gas_streams([ox_stream, fuel_stream], expected_mass_flow=self.mdot_total)
+        handoff = validate_gas_streams([ox_stream, fuel_stream], expected_mass_flow=self.mdot_total,
+                                      allow_eos_transition=self.gas_eos_override is not None)
         # 热端冷却抽热与可选历史温升折减分别记账。
         energy_diagnostics = {}
         chamber_gas = chamber_equilibrium(
@@ -110,6 +118,7 @@ class MainChamber:
             metadata={
                 **gas_flow_metadata(chamber_gas),
                 "inlet_handoff_status": handoff["status"],
+                "eos_transition": handoff.get("eos_transition"),
                 "gamma":        gamma_calc,
                 "molar_mass":   mw_calc,
                 "cp":           chamber_gas.cp,

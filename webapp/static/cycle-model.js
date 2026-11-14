@@ -14,6 +14,30 @@ const CONTRACTS = {
     edges: [["lox_tank","ox_pump"],["fuel_tank","fuel_pump"],["fuel_pump","fuel_cooling"],["ox_pump","ox_preburner"],["ox_pump","fuel_preburner"],["fuel_cooling","ox_preburner"],["fuel_cooling","fuel_preburner"],["ox_preburner","main_chamber"],["fuel_preburner","main_chamber"],["main_chamber","nozzle"]],
   },
 };
+const VALVE_TOPOLOGIES=["paper_split_before_cooling_v1","all_fuel_cooled_then_split_valves_v1"];
+/** Only saved, registered installation identities may select a physical layout. */
+export function savedValveTopology(inputs) {
+  const raw=inputs?.valve_configuration_json;
+  if(raw===undefined||raw===null||raw==="")return null;
+  let config;try{config=JSON.parse(raw);}catch{return "unrecognized";}
+  if(config?.schema_version===1&&config.enabled===false&&Object.keys(config).sort().join()==="enabled,schema_version")return null;
+  if(config?.schema_version!==1||config.enabled!==true||!VALVE_TOPOLOGIES.includes(config.topology_id))return "unrecognized";
+  const expected={MFV:["CH4","fuel_after_pump","cooling_inlet"],
+    OPFV:["CH4",config.topology_id==="paper_split_before_cooling_v1"?"fuel_after_pump":"fuel_after_cooling","opfv_outlet"],
+    FPOV:["O2","lox_after_pump","fpov_outlet"]};
+  if(Object.keys(object(config.valves)).sort().join()!=="FPOV,MFV,OPFV"||Object.entries(expected).some(([id,ports])=>{
+    const valve=config.valves[id];return valve?.id!==id||["fluid","upstream_node","downstream_node"].some((key,index)=>valve[key]!==ports[index]);
+  }))return "unrecognized";
+  return config.topology_id;
+}
+function valveContract(topology) {
+  const removed=new Set(["fuel_pump>fuel_cooling","fuel_cooling>ox_preburner","ox_pump>fuel_preburner"]);
+  return {nodes:[...CONTRACTS.ffsc.nodes,"MFV","OPFV","FPOV"],
+    edges:[...CONTRACTS.ffsc.edges.filter(([a,b])=>!removed.has(`${a}>${b}`)),
+      ["fuel_pump","MFV"],["MFV","fuel_cooling"],
+      [topology==="paper_split_before_cooling_v1"?"fuel_pump":"fuel_cooling","OPFV"],["OPFV","ox_preburner"],
+      ["ox_pump","FPOV"],["FPOV","fuel_preburner"]]};
+}
 const FLOW_IDS = {
   lox_tank:["lox_tank"],fuel_tank:["fuel_tank"],
   ox_pump:["lox_pump_inlet","lox_after_pump"],fuel_pump:["fuel_pump_inlet","fuel_after_pump"],
@@ -71,7 +95,9 @@ export function buildCycleModel(result, flow = {}, components = []) {
   const label=text=>fuel.name==="煤油" ? text.replace(/甲烷|燃料/g,"煤油").replace(/CH4|CH₄/g,"C₁₂H₂₆") : text.replace(/燃料/g,fuel.name);
   const notes=["流路与机械轴分别表示介质连接和动力传递；图形不表示实际几何、尺寸或设备布置。"];
   const savedKind=typeof inputs.cycle_type==="string"?inputs.cycle_type:null;
-  const kind=matches(originalNodes,originalEdges,CONTRACTS.ffsc) && (!savedKind || savedKind==='ffsc') ? 'ffsc' : 'generic';
+  const valveTopology=savedValveTopology(inputs);
+  const contract=VALVE_TOPOLOGIES.includes(valveTopology)?valveContract(valveTopology):CONTRACTS.ffsc;
+  const kind=valveTopology!=="unrecognized"&&matches(originalNodes,originalEdges,contract) && (!savedKind || savedKind==='ffsc') ? 'ffsc' : 'generic';
   if (kind==="generic") notes.push("本记录的连接信息不完整，或不属于当前支持的循环布局。按记录中的节点和连接展示，不补造设备或连接。");
   if (pair==="lox_kerosene") notes.push("煤油采用正十二烷替代工质；图中数值来自该工程模型。 ");
   const out=id=>object(object(rawComponents[id]).outputs);
@@ -79,7 +105,9 @@ export function buildCycleModel(result, flow = {}, components = []) {
   const metric=(name,value,unit)=>({label:name,value:finite(value)?value:null,unit});
   const node=(id, title=null, type=null, tone=null)=>{
     const definition=own(DEFS,id)?DEFS[id]:[id,"generic","neutral"];
-    const info=out(id), stateIds=own(FLOW_IDS,id)?FLOW_IDS[id]:[];
+    const valveStateIds={MFV:["fuel_after_pump","cooling_inlet"],
+      OPFV:[valveTopology==="paper_split_before_cooling_v1"?"fuel_after_pump":"fuel_after_cooling","opfv_outlet"],FPOV:["lox_after_pump","fpov_outlet"]};
+    const info=out(id), stateIds=own(valveStateIds,id)?valveStateIds[id]:own(FLOW_IDS,id)?FLOW_IDS[id]:[];
     const linked=stateIds.map(key=>states.get(key)).filter(Boolean).map(clone);
     // A missing outlet must stay missing; the last available state may be the inlet.
     const end=s(stateIds.at(-1)), inlet=s(stateIds[0]);
@@ -104,6 +132,12 @@ export function buildCycleModel(result, flow = {}, components = []) {
     if (kindType==="nozzle") metrics.push(metric("当前环境推力",scale(info.thrust_N,.001),"kN"),metric("真空推力",scale(info.thrust_vac_N,.001),"kN"),
       metric("真空比冲",info.Isp_vac_s,"s"),metric("出口压力",first(scale(info.p_exit_Pa,1e-6),scale(info.exit_pressure_Pa,1e-6)),"MPa"),
       metric("出口温度",info.T_exit_K,"K"));
+    if(kindType==="valve"){
+      const saved=object(object(object(calc.steady_closure).valve_design).valves?.[id]);
+      metrics.push(metric("出口压力",end.pressure,"MPa"),metric("出口温度",end.temperature,"K"),
+        metric("质量流量",saved.mass_flow_kg_s,"kg/s"),metric("实际压降",scale(saved.pressure_drop_Pa,1e-6),"MPa"),
+        metric("可行开度",scale(saved.opening,100),"%"),metric("需求额定 CdA",scale(saved.required_rated_cda_m2,1e6),"mm²"));
+    }
     return {id,title:title ?? label(definition[0]),type:kindType,tone:tone || definition[2],states:linked,componentId:available.has(id)?id:null,metrics};
   };
   let nodes=[],connections=[],shafts=[];
@@ -126,10 +160,22 @@ export function buildCycleModel(result, flow = {}, components = []) {
     connect("fuel_tank","fuel_pump","fuel",`${fuel.name}供给（含增压与管路）`,s("fuel_pump_inlet").massFlow);
     notes.push("增压段与供给管路合并表示；主泵卡片从管路后入口状态开始，增压泵功率未计入主轴功率。 ");
     nodes.push(...["ox_preburner","fuel_preburner","ox_preburner_turbine","fuel_preburner_turbine"].map(id=>node(id)));
-    connect("fuel_pump","cooling_channel","fuel","全部燃料冷却",s("fuel_after_cooling").massFlow);
+    if(valveTopology){
+      const paper=valveTopology==="paper_split_before_cooling_v1";
+      nodes.push(node("MFV","MFV · 主燃料阀","valve","fuel"),node("OPFV","OPFV · 富氧预燃室燃料阀","valve","fuel"),node("FPOV","FPOV · 富燃预燃室氧化剂阀","valve","ox"));
+      connect("fuel_pump","MFV","fuel",paper?"分流后冷却主路":"全部燃料进入 MFV",s("cooling_inlet").massFlow);
+      connect("MFV","cooling_channel","fuel","MFV 后再生冷却",s("cooling_inlet").massFlow);
+      connect(paper?"fuel_pump":"cooling_channel","OPFV","fuel",paper?"绕过冷却的燃料交叉支路":"冷却后燃料交叉支路",s("opfv_outlet").massFlow);
+      connect("OPFV","ox_preburner","fuel","OPFV 至富氧预燃室",s("opfv_outlet").massFlow);
+      connect("ox_pump","FPOV","ox","液氧交叉支路",s("fpov_outlet").massFlow);
+      connect("FPOV","fuel_preburner","ox","FPOV 至富燃预燃室",s("fpov_outlet").massFlow);
+      notes.push(paper?"本记录采用泵后先分流：MFV 支路冷却后进入富燃预燃室，OPFV 支路绕过冷却进入富氧预燃室。":"本记录采用全部燃料经 MFV 与冷却后分流：OPFV 调节进入富氧预燃室的交叉支路。");
+    }else connect("fuel_pump","cooling_channel","fuel","全部燃料冷却",s("fuel_after_cooling").massFlow);
     connect("ox_pump","ox_preburner","ox","液氧主路",first(out("ox_preburner").mdot_ox_kgs,summary.mdot_ox_to_ox_preburner_kg_s));
-    connect("ox_pump","fuel_preburner","ox","液氧交叉供给",first(out("fuel_preburner").mdot_ox_kgs,summary.mdot_ox_to_fuel_preburner_kg_s));
-    connect("cooling_channel","ox_preburner","fuel","冷却后燃料交叉供给",first(out("ox_preburner").mdot_fuel_kgs,summary.mdot_fuel_to_ox_preburner_kg_s));
+    if(!valveTopology){
+      connect("ox_pump","fuel_preburner","ox","液氧交叉供给",first(out("fuel_preburner").mdot_ox_kgs,summary.mdot_ox_to_fuel_preburner_kg_s));
+      connect("cooling_channel","ox_preburner","fuel","冷却后燃料交叉供给",first(out("ox_preburner").mdot_fuel_kgs,summary.mdot_fuel_to_ox_preburner_kg_s));
+    }
     connect("cooling_channel","fuel_preburner","fuel","冷却后燃料主路",first(out("fuel_preburner").mdot_fuel_kgs,summary.mdot_fuel_to_fuel_preburner_kg_s));
     connect("ox_preburner","ox_preburner_turbine","oxgas","富氧燃气",s("ox_preburner_outlet").massFlow);
     connect("fuel_preburner","fuel_preburner_turbine","fuelgas","富燃燃气",s("fuel_preburner_outlet").massFlow);
@@ -137,11 +183,11 @@ export function buildCycleModel(result, flow = {}, components = []) {
     connect("fuel_preburner_turbine","main_chamber","fuelgas","富燃涡轮排气",s("fuel_turbine_exhaust").massFlow);
     shaft("ox_preburner_turbine","ox_pump","液氧轴：富氧涡轮驱动液氧泵");
     shaft("fuel_preburner_turbine","fuel_pump","燃料轴：富燃涡轮驱动燃料泵");
-    notes.push("燃料全部经过冷却后再分配至两台预燃室；两条涡轮排气支路都进入主燃烧室。 ");
+    notes.push(valveTopology?"三阀安装关系和状态均来自本次保存记录；两条涡轮排气支路都进入主燃烧室。":"燃料全部经过冷却后再分配至两台预燃室；两条涡轮排气支路都进入主燃烧室。 ");
     nodes.push(node("main_chamber"),node("nozzle"));
     connect("main_chamber","nozzle","hot","主燃气",s("main_chamber").massFlow);
   }
   const totals=[metric("发动机总流量",summary.mdot_total_kg_s,"kg/s"),metric("当前环境总推力",scale(summary.thrust_N,.001),"kN"),
     metric("真空总推力",scale(summary.thrust_vac_N,.001),"kN"),metric("真空比冲",summary.Isp_vac_s,"s")];
-  return {kind,fuel,nodes,connections,shafts,summary:totals,notes,originalNodes,originalEdges};
+  return {kind,fuel,nodes,connections,shafts,summary:totals,notes,originalNodes,originalEdges,...(kind==="ffsc"&&valveTopology?{valveTopology}:{})};
 }

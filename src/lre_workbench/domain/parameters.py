@@ -58,22 +58,25 @@ PARAMETER_CONTRACT = {
     "tank_pressure_pa": _meta("boundary", "当前用一个绝对压力描述两路贮箱出口液体边界，不是表压，也不是已求解的气枕压力。自生增压、液柱/加速度和贮箱至前置泵的吸入管损未单独求解；工程交接应分别给出燃料、氧化剂接口条件。", source="两路共用的集总边界假设"),
     "inlet_pressure": _meta("design_input", "当前供给方案显式包含前置低压增压泵，位置在贮箱与主泵之间，用于提高主泵入口压力。出口绝压为设计要求，扣除短管预算后得到主泵入口压力；尚未证明泵能实现该压升。增压功按外部功源记入整机能量账，不计入两根主涡轮轴。增压泵不是 FFSC 循环的必备构型，也不等同于贮箱气体增压系统或主泵诱导轮。", source="前置增压方案假设；驱动及吸入性能待设计"),
     "feed_line_dp_pa": _meta("model_assumption", "初步设计用给定压降闭合压力预算；该段按绝热等焓计算出口温度，不能当作等温。固定硬件变工况需由管径、长度、粗糙度和局部阻力或实测曲线求压降；当前短管仍用固定预算，不是管路能力验证。", source="设计点管路压降预算；待水力模型或试验替换"),
-    "methane_thermo_dataset": _meta("model_assumption", "高温版保留 GRI30 的 53 个物种并使用其高温热化学数据；CHO 物种共同温区为 300–5000 K，仍逐物种检查实际温区。气相仍为理想气体混合物，高压状态方程适用性尚未验证；高温热化学数据不构成高温反应动力学认证。历史方案沿用原数据，不自动切换。", source="Cantera 随附 GRI30 / GRI30 high-T 数据；版本随计算记录保存", propellants=["lox_methane"]),
+    "methane_thermo_dataset": _meta("model_assumption", "提供物种标准态焓、熵与比热。高温源文件包含 53 种物种，全部物种声明温区的交集为 300–5000 K；实际计算仍逐物种检查温区。允许参与计算的物种由物种策略确定，状态方程另行指定。高温热数据不构成高压物性或反应动力学验证。历史方案沿用原数据。", source="Cantera 随附 GRI30 / GRI30 high-T 数据；数据版本与物种策略随计算记录保存", propellants=["lox_methane"]),
     "combustion_loss_model": _meta("model_assumption", "基础模型均为给定压力与焓的化学平衡。选择温升折减时，在平衡计算后保持组分不变，按历史系数修正温升，焓差计入经验损失。该修正仅用于旧方案复现，未经试验标定，不代表特征速度效率或燃料燃尽率。", source="项目历史兼容实现"),
     "combustion_efficiency": _meta("legacy", "仅在温升折减模式下生效。修正温度等于入口混合温度加上本系数与平衡温升的乘积，修正后保持平衡组分不变。该系数不等同于特征速度效率或燃料燃尽率。", visibility={"all": [{"key": "combustion_loss_model", "op": "eq", "value": "legacy_temperature_rise"}]}),
-    "chamber_temp_guess": _meta("initial_guess", "尚无热侧沿程解时，用于首轮冷却热侧与喉部尺寸估算。当前 Cantera 主室按实际入口组成、焓和压力求温度，不以此值指定燃烧温度。启动估计会影响收敛路径、耗时及成功率；过差时应检查失败原因。它不是设计温度上限或焓参考态。", source=None),
+    "chamber_temp_guess": _meta("initial_guess", "尚无热侧沿程解时，用于首轮冷却热侧与喉部尺寸估算。主燃烧室按所选热化学模型、实际入口组成、焓和压力求温度，不以此值指定燃烧温度。启动估计会影响收敛路径、耗时及成功率；过差时应检查失败原因。它不是设计温度上限或焓参考态。", source=None),
     "chamber_gamma": _meta("initial_guess", "γ=cp/cv 的启动估计，与温度和平均摩尔质量共同初始化冷却热侧及喉部尺寸。随后使用当前热化学及热侧沿程解，不固定整个喷管的比热比。同一物理解分支充分收敛后，合理初值改变不应显著改变结果，须以多初值复核确认。", source=None),
     "molar_mass": _meta("initial_guess", "用于首轮气体常数及冷却、喉部尺寸估算；单位 kg/kmol。最终平均摩尔质量由产物完整组成计算，不是设计约束或化学焓基准。改变它可能影响数值收敛，不能用启动估计调节最终性能。预算冷却不使用这三个冷却启动估计。", source=None),
     "use_target_preburner_temp": _meta("legacy", "由网页预燃室设计方式统一设置，保留旧方案字段。", source=None, hidden=True),
     "use_target_preburner_mr": _meta("legacy", "温度模式优先；由网页设计方式统一设置，保留旧方案字段。", source=None, hidden=True),
-    "cooling_heat_load": _meta("model_assumption", "仅给定 Q 与 Δp 的预算模式生效；该模式计算端口焓差，不生成沿程曲线。准一维模式的吸热量由统一几何、Bartz 热侧关联和冷却侧换热计算。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]}),
+    "cooling_heat_load": _meta("model_assumption", "仅外部指定模式生效：由外部热分析、试验或敏感性研究给定吸热功率，计算冷却端口焓差。概略与详细模式均忽略此值；90 MW 为历史示例，不是发动机通用要求。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]}),
+    "cooling_reference_wall_temp_K": _meta("model_assumption", "在此热面参考壁温下估算燃气侧热流。800 K 仅为可修改的示例假设，不是计算壁温，也不是材料允许温度；应比较不同假设对峰值热流和总吸热功率的影响。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 2}]}),
+    "cooling_estimated_dp_pa": _meta("model_assumption", "概略阶段采用的冷却压降估计，直接影响泵压需求和冷却出口状态。5 MPa 为未校核示例；它不是允许压降上限，也不是数值初值。详细模型由通道动量方程确定压降。", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 2}]}),
+    "cooling_estimate_basis": _meta("model_assumption", "记录参考壁温、概略型面、覆盖范围和压降估计的来源及适用工况。留空表示尚未登记依据；计算结果仍明确标注为概略估算。", source=None, multiline=True, visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 2}]}),
     "coolant_cp": _meta("legacy", "科学运行使用 Cantera / CoolProp 焓反算出口温度，此常数不控制温升；仅为旧模型兼容保留，仍需满足旧方案的有效性校验。", source=None, hidden=True),
     "cooling_wall_conductivity": _meta("legacy", "循环冷却使用所选内衬材料的温度相关导热函数；此手填常数被材料函数覆盖，仅保留旧方案兼容，不作为当前有效输入。", source=None, hidden=True),
-    "cooling_dp_pa": _meta("model_assumption", "预算模式：给定压降直接进入泵压需求与冷却出口状态，不是初值。准一维模式：此值仅作耦合压降初猜，最终压降由通道动量方程计算并替换。示例 5 MPa 未由几何或实测验证。", source="项目压降设定；非已核实实机数据；预算或初值身份取决于冷却模式", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]}),
-    "cooling_bartz_mode": _meta("model_assumption", "沿推力室和通道几何联立冷却剂压力与焓。燃气侧采用 Bartz 型对流关联及灰体辐射近似，壁面采用温变导热率积分，冷却剂侧采用分流态换热关联；吸热、压降及出口状态参与整机循环迭代。历史预算模式仅采用给定吸热量与压降。", source="当前计算方法；模型适用范围随结果记录"),
+    "cooling_dp_pa": _meta("model_assumption", "外部指定模式中，此值直接进入泵压需求与冷却出口状态，不是初值。详细通道模式仅将它用作压降初猜，最终由通道动量方程计算替换。概略模式使用独立的冷却压降估计。示例 5 MPa 未由几何或实测验证。", source="外部压降数据或初始化假设；默认值非已核实实机数据；按模型区分用途", visibility={"all": [{"key": "cooling_bartz_mode", "op": "eq", "value": 0}]}),
+    "cooling_bartz_mode": _meta("model_assumption", "概略模型按工况、受热面及参考壁温估算沿程热流并反馈循环；详细模型继续联立壁面导热、冷却侧换热和通道水力，确定实际壁温与出口状态。外部指定模式使用给定吸热功率和压降。各模式保留独立输入，不自动迁移历史记录。", source="当前计算方法；模型适用范围随结果记录"),
     "cooling_dp_auto": _meta("legacy", "历史兼容字段，不再选择另一套水力模型。准一维模式始终联立压力与焓；预算模式只使用给定 Δp。", source=None, hidden=True),
     "cooling_marching_enable": _meta("legacy", "仅为历史方案兼容保留；不再控制独立后处理或物理计算。准一维模式总是保存同源沿程结果。", source=None, hidden=True),
-    "cooling_grid_points": _meta("solver_setting", "准一维冷却几何网格节点数；属于数值分辨率，不是物理设计输入。改变分辨率后应检查网格收敛，固定硬件工况沿用相同几何。", source=None, advanced=True, visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]}),
+    "cooling_grid_points": _meta("solver_setting", "概略热面及详细冷却模型的轴向离散节点数；属于数值分辨率，不是物理设计输入。改变分辨率后应比较总热负荷与局部峰值的变化。", source=None, advanced=True, visibility={"all": [{"key": "cooling_bartz_mode", "op": "gt", "value": 0}]}),
     "preburner_injector_dp_ratio": _meta("model_assumption", "四条供给支路未单独设置喷注器压降比时，沿用本值。喷注器设计压降为压降比乘以该支路目的预燃室压力。示例值 0.12 为工程假设。", source="设计压降预算；待部件数据校核"),
     "ox_turbine_exhaust_dp_ratio": _meta("model_assumption", "富氧涡轮出口至主燃烧室的热气侧压降预算：Δp = 本参数 × pc；涡轮出口压力为 pc + Δp。不是液氧直接进入主室的液路喷注压降，也不等于涡轮压比。当前预算未由热气喷注器几何或实测流量特性验证。", source="设计压降预算；非已核实实机数据"),
     "fuel_turbine_exhaust_dp_ratio": _meta("model_assumption", "富燃涡轮出口至主燃烧室的热气侧压降预算：Δp = 本参数 × pc；涡轮出口压力为 pc + Δp。不是液态燃料直接进入主室的喷注压降，也不等于涡轮压比。当前预算未由热气喷注器几何或实测流量特性验证。", source="设计压降预算；非已核实实机数据"),
@@ -85,6 +88,24 @@ PARAMETER_CONTRACT = {
 
 for key in ("boost_pump_efficiency", "pump_efficiency_ox", "pump_efficiency_fuel"):
     PARAMETER_CONTRACT[key] = _meta("model_assumption", "定义 ηp=(h出口等熵−h入口)/(h出口−h入口)，轴功与出口状态使用同一焓升。设计点常效率可作为初选，需用同类部件或试验数据定标并做敏感性分析；该数值不是预测结果或性能图。轴承、密封等损失未独立分解，应与外部效率数据的功率口径核对。", source="设计点常效率假设；未由部件特性图校准")
+
+# Branch-specific settings retain the same physical roles as the legacy inputs.
+from lre_workbench.domain.models import SUPPLY_FIELD_FALLBACKS
+for _key, _legacy in SUPPLY_FIELD_FALLBACKS.items():
+    PARAMETER_CONTRACT[_key] = deepcopy(PARAMETER_CONTRACT[_legacy])
+    PARAMETER_CONTRACT[_key].update(nullable=True, fallback_key=_legacy)
+    PARAMETER_CONTRACT[_key]["help"] = {
+        "tank_pressure_pa": "该路贮箱出口液体接口的绝对压力，以真空为零点。作为当前设计点的给定边界；气枕增压、液柱/加速度及吸入管损未单独求解。",
+        "inlet_pressure": "该路前置低压泵的出口压力设计值。主泵入口压力由本值扣除该路供给管路压降得到；所需泵功和出口温度由模型计算，尚未验证具体泵的压升能力和吸入性能。前置泵按外部供功建模。",
+        "feed_line_dp_pa": "当前设计点直接采用的供给管路压力损失，不是迭代初值。该段按绝热等焓处理；尚未根据管径、长度、流量与局部阻力计算压降，不代表固定管路的变工况特性。",
+        "boost_pump_efficiency": "该路前置低压泵的等熵效率假设，η=(等熵出口焓−入口焓)/(实际出口焓−入口焓)。用于计算泵功和出口状态，不是性能图或已验证效率。",
+    }[_legacy] + " 分路值未设置时沿用历史共用值；显式设置后独立使用。"
+    PARAMETER_CONTRACT[_key]["provenance"] = {
+        "kind": "default_assumption", "label": "方案设计点假设；待接口或部件依据确认",
+        "detail": "未设置分路值时使用方案原有共用参数，不替换成软件默认值。"}
+for _legacy in set(SUPPLY_FIELD_FALLBACKS.values()):
+    PARAMETER_CONTRACT[_legacy]["hidden"] = True
+    PARAMETER_CONTRACT[_legacy]["help"] = "历史共用回退值；仅在对应分路参数未设置时使用。" + PARAMETER_CONTRACT[_legacy]["help"]
 
 for key in ("chamber_contraction_ratio", "chamber_l_star_m", "chamber_conv_half_angle_deg", "nozzle_bell_fraction"):
     PARAMETER_CONTRACT[key] = _meta("design_input", "系统级内轮廓几何假设；热侧、冷却覆盖面积与通道水力长度使用同一几何。设计点定尺寸后，固定硬件计算保留该轮廓。")
@@ -182,7 +203,7 @@ for side, label in (("ox", "富氧"), ("fuel", "富燃")):
         visibility={"preburner_modes": ["temperature"]})
     PARAMETER_CONTRACT[f"{side}_preburner_temp_limit"] = _meta(
         "constraint", "出口平均燃气温度的方案约束，启用后参与设计输入检查与结果校核。该限值不等同于壁面或涡轮金属的允许温度。",
-        source="按当前方案登记；设计示例中的 800 / 900 K 为暂定值",
+        source="按当前方案登记；历史示例保留 800 / 900 K 数值，新载入示例默认不启用限值",
         visibility={"any": [
             {"key": f"{side}_preburner_temp_limit_status", "op": "eq", "value": "provisional"},
             {"key": f"{side}_preburner_temp_limit_status", "op": "eq", "value": "documented"}]})

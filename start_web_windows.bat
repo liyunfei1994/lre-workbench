@@ -7,3 +7,7 @@ if errorlevel 1 (
     if not defined LRE_NO_PAUSE pause
     exit /b 1
 )
+
+rem Keep a double-clicked console visible even when an existing service was reused.
+if not defined LRE_NO_PAUSE pause
+exit /b 0

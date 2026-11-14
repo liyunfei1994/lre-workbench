@@ -36,7 +36,8 @@ function reference(label, value, unit = "", formatter = number, key = "") {
 export function renderPressureTopology(inputs = {}) {
   const cooling = inputs.cooling_bartz_mode === 0
     ? "采用给定冷却压降预算。"
-    : finite(inputs.cooling_bartz_mode) && inputs.cooling_bartz_mode > 0
+    : inputs.cooling_bartz_mode === 2 ? "采用概略冷却压降估计；热负荷由受热面估算，压降尚未由通道水力计算。"
+    : inputs.cooling_bartz_mode === 1
       ? "再生冷却压降由当前沿程模型计算。" : "冷却压降计算方式未记录。";
   const paths = [
     {kind:"ox", title:"氧化剂流路", start:"供给边界", pump:"氧化剂主泵", split:"泵后分流"},
@@ -48,11 +49,12 @@ export function renderPressureTopology(inputs = {}) {
     <div class="pressure-design-gas-route"><span>富氧 / 富燃预燃室</span><span aria-hidden="true">→</span><span>对应涡轮</span><span aria-hidden="true">→</span><span>燃气管路与喷注段</span><span aria-hidden="true">→</span><span>主燃烧室</span></div>
     <div class="pressure-design-context-grid"><article><h4>设计边界</h4><dl class="pressure-design-references">
       ${reference("主燃烧室设计压力", inputs.pc, "MPa", mpa, "pc")}
-      ${reference("贮箱出口压力", inputs.tank_pressure_pa, "MPa", mpa, "tank_pressure_pa")}
+      ${reference("液氧贮箱出口绝对压力", inputs.ox_tank_pressure_pa ?? inputs.tank_pressure_pa, "MPa", mpa, "ox_tank_pressure_pa")}
+      ${reference("燃料贮箱出口绝对压力", inputs.fuel_tank_pressure_pa ?? inputs.tank_pressure_pa, "MPa", mpa, "fuel_tank_pressure_pa")}
       ${reference("氧化剂供给温度", inputs.ox_inlet_temp, "K", number, "ox_inlet_temp")}
       ${reference("燃料供给温度", inputs.fuel_inlet_temp, "K", number, "fuel_inlet_temp")}
-    </dl><div class="pressure-design-links">${jump("design", "设计目标与工况")}${jump("inlet", "推进剂供给边界")}</div></article>
-    <article><h4>模型接口</h4><p>${cooling}燃料主泵所需出口压力包含冷却段压降；四条预燃室供给支路从各自分流点起计。</p><p>预燃室出口作为涡轮入口；当前模型未单独计入两者之间的管路压降。</p><div class="pressure-design-links">${jump("cooling", "再生冷却模型")}${jump("preburner_design", "预燃室热力设计")}${jump("component_efficiencies", "泵与涡轮效率")}</div></article></div>
+    </dl><div class="pressure-design-links">${jump("design", "设计目标与工况")}${jump("inlet", "推进剂供给条件")}</div></article>
+    <article><h4>模型接口</h4><p>${cooling}燃料主泵所需出口压力包含冷却段压降；四条预燃室供给支路从各自分流点起计。</p><p>预燃室出口作为涡轮入口；当前模型未单独计入两者之间的管路压降。</p><div class="pressure-design-links">${jump("cooling", "再生冷却模型")}${jump("preburner_design", "预燃室热力匹配条件")}${jump("component_efficiencies", "泵与涡轮效率")}</div></article></div>
     <p class="pressure-design-note">压力采用集总绝对压力。当前设计模型未逐截面解析总压与静压；设计压降预算、循环匹配结果与部件实际供给能力分别记录。</p>
   </div>`;
 }
@@ -98,7 +100,8 @@ export function syncPressureWorkspace(root, {view = "budget", branch = "ox_to_op
     if (search) workspace.querySelectorAll("[data-pressure-shared]").forEach(details => { details.open = true; });
     workspace.classList.toggle("pressure-design-searching", Boolean(search));
     if (object(inputs)) workspace.querySelectorAll("[data-pressure-reference]").forEach(node => {
-      const value = inputs[node.dataset.pressureReference], unit = node.dataset.pressureUnit;
+      const key = node.dataset.pressureReference, unit = node.dataset.pressureUnit;
+      const value = inputs[key] ?? (["ox_tank_pressure_pa", "fuel_tank_pressure_pa"].includes(key) ? inputs.tank_pressure_pa : undefined);
       node.textContent = `${unit === "MPa" ? mpa(value) : number(value)}${finite(value) && unit ? ` ${unit}` : ""}`;
     });
   }
@@ -116,9 +119,13 @@ function sameInputs(a, b) {
 
 function comparableInputs(inputs) {
   const result = {...inputs};
-  // An omitted optional override and a null override both mean inherit the
-  // existing shared budget. This is the only compatibility normalization.
+  // Missing/null overrides inherit their stored common inputs. Never populate
+  // historical snapshots from today's defaults.
   for (const key of pressureBranches.flatMap(branchKeys)) if (result[key] == null) delete result[key];
+  for (const side of ["ox", "fuel"]) for (const suffix of ["tank_pressure_pa", "boost_outlet_pressure_pa", "feed_line_dp_pa", "boost_pump_efficiency"]) {
+    const key = `${side}_${suffix}`;
+    if (result[key] == null) delete result[key];
+  }
   return result;
 }
 

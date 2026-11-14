@@ -1,0 +1,50 @@
+/* Scheme context is separate from the numbered engineering workflow. */
+.document-title-row{display:flex;align-items:center;gap:12px;min-width:0}
+.document-title-row b{min-width:0}.document-title-row button{flex-shrink:0;font-size:13px}
+.project-context-strip{padding:12px clamp(18px,2vw,38px);border-bottom:1px solid #d5e0e7;background:#f8fbfd;color:#465f70;font-size:13px;line-height:1.6}
+.project-context-line{display:flex;gap:10px 22px;align-items:center;flex-wrap:wrap}
+.project-context-record{color:#657a89}.project-context-state{padding:2px 8px;border:1px solid #d1dde5;border-radius:3px;background:#eef3f6}
+.project-context-strip[data-project-freshness=stale] .project-context-state,.project-unsaved{color:#965c16}
+.project-context-strip[data-project-freshness=stale] .project-context-state{border-color:#e6c995;background:#fff6e6}
+.project-context-strip[data-project-freshness=invalid] .project-context-state{color:#a64838;background:#fff1ed;border-color:#e4b9ad}
+.project-context-actions{display:flex;flex-wrap:wrap;gap:8px;margin-left:auto}
+.project-context-actions button{font-size:13px;padding:4px 9px}
+.project-input-differences{margin-top:5px}.project-input-differences>summary{width:fit-content;color:#396e8c;cursor:pointer}
+.project-input-differences[open]{margin-top:10px}.project-input-differences>p{margin:10px 0}
+.project-differences-table{max-width:100%;overflow:auto;max-height:50vh;border:1px solid #dce5eb;border-radius:4px;background:white}
+.project-differences-table table{width:100%;border-collapse:collapse;font-size:13px}
+.project-differences-table th,.project-differences-table td{padding:10px 14px;border-bottom:1px solid #e2e9ee;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.project-differences-table thead th{position:sticky;top:0;background:#eef4f8;z-index:1}
+.project-differences-table th{min-width:150px;font-weight:500}.project-differences-table td{min-width:130px;max-width:480px}
+.project-differences-table pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;font:inherit}
+.project-differences-table small{display:block;font-weight:400;color:#6c7f8d}.project-differences-table small button{padding:2px 0;border:0;background:transparent;font-size:12px}
+.project-overview{display:grid;gap:18px;max-width:1100px;margin:0 auto;color:#243c4a}
+.project-overview-panel{padding:24px;background:#fff;border:1px solid #dce5eb;border-radius:6px;min-width:0}
+.project-overview-panel h2,.project-overview-panel h3{margin:0 0 16px}
+.project-summary-description{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;color:#607585}
+.project-summary-facts{display:flex;gap:20px 60px;flex-wrap:wrap;margin:20px 0 24px}.project-summary-facts dt{font-size:13px;color:#657b8b;margin-bottom:6px}.project-summary-facts dd{margin:0;font-weight:600}
+.project-overview-note{color:#6a7e8d;font-size:13px;line-height:1.9;margin:14px 0 0}
+.project-overview-actions{display:flex;flex-wrap:wrap;gap:10px}
+.project-overview-action{background:#fff;border:1px solid #ccdbe5;color:#315f7a;border-radius:4px;padding:8px 12px;font:inherit;font-size:13px;cursor:pointer;line-height:1.6;text-align:left}
+.project-overview-action:hover{background:#eaf2f7;border-color:#8daec4}.project-overview-action:focus-visible{outline:2px solid #237ca8;outline-offset:3px}
+.project-overview-action.is-primary{color:#fff;background:#356e8d;border-color:#356e8d}
+.project-record-context{display:grid;gap:8px;margin:14px 0}.project-record-context small{color:#657a89}
+.project-record-details>div{display:grid;gap:7px;margin-top:10px;line-height:1.7}.project-record-details code{overflow-wrap:anywhere}
+.project-model-provenance .project-differences-table{margin-top:14px}
+#workspace .partitioned-workbench .engine-definition{grid-column:1/-1;display:grid;gap:12px}
+#workspace .partitioned-workbench .engine-definition-help{padding:10px 14px;background:#f9fbfc}
+#workspace .partitioned-workbench .engine-definition-help .engine-configuration-section{margin-top:16px}
+#workspace .partitioned-workbench .engine-definition-help .engine-configuration-scope{margin-top:16px}
+#workspace .partitioned-workbench .engine-definition .engine-configuration-facts>div{padding:12px 16px}
+@media(max-width:950px){.project-context-line{gap:8px 14px}.project-context-actions{margin-left:0}}
+@media(max-width:700px){.project-context-strip{padding:10px 12px}.project-context-line>span{flex-basis:100%}.project-context-line .project-context-state{flex-basis:auto}.project-overview-panel{padding:18px}.project-summary-facts{gap:18px}}
+
+.project-summary-mobile{display:none}
+@media(max-width:950px){.project-summary-mobile{display:inline-flex}}
+#workspace .project-context-strip{display:flex;align-items:center;flex-wrap:wrap;gap:6px 14px;padding-top:10px;padding-bottom:10px}
+#workspace .project-context-line{flex:1 1 auto;min-width:0}
+#workspace .project-context-actions button{min-height:32px;padding:4px 9px;font-size:14px}
+#workspace .project-input-differences{margin:0;max-width:100%}
+#workspace .project-input-differences>summary{font-size:14px;line-height:1.6}
+#workspace .project-input-differences[open]{flex-basis:100%;margin-top:4px}
+@media(max-width:700px){#workspace .project-context-line{flex-basis:100%}#workspace .project-context-actions button{min-height:40px}}

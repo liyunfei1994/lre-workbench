@@ -21,7 +21,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from webapp.store import Store
 from webapp.jobs import JobQueue
-from webapp.solver import design_readiness, input_values, presets, reference_engines, SCIENCE_PINS
+from webapp.solver import (design_readiness, input_values, platform_defaults, presets, reference_engines,
+                          require_runnable_gas_model, SCIENCE_PINS)
 from webapp.design_scope import DESIGN_SCOPE, require_supported_design, require_supported_source
 from webapp.ui_schema import design_ui_schema
 from webapp.access import (LOOPBACK, PUBLIC_ENDPOINTS, authorize_resource,
@@ -76,6 +77,10 @@ class Project(Model):
     design_reviews: dict[DesignGroupId, DesignGroupReview] = Field(default_factory=dict, max_length=100)
 
 
+class NewProject(Project):
+    inputs: dict = Field(default_factory=platform_defaults)
+
+
 class DesignReadiness(Model):
     inputs: dict
 
@@ -110,7 +115,7 @@ def public_user(row):
     return {key: row[key] for key in ("id", "username", "display_name", "role")}
 
 
-def create_app(database=None, *, queue_enabled=True, job_timeout=600,
+def create_app(database=None, *, queue_enabled=True, job_timeout=None,
                private_workspace=False, public_origin=None, personal_workspace=False):
     public_origin = https_origin(public_origin)
     if personal_workspace and (private_workspace or public_origin):
@@ -500,13 +505,17 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
         session_user(request)
         return {"python": os.sys.version.split()[0], "scope": "external-pilot" if public_origin else "local",
                 "workspace_access": workspace_access,
-                "max_parallel_jobs": 1, "job_timeout_seconds": job_timeout,
+                "max_parallel_jobs": 1, "job_timeout_seconds": queue.timeout,
+                "job_timeout_policy": queue.timeout_policy(),
                 "design_scope": dict(DESIGN_SCOPE),
                 "design_readiness": True,
                 "design_review_persistence": True,
                 "presets": presets(), "reference_engines": reference_engines(),
                 "ui_schema": design_ui_schema(),
                 "dependencies": {k: importlib.metadata.version(k) for k in SCIENCE_PINS}}
+
+    from webapp.property_library import register_property_routes
+    register_property_routes(app, session_user, body)
 
     @app.get("/api/projects")
     def projects(request: Request):
@@ -522,7 +531,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
     @app.post("/api/projects")
     async def create_project(request: Request):
         user = session_user(request)
-        data = await body(request, Project)
+        data = await body(request, NewProject)
         name, values, messages = normalize_project(data)
         key, now = str(uuid.uuid4()), time.time()
         with store.connect(immediate=True) as db:
@@ -620,6 +629,10 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
                 raise HTTPException(429, "等待任务过多，请先等待完成或取消已有任务。")
             from lre_workbench.domain.analysis_contract import concept_design_task
             values, _ = input_values(json.loads(row["inputs"]), saved_snapshot=True)
+            try:
+                require_runnable_gas_model(values)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
             task = concept_design_task(values)
             db.execute("INSERT INTO jobs(id,project_id,revision,submitted_by,status,inputs,created,analysis_task) "
                        "VALUES(?,?,?,?,?,?,?,?)",
@@ -646,6 +659,18 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
             row["progress"] = json.loads(row["progress"]) if row["progress"] else None
         return rows
 
+    @app.get("/api/jobs/{job_id}/monitor")
+    def job_monitor(job_id: str, request: Request, after: int = 0, limit: int = 500):
+        session_user(request)
+        from webapp.monitor import monitor_page
+        try:
+            page = monitor_page(store, job_id, after=after, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(422, "监控游标须为非负整数；每页记录数须为 1–2000。") from exc
+        if page is None:
+            raise HTTPException(404, "任务不存在。")
+        return page
+
     @app.get("/api/jobs/{job_id}")
     def job(job_id: str, request: Request):
         session_user(request)
@@ -656,6 +681,12 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
         for field in ("inputs", "result", "progress", "analysis_task"):
             row[field] = json.loads(row[field]) if row[field] else None
         row["mode"] = "concept_design"
+        from webapp.model_validity import saved_model_validity
+        row["model_validity"] = saved_model_validity(row.get("result"))
+        if row["model_validity"]["reuse_blocked"]:
+            # Preserve the saved payload, but do not derive new engineering
+            # handoffs from a withdrawn equilibrium implementation.
+            return row
         try:
             require_supported_source(row)
         except ValueError as exc:
@@ -670,7 +701,8 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
         from webapp.chamber_design import chamber_design_view
         row["chamber_design"] = chamber_design_view(row["result"], row["id"])
         from webapp.pump_geometry import pump_geometry_view
-        row["pump_geometry"] = pump_geometry_view(row["result"], row["id"])
+        from webapp.design_traceability import source_context, attach_design_traceability
+        row["pump_geometry"] = pump_geometry_view(row["result"], row["id"], source_context=source_context(row))
         from webapp.injector_design import injector_design_view
         row["injector_design"] = injector_design_view(row["result"], row["id"])
         from webapp.turbine_geometry import turbine_geometry_view
@@ -683,13 +715,47 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
         row["result_consistency"] = result_consistency_view(row["result"], row["id"])
         from webapp.steady_design import steady_design_view
         row["steady_design"] = steady_design_view(row["result"], row["id"], consistency=row["result_consistency"])
+        attach_design_traceability(row)
         from webapp.valve_requirements import valve_requirements_view
         row["valve_requirements"] = valve_requirements_view(row["result"], row["id"])
+        from webapp.valve_design import valve_design_view
+        row["valve_design"] = valve_design_view(row["result"], row)
         return row
+
+    @app.post("/api/projects/{project_id}/valve-selection-envelope")
+    async def valve_selection(project_id: str, request: Request):
+        session_user(request)
+        get_project(project_id)
+        data = await request.json()
+        ids = data.get("job_ids") if isinstance(data, dict) and set(data) == {"job_ids"} else None
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 50
+                or any(not isinstance(key, str) or not key or len(key) > 100 for key in ids)
+                or len(set(ids)) != len(ids)):
+            raise HTTPException(422, "请选择 1–50 条不同的本方案设计点记录。")
+        records = []
+        for key in ids:
+            record = store.one("SELECT * FROM jobs WHERE id=? AND project_id=? AND kind='design'", (key, project_id))
+            if not record:
+                raise HTTPException(422, "所选记录不属于当前方案的概念设计。")
+            if record.get("status") != "succeeded":
+                raise HTTPException(409, "阀门选型仅接受已完成的设计点记录。")
+            for field in ("inputs", "result", "analysis_task"):
+                record[field] = json.loads(record[field]) if record.get(field) else None
+            from webapp.model_validity import saved_model_validity
+            if saved_model_validity(record.get("result"))["reuse_blocked"]:
+                raise HTTPException(422, "所选记录使用已停用模型，不能用于阀门选型。")
+            records.append(record)
+        try:
+            from webapp.valve_design import valve_selection_envelope
+            return valve_selection_envelope(records)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, str(exc)[:1200]) from exc
 
     @app.post("/api/jobs/{job_id}/nozzle-ambient")
     async def nozzle_ambient(job_id: str, request: Request):
         record = job(job_id, request)
+        if record.get("model_validity", {}).get("reuse_blocked"):
+            raise HTTPException(422, record["model_validity"]["reason"])
         if record.get("status") != "succeeded" or not record.get("result"):
             raise HTTPException(409, "请选用已完成的循环设计记录。")
         if record.get("scope_issue"):
@@ -746,7 +812,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
     def validation_capabilities(request: Request):
         session_user(request)
         from webapp.validation import capabilities
-        return capabilities()
+        return capabilities() | {"job_timeout_policy": queue.timeout_policy()}
 
     @app.get("/api/projects/{project_id}/validations")
     def validations(project_id: str, request: Request):
@@ -1613,6 +1679,9 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
         return JSONResponse(record, headers={
             "Content-Disposition": f'attachment; filename="lre-shutdown-{record["id"]}.json"'})
 
+    from webapp.engineering_api import register_engineering_routes
+    register_engineering_routes(app, store, session_user, get_project, fixed_source, body)
+
     @app.get("/")
     def index():
         return FileResponse(ROOT / "webapp/static/index.html")
@@ -1623,11 +1692,16 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
         # registry associations can incorrectly classify JavaScript as text/plain.
         media_types = {"bootstrap.js": "text/javascript", "app.js": "text/javascript", "results.js": "text/javascript",
                        "navigation.js": "text/javascript", "navigation.css": "text/css",
+                       "engineering-lifecycle.js": "text/javascript", "engineering-lifecycle.css": "text/css",
+                       "help-manual.js": "text/javascript", "help-manual.css": "text/css",
+                       "setup-tree.js": "text/javascript", "parameter-finder.js": "text/javascript", "project-overview.js": "text/javascript",
+                       "project-overview.css": "text/css",
                        "partitioned-workspace.css": "text/css",
                        "parameter-editor.js": "text/javascript", "design-readiness.js": "text/javascript",
                        "preburner-design.js": "text/javascript",
                        "pressure-design.js": "text/javascript", "pressure-design.css": "text/css",
                        "design-review-migration.js": "text/javascript",
+                       "parameter-review.js": "text/javascript", "solver-workspace.js": "text/javascript",
                        "nozzle-geometry.js": "text/javascript", "nozzle-geometry.css": "text/css",
                        "nozzle-design.js": "text/javascript", "nozzle-design.css": "text/css",
                        "chamber-design.js": "text/javascript", "chamber-design.css": "text/css",
@@ -1644,19 +1718,25 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
                        "cooling-channel-inputs.js": "text/javascript", "cooling-channel-inputs.css": "text/css",
                        "cooling-input-summary.js": "text/javascript",
                        "convergence.js": "text/javascript", "convergence.css": "text/css",
+                       "solver-monitor.js": "text/javascript", "solver-monitor.css": "text/css",
                        "steady-closure.js": "text/javascript", "steady-closure.css": "text/css",
                        "steady-workspace.js": "text/javascript", "steady-workspace.css": "text/css",
                        "steady-design.js": "text/javascript", "concept-design.js": "text/javascript",
                        "component-analysis.js": "text/javascript", "component-analysis.css": "text/css",
                        "cycle-model.js": "text/javascript", "cycle-schematic.js": "text/javascript", "cycle-schematic.css": "text/css",
+                       "engineering-view.js": "text/javascript", "engineering-view.css": "text/css", "engineering-resize.js": "text/javascript",
+                       "thermochemistry-model.js": "text/javascript", "thermochemistry-model.css": "text/css",
                        "cycle-symbols.js": "text/javascript",
                        "flow-model.js": "text/javascript", "flow-analysis.js": "text/javascript", "flow-analysis.css": "text/css",
                        "validation.js": "text/javascript", "validation.css": "text/css",
+                       "gas-eos-comparison.js": "text/javascript",
+                        "model-validity.js": "text/javascript",
                        "gas-handoff.js": "text/javascript", "gas-handoff.css": "text/css",
                        "thermo-stations.js": "text/javascript",
                        "throttle.js": "text/javascript", "throttle.css": "text/css",
                        "fixed-steady.js": "text/javascript", "fixed-steady.css": "text/css",
                        "fixed-iteration.js": "text/javascript", "valve-requirements.js": "text/javascript",
+                       "valve-configuration.js": "text/javascript", "valve-design.js": "text/javascript",
                        "control-trim.js": "text/javascript",
                        "transient.js": "text/javascript", "transient.css": "text/css",
                        "feed-network.js": "text/javascript", "feed-network.css": "text/css",
@@ -1665,6 +1745,7 @@ def create_app(database=None, *, queue_enabled=True, job_timeout=600,
                        "shutdown.js": "text/javascript", "shutdown.css": "text/css",
                        "validation-charts.js": "text/javascript", "validation-charts.css": "text/css",
                        "property-comparison.js": "text/javascript", "property-comparison.css": "text/css",
+                       "property-library.js": "text/javascript", "property-library.css": "text/css",
                        "style.css": "text/css", "workbench.css": "text/css"}
         if filename not in media_types:
             raise HTTPException(404, "资源不存在。")

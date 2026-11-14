@@ -26,7 +26,7 @@ class CouplingTests(unittest.TestCase):
             outputs=dict(A_throat_m2=.1, heat_load_W=sum(heats))),
             "nozzle": NS(profile=dict(cells=hot), outputs=dict(At_m2=.1))},
             states={"fuel_after_cooling": NS(temperature=300., pressure=60e6-pressure),
-                    "fuel_after_pump": NS(pressure=60e6), "lox_after_pump": NS(density=1200.)},
+                    "fuel_after_pump": NS(pressure=60e6, density=400.), "lox_after_pump": NS(density=1200.)},
             steady_closure={})
 
     @patch('lre_workbench.components.pumps.model.fluid_density', return_value=400.)

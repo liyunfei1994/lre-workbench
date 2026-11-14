@@ -27,11 +27,12 @@ DISPLAY_UNIT_MAP: Dict[str, Tuple[float, str]] = {
     "thrust":               (1e-3,  "kN"),    # N  → kN
     "pc":                   (1e-6,  "MPa"),   # Pa → MPa
     "ambient_pressure":     (1e-6,  "MPa"),   # Pa → MPa
-    "tank_pressure_pa":     (1e-5,  "bar"),   # Pa → bar（贮箱真实压力）
+    "tank_pressure_pa":     (1e-6,  "MPa"),   # Pa → MPa（贮箱出口绝对压力）
     "inlet_pressure":       (1e-6,  "MPa"),   # Pa → MPa（增压泵出口）
-    "feed_line_dp_pa":      (1e-5,  "bar"),   # Pa → bar
+    "feed_line_dp_pa":      (1e-6,  "MPa"),   # Pa → MPa
     "cooling_heat_load":    (1e-6,  "MW"),    # W  → MW
     "cooling_dp_pa":        (1e-6,  "MPa"),   # Pa → MPa
+    "cooling_estimated_dp_pa": (1e-6, "MPa"),
     "chamber_wall_allow_pa":(1e-6,  "MPa"),   # Pa → MPa
     # V19 推力室设计工作区：通道几何用 mm 显示（内部 SI m）
     "cooling_channel_width_m":  (1e3, "mm"),
@@ -39,7 +40,7 @@ DISPLAY_UNIT_MAP: Dict[str, Tuple[float, str]] = {
     "cooling_wall_thickness_m": (1e3, "mm"),
     "cooling_channel_roughness_m": (1e6, "μm"),
     # V20 燃气发生器循环
-    "gg_turbine_backpressure_pa": (1e-5, "bar"),   # Pa → bar
+    "gg_turbine_backpressure_pa": (1e-6, "MPa"),   # Pa → MPa
 }
 
 
@@ -125,9 +126,9 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
         [
             ("fuel_inlet_temp",        "燃料贮箱出口液温 / Fuel tank liquid T",     "K"),
             ("ox_inlet_temp",          "液氧贮箱出口液温 / LOX tank liquid T",      "K"),
-            ("tank_pressure_pa",       "贮箱出口绝压（两路共用） / Tank outlet pressure",  "bar"),
+            ("tank_pressure_pa",       "贮箱出口绝压（两路共用） / Tank outlet pressure",  "MPa"),
             ("inlet_pressure",         "前置增压泵出口绝压 / Boost outlet pressure",  "MPa"),
-            ("feed_line_dp_pa",        "增压泵至主泵压降预算 / Feed duct ΔP budget",         "bar"),
+            ("feed_line_dp_pa",        "增压泵至主泵压降预算 / Feed duct ΔP budget",         "MPa"),
             ("boost_pump_efficiency",  "增压泵等熵效率 / Boost pump η",                "—"),
             ("pump_efficiency_ox",     "液氧泵等熵效率 / LOX pump η",                "—"),
             ("pump_efficiency_fuel",   "燃料泵等熵效率 / Fuel pump η",         "—"),
@@ -187,7 +188,7 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
             ("gg_mr_target",        "燃气发生器氧燃质量比（温度模式下为初值）",  "—"),
             ("gg_fraction_guess",   "GG 流量分数初猜 / GG flow fraction", "—"),
             ("gg_injector_dp_ratio","GG 喷注器压降比 ΔP/p_gg",           "—"),
-            ("gg_turbine_backpressure_pa", "涡轮排气背压 / Turbine backpress.", "bar"),
+            ("gg_turbine_backpressure_pa", "涡轮排气背压 / Turbine backpress.", "MPa"),
             ("gg_exhaust_expansion_ratio", "GG 排气喷管面积比 Ae/At / GG exhaust area ratio", "—"),
             ("gg_mech_efficiency",  "轴系机械效率 / Mech. η",             "—"),
             ("injector_dp_ratio_ox",   "主喷注器压降比(LOX 液路) ΔP/pc",  "—"),
@@ -205,7 +206,7 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
     (
         "压力网络·公共 / Pressure network (shared)",
         [
-            ("cooling_dp_pa",          "再生冷却给定压降预算 / Cooling ΔP budget",              "MPa"),
+            ("cooling_dp_pa",          "外部指定冷却压降 / Cooling ΔP",              "MPa"),
             ("valve_line_dp_ratio",    "支路基础管路/全开阀压降预算 ΔP/pc / Base line budget",      "—"),
         ],
     ),
@@ -214,8 +215,11 @@ PARAM_GROUPS: List[Tuple[str, List[Tuple[str, str, str]]]] = [
         # 详细参数全部移入「推力室设计」工作区（同一 input_edits 数据源）。
         "再生冷却·循环闭合 / Regen (cycle closure)",
         [
-            ("cooling_bartz_mode",  "冷却模式 1=统一准一维 0=Q与压降预算", "—"),
-            ("cooling_heat_load",   "再生冷却给定吸热预算 / Heat budget", "MW"),
+            ("cooling_bartz_mode",  "冷却模式 2=概略热负荷 1=详细通道 0=外部指定", "—"),
+            ("cooling_heat_load",   "外部指定吸热功率 / External heat load", "MW"),
+            ("cooling_reference_wall_temp_K", "热面参考壁温（估算假设）", "K"),
+            ("cooling_estimated_dp_pa", "冷却压降估计", "MPa"),
+            ("cooling_estimate_basis", "热负荷与压降估算依据", ""),
             ("coolant_cp",          "冷却剂常比热（旧模型兼容） / Legacy cp", "J/(kg·K)"),
             ("cooling_dp_auto",     "冷却压降开关（历史兼容，不再控制计算）", "—"),
             ("cooling_marching_enable", "沿程显示开关（历史兼容）", "—"),
@@ -462,15 +466,18 @@ COMPONENT_GROUPS = [
 ]
 
 
+# Labels describe displayed values, not the storage unit encoded in each key.
+# Renderers convert legacy *_bar values to MPa (factor 0.1) and pressure *_Pa
+# values to MPa (factor 1e-6); historical result keys and payloads stay intact.
 KEY_LABELS = {
     "rho_in_kgm3": "入口密度 [kg/m³]",
     "rho_out_kgm3": "出口密度 [kg/m³]",
     "rho_kgm3": "密度 [kg/m³]",
     "p_in_MPa": "入口压力 [MPa]",
     "p_out_MPa": "出口压力 [MPa]",
-    "p_in_bar": "入口压力 [bar]",
-    "p_out_bar": "出口压力 [bar]",
-    "delta_p_Pa": "压升 [Pa]",
+    "p_in_bar": "入口压力 [MPa]",
+    "p_out_bar": "出口压力 [MPa]",
+    "delta_p_Pa": "压升 [MPa]",
     "power_W": "泵功率 [MW]",
     "T_out_K": "出口温度 [K]",
     "heat_load_W": "吸热量 [MW]",
@@ -521,15 +528,15 @@ KEY_LABELS = {
     "Ae_m2": "出口面积 [m²]",
     "mach_exit": "出口马赫数",
     "exit_mach": "出口马赫数",
-    "p_exit_Pa": "出口压力 [Pa]",
-    "exit_pressure_Pa": "出口压力 [Pa]",
-    "p_amb_Pa": "环境压力 [Pa]",
+    "p_exit_Pa": "出口压力 [MPa]",
+    "exit_pressure_Pa": "出口压力 [MPa]",
+    "p_amb_Pa": "环境压力 [MPa]",
     "T_exit_K": "出口温度 [K]",
     "gamma_exit": "出口比热比 γ",
     "expansion_ratio": "面积膨胀比 [-]",
     # ── 泵部件额外字段 ─────────────────────────────────────
     "delta_p_MPa":          "压升 [MPa]",
-    "delta_p_bar":          "压升 [bar]",
+    "delta_p_bar":          "压升 [MPa]",
     "power_MW":             "泵功率 [MW]",
     "eta":                  "泵等熵效率 [-]",
     "head_m":               "扬程 [m]",
@@ -580,7 +587,7 @@ KEY_LABELS = {
     "injector_dp_ratio":      "预燃室喷注器压降比 ΔP/P_PB [-]",
     "injector_dp_Pa":         "预燃室喷注器压降 [MPa]",
     "injector_dp_MPa":        "预燃室喷注器压降 [MPa]",
-    "injector_dp_bar":        "预燃室喷注器压降 [bar]",
+    "injector_dp_bar":        "预燃室喷注器压降 [MPa]",
     "preburner_pressure_Pa":  "预燃室压力 [MPa]",
     "preburner_pressure_MPa": "预燃室压力 [MPa]",
     # ── 主燃烧室几何 ──────────────────────────────────────
@@ -733,10 +740,10 @@ KEY_LABELS = {
     "boost_pump_fuel_power_MW":  "甲烷增压泵功率 [MW]",
     "boost_pump_total_power_MW": "增压泵总功率 [MW]",
     "boost_pump_efficiency":     "增压泵效率 [-]",
-    "tank_pressure_bar":         "贮箱压力 [bar]",
-    "boost_out_pressure_bar":    "增压泵出口压力 [bar]",
-    "main_pump_inlet_pressure_bar":"主泵入口压力 [bar]",
-    "boost_pump_dp_bar":         "增压泵压升 ΔP [bar]",
+    "tank_pressure_bar":         "贮箱压力 [MPa]",
+    "boost_out_pressure_bar":    "增压泵出口压力 [MPa]",
+    "main_pump_inlet_pressure_bar":"主泵入口压力 [MPa]",
+    "boost_pump_dp_bar":         "增压泵压升 ΔP [MPa]",
     # ── 再生冷却通道 ────────────────────────────────────
     "h_coolant_W_m2K":           "冷却剂侧换热系数 h_c [W/(m²·K)]",
     "coolant_velocity_ms":       "冷却剂流速 [m/s]",
@@ -806,3 +813,20 @@ CHAMBER_INPUTS = {
     'chamber_inner_wall_material': ('内壁（燃气侧·铜合金）', '', ''),
     'chamber_outer_wall_material': ('外壳（结构层·镍基）', '', ''),
 }
+
+
+# Web supply editor fields. The legacy desktop PARAM_GROUPS remain unchanged;
+# they do not support nullable per-branch overrides.
+SUPPLY_FIELDS = tuple(
+    (f"{side}_{name}", f"{label}{title}", unit)
+    for side, label in (("fuel", "燃料"), ("ox", "液氧"))
+    for name, title, unit in (
+        ("tank_pressure_pa", "贮箱出口绝对压力", "MPa"),
+        ("boost_outlet_pressure_pa", "前置低压泵出口设计压力（绝对压力）", "MPa"),
+        ("feed_line_dp_pa", "前置泵出口至主泵入口压降（设计点给定）", "MPa"),
+        ("boost_pump_efficiency", "前置低压泵等熵效率（假设值）", "—"),
+    )
+)
+for _key, _label, _unit in SUPPLY_FIELDS:
+    if _unit == "MPa":
+        DISPLAY_UNIT_MAP[_key] = (1e-6, "MPa")

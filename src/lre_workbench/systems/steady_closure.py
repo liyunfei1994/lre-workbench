@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 import math
 
+from lre_workbench.components.nozzles.model_ids import HEATED_NOZZLE_MODELS
+
 
 ABSOLUTE_TOLERANCE_W = 10.0
 RELATIVE_TOLERANCE = 1e-5
@@ -49,14 +51,17 @@ def regenerative_heat_assumption(components):
     cooling_profile = _get(cooling, "profile", {}) or {}
     nozzle_profile = _get(nozzle, "profile", {}) or {}
     unified = (_get(cooling_profile, "version") == 1
-               and _get(cooling_profile, "model_id") == "regen_quasi1d_ph_v1")
-    distributed = _get(nozzle_profile, "model_id") == "heated_frozen_quasi1d_v1"
+               and _get(cooling_profile, "model_id") in ("regen_quasi1d_ph_v1", "regen_concept_heat_v1"))
+    distributed = _get(nozzle_profile, "model_id") in HEATED_NOZZLE_MODELS
     if unified and distributed:
         chamber_heat = _number(_get(_get(components.get("main_chamber"), "outputs", {}), "heat_loss_W"))
         if chamber_heat != 0.0:
             return "已记录统一冷却与沿程非绝热热侧模型，但主室集中再生热汇并非已确认的零值；需核查是否重复扣热，不能仅凭模型名称判定闭合。"
+        if _get(cooling_profile, "model_id") == "regen_concept_heat_v1":
+            return "在参考壁温假设下按概略受热面估算沿程热流；同一组单元热量从燃气扣除并加入冷却剂端口焓，主室不重复扣热。压降为单独估计，未求解实际壁温、通道水力或冷却能力。"
         return "再生吸热、压降与出口状态来自统一准一维冷却剖面；燃气侧按同一组单元热量沿程扣热并冻结组成，主室不再重复集中扣除再生热。仍为系统级低阶模型，未获试验验证。"
-    if _get(_get(cooling, "outputs", {}), "mode") == 0 and not cooling_profile and not nozzle_profile:
+    adiabatic = not nozzle_profile or _get(nozzle_profile, "model_id") == "adiabatic_frozen_same_eos_v1"
+    if _get(_get(cooling, "outputs", {}), "mode") == 0 and not cooling_profile and adiabatic:
         flow = _get(_get(nozzle, "outputs", {}), "flow_model")
         nozzle_description = ("冻结组成的等熵喷管" if flow == 0 else
                               "定比热理想气体等熵喷管" if flow == -1 else "未确认的喷管模型")
@@ -75,8 +80,10 @@ def audit_energy(states, components):
     """
     states = states if isinstance(states, Mapping) else {}
     components = components if isinstance(components, Mapping) else {}
+    state_ids = STATE_IDS + (("cooling_inlet",) if "cooling_inlet" in states else ())
+    paper_valves = _get(_get(states.get("cooling_inlet"), "metadata", {}), "valve_topology_id") == "paper_split_before_cooling_v1"
     references = {}
-    for key in STATE_IDS:
+    for key in state_ids:
         reference = _get(_get(states.get(key), "metadata", {}), "reference_id")
         references[key] = reference if isinstance(reference, str) and reference.strip() else None
     declared = {value for value in references.values() if value is not None}
@@ -104,7 +111,7 @@ def audit_energy(states, components):
             missing.append(f"components.{component}.outputs.{field}")
         return value
 
-    enthalpy = {key: flux(key) for key in STATE_IDS}
+    enthalpy = {key: flux(key) for key in state_ids}
     powers = {key: output(key, "power_W") for key in ("ox_boost_pump", "fuel_boost_pump", "ox_pump", "fuel_pump")}
     turbines = {side: output(f"{side}_preburner_turbine", "turbine_power_W") for side in ("ox", "fuel")}
     q_cool = output("cooling_channel", "heat_load_W")
@@ -141,14 +148,21 @@ def audit_energy(states, components):
         check(f"{side}_pump_energy", f"{label}主泵能量", [enthalpy[f"{prefix}_after_pump"]],
               [enthalpy[f"{prefix}_pump_inlet"], powers[f"{side}_pump"]], "主泵出口焓流 − 入口焓流 − 轴功")
     check("regenerative_coolant_energy", "冷却剂吸热与焓增", [enthalpy["fuel_after_cooling"]],
-          [enthalpy["fuel_after_pump"], q_cool], "冷却出口焓流 − 冷却入口焓流 − 记录吸热量")
+          [enthalpy.get("cooling_inlet", enthalpy["fuel_after_pump"]), q_cool], "冷却出口焓流 − 冷却入口焓流 − 记录吸热量")
+    if "cooling_inlet" in states:
+        check("MFV_throttle_energy", "主燃料阀等焓", [enthalpy["cooling_inlet"]],
+              [flux("fuel_after_pump", "cooling_inlet")], "MFV出口焓流 − MFV流量乘燃料泵出口比焓")
     for propellant, source, label in (("fuel", "fuel_after_cooling", "燃料"), ("ox", "lox_after_pump", "液氧")):
         branches = [f"branch_{propellant}_to_{pb}" for pb in ("opb", "fpb")]
-        check(f"{propellant}_split_energy", f"{label}分流焓流", [enthalpy[key] for key in branches],
-              [enthalpy[source]], "两支路焓流之和 − 取流点总焓流")
+        if propellant == "fuel" and paper_valves:
+            check("fuel_split_energy", "燃料泵后旁路分流焓流", [enthalpy["branch_fuel_to_opb"], enthalpy["cooling_inlet"]],
+                  [enthalpy["fuel_after_pump"]], "OPFV旁路与MFV主路焓流之和 − 燃料泵出口总焓流")
+        else:
+            check(f"{propellant}_split_energy", f"{label}分流焓流", [enthalpy[key] for key in branches],
+                  [enthalpy[source]], "两支路焓流之和 − 取流点总焓流")
         for key, pb_label in zip(branches, ("富氧", "富燃")):
             check(f"{key}_throttle_energy", f"{label}至{pb_label}预燃室等焓", [enthalpy[key]],
-                  [flux(source, key)], "支路入口焓流 − 同支路流量乘取流点比焓")
+                  [flux("fuel_after_pump" if paper_valves and key == "branch_fuel_to_opb" else source, key)], "支路入口焓流 − 同支路流量乘取流点比焓")
     for side, short, label in (("ox", "opb", "富氧"), ("fuel", "fpb", "富燃")):
         check(f"{side}_preburner_energy", f"{label}预燃室能量", [enthalpy[f"{side}_preburner_outlet"]],
               [enthalpy[f"branch_fuel_to_{short}"], enthalpy[f"branch_ox_to_{short}"]], "预燃室出口焓流 − 两推进剂入口焓流；生成焓已计入共同焓基准")

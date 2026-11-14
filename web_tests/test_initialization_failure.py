@@ -47,7 +47,7 @@ class InitializationFailureTests(unittest.TestCase):
         self.assertEqual(self.api.post("/api/auth/setup", json={"username": "admin",
             "display_name": "初始化回归", "password": TEST_PASSWORD}).status_code, 200)
         response = self.api.post("/api/projects", json={"name": "初始化失败回归",
-            "inputs": asdict(EngineInputs())})
+            "inputs": asdict(EngineInputs(combustion_loss_model="adiabatic"))})
         self.assertEqual(response.status_code, 200, response.text)
         self.project = response.json()["project"]
         response = self.api.post(f"/api/projects/{self.project['id']}/jobs", json={"revision": 1})

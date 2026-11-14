@@ -1,8 +1,9 @@
 """Task-defined numerical acceptance, independent of initial model evaluations."""
 import math
+from lre_workbench.solvers.controls import THRUST_RELATIVE_TOLERANCE
 
 
-def ffsc_acceptance_policy(inputs, relative_thrust_tolerance=1e-6):
+def ffsc_acceptance_policy(inputs, relative_thrust_tolerance=THRUST_RELATIVE_TOLERANCE):
     """Record fixed N/W tolerances; these are not component engineering limits."""
     thrust = float(inputs.thrust)
     relative = float(relative_thrust_tolerance)

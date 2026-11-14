@@ -295,7 +295,7 @@ class BoundarySnapshot:
     of_ratio: float = 0.0
     thrust_N: float = 0.0
     isp_s: float = 0.0
-    # 冷却剂（CH4 全流量）
+    # 冷却剂（实际所选冷却支路，未必等于整机燃料总流量）
     coolant_in_T_K: float = 0.0
     coolant_in_p_Pa: float = 0.0
     coolant_out_T_K: float = 0.0     # 本次循环采用的冷却出口
@@ -317,6 +317,8 @@ class BoundarySnapshot:
     film_T_K: float = 850.0
     # 输入指纹（staleness 校验：与当前界面输入对比）
     inputs_fingerprint: Dict[str, Any] = field(default_factory=dict)
+    # Appended for positional compatibility; mdot_fuel above remains total fuel.
+    mdot_coolant: float = 0.0
 
 
 def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
@@ -337,13 +339,18 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
         geometry = {}
         if profile is not None:
             if (not isinstance(profile, dict)
-                    or profile.get("model_id") != "regen_quasi1d_ph_v1"
+                    or profile.get("model_id") not in ("regen_quasi1d_ph_v1", "regen_concept_heat_v1")
                     or not isinstance(profile.get("geometry"), dict)
                     or not profile["geometry"].get("nodes")):
                 return None
             geometry = profile["geometry"]
             At = math.pi * float(geometry["r_t_m"]) ** 2
-        fuel_pump_out = results.states.get("fuel_after_pump")
+        coolant_inlet = results.states.get("cooling_inlet")
+        feed = (getattr(results, "steady_closure", None) or {}).get("feed_network", {})
+        if coolant_inlet is None:
+            if feed.get("mode") == "valve_constrained_concept_design":
+                return None  # Never replace a missing post-MFV port by pump state.
+            coolant_inlet = results.states.get("fuel_after_pump")
         fuel_cooled = results.states.get("fuel_after_cooling")
         inj_ox = results.states.get("ox_turbine_exhaust")
         inj_fu = results.states.get("fuel_turbine_exhaust")
@@ -369,9 +376,10 @@ def snapshot_from_results(results) -> Optional[BoundarySnapshot]:
             expansion_ratio=float(geometry.get("expansion_ratio", getattr(results.inputs, "expansion_ratio", 0.0))),
             film_T_K=float(s.get("fuel_turbine_exhaust_T_K", 850.0) or 850.0),
         )
-        if fuel_pump_out is not None:
-            snap.coolant_in_T_K = float(fuel_pump_out.temperature)
-            snap.coolant_in_p_Pa = float(fuel_pump_out.pressure)
+        if coolant_inlet is not None:
+            snap.coolant_in_T_K = float(coolant_inlet.temperature)
+            snap.coolant_in_p_Pa = float(coolant_inlet.pressure)
+            snap.mdot_coolant = float(coolant_inlet.mass_flow)
         if fuel_cooled is not None:
             snap.coolant_out_T_K = float(fuel_cooled.temperature)
             snap.coolant_out_p_Pa = float(fuel_cooled.pressure)

@@ -84,7 +84,7 @@ def numerical_convergence(results) -> dict:
         if thermal.get("enabled") is True and thermal["status"] == "pass":
             names = {check.get("name", check.get("key")) for check in thermal.get("checks", [])}
             from lre_workbench.systems.regenerative import THERMAL_FEEDBACK_SOURCE, COUPLING_CRITERIA, coupling_passed
-            if thermal.get("source") == THERMAL_FEEDBACK_SOURCE:
+            if thermal.get("source") in (THERMAL_FEEDBACK_SOURCE, "regen_concept_heat_v1"):
                 values = {c.get("name"): c.get("residual") for c in thermal.get("checks", [])}
                 present = {name for name, _, _ in COUPLING_CRITERIA}.issubset(names)
                 if not present or not coupling_passed(values):

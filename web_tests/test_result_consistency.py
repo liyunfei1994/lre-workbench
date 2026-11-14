@@ -92,13 +92,22 @@ class ResultConsistencyTests(unittest.TestCase):
     def test_complete_saved_ffsc_record_passes_without_mutation(self):
         result = fixture()
         before = deepcopy(result)
-        view = result_consistency_view(result, "record-7")
+        view = result_consistency_view(result, "saved")
         self.assertEqual(view["status"], "pass", view["conflicts"] or [r for r in view["checks"] if r["status"] != "pass"])
-        self.assertEqual(view["record_id"], "record-7")
+        self.assertEqual(view["record_id"], "saved")
         self.assertGreater(view["checked_count"], 50)
         self.assertEqual(view["conflicts"], [])
         self.assertEqual(result, before)
         json.dumps(view, allow_nan=False)
+
+    def test_another_records_pump_snapshot_is_a_consistency_conflict(self):
+        result = fixture()
+        before = deepcopy(result)
+        view = result_consistency_view(result, "record-7")
+        self.assertEqual(view["status"], "conflict")
+        for side in ("ox", "fuel"):
+            self.assertEqual(checks(view)["geometry.integrity.pump_geometry.pumps." + side]["status"], "conflict")
+        self.assertEqual(result, before)
 
     def test_si_pressure_changed_without_display_alias_is_reported(self):
         result = fixture()

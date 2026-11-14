@@ -16,7 +16,34 @@ METHANE_DATASETS = {
     "gri30": {"file": "gri30.yaml", "phase": "gri30", "label": "GRI30（历史热化学数据）"},
     "gri30_highT": {"file": "gri30_highT.yaml", "phase": "gri30", "label": "GRI30 高温热化学数据"},
 }
+PR_EOS_MODELS = ("Peng-Robinson", "Peng-Robinson-Boston-Mathias")
+GAS_EOS_MODELS = ("ideal-gas", *PR_EOS_MODELS)
 _ACTIVE = ContextVar("methane_thermo_dataset", default="gri30")
+_GAS_EOS = ContextVar("gas_eos", default="ideal-gas")
+_GAS_SPECIES = ContextVar("gas_species_policy", default="full")
+
+
+def active_gas_eos():
+    return _GAS_EOS.get()
+
+
+def active_gas_species_policy():
+    return _GAS_SPECIES.get()
+
+
+@contextmanager
+def gas_eos_scope(eos="ideal-gas", species_policy="auto"):
+    if eos not in GAS_EOS_MODELS:
+        raise ValueError(f"不支持的燃气状态方程：{eos!r}")
+    if species_policy not in ("auto", "full", "pr_supported_v1"):
+        raise ValueError(f"不支持的燃气物种集合：{species_policy!r}")
+    policy = ("pr_supported_v1" if eos in PR_EOS_MODELS else "full") if species_policy == "auto" else species_policy
+    eos_token, species_token = _GAS_EOS.set(eos), _GAS_SPECIES.set(policy)
+    try:
+        yield
+    finally:
+        _GAS_SPECIES.reset(species_token)
+        _GAS_EOS.reset(eos_token)
 
 
 @lru_cache(maxsize=2)
@@ -61,6 +88,8 @@ def saved_input_identity(values):
     """
     resolved = dict(values)
     resolved.setdefault("methane_thermo_dataset", "gri30")
+    resolved.setdefault("gas_eos", "ideal-gas")
+    resolved.setdefault("gas_species_policy", "full")
     # A persisted record predating explicit liner identity used GRCop-84.
     # Empty dataset asks EngineInputs to resolve that retained material; it
     # must not inherit the GRCop-42 dataset already present in new defaults.
@@ -84,6 +113,7 @@ def model_thermo_scope(function):
     """Keep all nested energy evaluations on the model's declared data."""
     @wraps(function)
     def wrapped(model, *args, **kwargs):
-        with methane_dataset_scope(getattr(model.inputs, "methane_thermo_dataset", "gri30")):
+        with methane_dataset_scope(getattr(model.inputs, "methane_thermo_dataset", "gri30")), gas_eos_scope(
+                getattr(model.inputs, "gas_eos", "ideal-gas"), getattr(model.inputs, "gas_species_policy", "auto")):
             return function(model, *args, **kwargs)
     return wrapped

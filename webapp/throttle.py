@@ -12,6 +12,9 @@ import warnings
 from webapp.solver import EngineInputs, input_values, plain, science_environment
 from webapp.validation import fingerprint
 from webapp.steady_sensitivity import throttle_response_gains
+from lre_workbench.components.nozzles.model_ids import (
+    HEATED_IDEAL_LEGACY_MODEL, HEATED_IDEAL_SAME_EOS_MODEL, HEATED_REAL_GAS_MODEL,
+)
 from lre_workbench.solvers.convergence import numerical_convergence
 from lre_workbench.systems.steady_closure import audit_energy
 from lre_workbench.systems.steady_network import audit_network, validate_hardware
@@ -125,6 +128,8 @@ def _cooling_baseline(calculation, values, throat_area, height):
     if not values["cooling_bartz_mode"]:
         return {"mode": "specified_heat_and_pressure_budget", "geometry_status": "not_applicable",
                 "validation_status": "no_fixed_hardware_cooling_prediction"}
+    if values["cooling_bartz_mode"] == 2:
+        raise ValueError("概略热负荷仅用于总体设计；请完成详细通道模型与部件耦合校核，再建立固定硬件冷却基准。")
 
     def require(condition, detail):
         if not condition:
@@ -227,7 +232,7 @@ def _cooling_baseline(calculation, values, throat_area, height):
         compare_geometry({key: cell.get(key) for key in geometric}, geometric, "沿程单元几何")
 
     states = calculation.get("states") or {}
-    inlet, outlet = states.get("fuel_after_pump") or {}, states.get("fuel_after_cooling") or {}
+    inlet, outlet = states.get("cooling_inlet", states.get("fuel_after_pump")) or {}, states.get("fuel_after_cooling") or {}
     mass = number(outlet.get("mass_flow"), "冷却流量", positive=True)
     close(inlet.get("mass_flow"), mass, "冷却入口流量")
     for node in nodes:
@@ -301,7 +306,13 @@ def _cooling_baseline(calculation, values, throat_area, height):
         close(history[-1].get(residual), error, "热侧历史末值", atol=1e-12)
     hot = profile.get("hot_side_profile") or {}
     nozzle_profile = (components.get("nozzle") or {}).get("profile") or {}
-    require(hot.get("model_id") == "heated_frozen_quasi1d_v1" and hot == nozzle_profile,
+    real_gas = values.get("gas_eos") == "Peng-Robinson-Boston-Mathias"
+    common_ideal = not real_gas and values.get("hot_side_thermo_method") == "same_eos"
+    expected_model = HEATED_REAL_GAS_MODEL if real_gas else (
+        HEATED_IDEAL_SAME_EOS_MODEL if common_ideal else HEATED_IDEAL_LEGACY_MODEL)
+    require(hot.get("model_id") == expected_model and hot == nozzle_profile
+            and (not real_gas or hot.get("gas_eos") == values["gas_eos"])
+            and (not common_ideal or (hot.get("gas_eos"), hot.get("thermo_method")) == ("ideal-gas", "same_eos")),
             "缺少本次喷管热侧同源记录")
     require(isinstance(hot.get("nodes"),list) and len(hot["nodes"]) > 2
             and isinstance(hot.get("cells"),list) and len(hot["cells"]) == len(geometry["cells"]), "热侧沿程证据不完整")
@@ -386,6 +397,8 @@ def source_baseline(source):
         network = closure.get("feed_network")
         if not isinstance(network, dict):
             raise ValueError("来源 FFSC 设计点缺少四支路供给网络，请先重新计算设计点。")
+        if network.get("mode") == "valve_constrained_concept_design":
+            raise ValueError("三阀来源使用独立安装拓扑，不能套用旧四支路冻结阻力节流/动态入口；请在概念设计中校核阀特性，并用阀门选型页查看执行器初估。固定发动机运行仍需相应泵、涡轮和喷注器特性。")
         target_mr = values["use_target_preburner_mr"] >= .5 or values["use_target_preburner_temp"] >= .5
         required = ["mdot_fuel_kg_s", "mdot_ox_kg_s"]
         if target_mr:

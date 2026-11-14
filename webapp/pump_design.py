@@ -53,6 +53,7 @@ def _field(key, label, value=None, unit="—", state="missing", source="未记�
 
 def _handoff(result, pump, side):
     calculation = _mapping(_mapping(result).get("calculation"))
+    inputs = _mapping(calculation.get("inputs") or _mapping(result).get("submitted_inputs"))
     component = "ox_pump" if side == "ox" else "fuel_pump"
     outputs = _mapping(_mapping(_mapping(calculation.get("components")).get(component)).get("outputs"))
     point = _mapping(pump.get("design_point"))
@@ -78,8 +79,8 @@ def _handoff(result, pump, side):
     )
     inconsistent = set()
     for output_key, point_key, factor in comparisons:
-        if output_key in outputs and point_key in point:
-            value = outputs[output_key]
+        if point_key in point:
+            value = outputs.get(output_key)
             if not _finite(value) or not _close(value * factor, point[point_key]):
                 inconsistent.add(point_key)
                 problems.append("保存系统点与组件输出不一致：" + output_key)
@@ -87,8 +88,23 @@ def _handoff(result, pump, side):
         if not _close(outputs["d_impeller_est_m"], dimensions["impeller_diameter_m"]):
             problems.append("保存外径与组件输出不一致")
     reason = str(pump.get("reason", ""))
-    if not point and any(word in reason for word in ("不一致", "校验", "无法识别")):
+    if pump.get("source_conflict") or (not point and any(word in reason for word in ("不一致", "校验", "无法识别"))):
         problems.append(reason)
+
+    # A saved curve can still be geometrically valid while belonging to different
+    # conceptual assumptions. Keep it frozen, and flag this separately from the
+    # hydraulic output checks above. No current defaults or draft values are read.
+    prefix = "lox" if side == "ox" else "fuel"
+    for key in ("inlet_flow_coefficient", "outlet_flow_coefficient", "eye_hub_ratio",
+                "axial_length_ratio", "head_coefficient_psi"):
+        if key in assumptions and not _close(inputs.get(f"{prefix}_pump_{key}"), assumptions[key]):
+            problems.append("保存几何与概念设计输入不一致或输入缺失：" + f"{prefix}_pump_{key}")
+    if assumptions and "stages" in point and not _close(inputs.get(f"{prefix}_pump_n_stages"), point["stages"]):
+        problems.append("保存几何与概念设计级数不一致或输入缺失：" + f"{prefix}_pump_n_stages")
+    if "head_coefficient_psi" in assumptions and not _close(outputs.get("psi_head_coefficient"), assumptions["head_coefficient_psi"]):
+        problems.append("保存几何与组件压头系数不一致或输出缺失")
+    if side == "fuel" and point.get("fluid") == "CH4" and inputs.get("propellant_pair") != "lox_methane":
+        problems.append("保存几何与概念设计工质不一致或输入缺失")
 
     def point_field(key, label, unit, state="recorded", target="", note="", factor=1):
         value = point.get(key)

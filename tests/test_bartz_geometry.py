@@ -60,6 +60,28 @@ class BartzGeometryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cm._wall_heat(c, bulk, hot, **kwargs, throat_upstream_radius_m=invalid)
 
+    def test_supplied_real_gas_temperature_ratio_controls_wall_heat(self):
+        geometry = build_regen_geometry(**GEOM)
+        cell = min(geometry["cells"], key=lambda row: abs(row["x_m"]-geometry["x_throat_m"]))
+        state_args = dict(gamma=1.2, T_c=3800., pc=33e6, mu_g=8e-5, cp_g=2800., Pr_g=.7)
+        ideal = cm._hot_state(cell, **state_args)
+        ratio = 1.25
+        real = cm._hot_state(cell, **state_args, supplied={
+            "T_static_K": ideal["T0_K"]/ratio, "total_static_temperature_ratio": ratio})
+        bulk = dict(rho_kgm3=450., mu_Pas=1e-4, k_WmK=.2, cp_JkgK=2400., T_K=200.)
+        kwargs = dict(mdot_coolant=166., mdot_total=765., r_t=BASE["r_t"], pc=33e6,
+            wall_conductivity=320., k_wall_func=None, htc_enhancement=1., x_throat=geometry["x_throat_m"],
+            gas_emissivity=.2, heat_transfer_enabled=False,
+            throat_upstream_radius_m=geometry["throat_upstream_radius_m"])
+        result_ideal = cm._wall_heat(cell, bulk, ideal, **kwargs)
+        result_real = cm._wall_heat(cell, bulk, real, **kwargs)
+        ideal_ratio = 1+(.2*ideal["M"]**2/2)
+        expected = ((1+bulk["T_K"]/3800.*ratio)/(1+bulk["T_K"]/3800.*ideal_ratio))**(-.68)
+        expected *= (ratio/ideal_ratio)**(-.12)
+        self.assertAlmostEqual(result_real["h_g_W_m2K"]/result_ideal["h_g_W_m2K"], expected, places=13)
+        with self.assertRaisesRegex(ValueError, "total/static temperature ratio"):
+            cm._hot_state(cell, **state_args, supplied=real | {"total_static_temperature_ratio": 1.4})
+
     def test_length_conflict_is_rejected_before_fluid_solve(self):
         with self.assertRaisesRegex(ValueError, "L_conv conflicts"):
             cm.march_regen_circuit(**BASE, L_conv=.01)

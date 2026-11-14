@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS jobs (
  started REAL, finished REAL, progress TEXT, result TEXT, error TEXT);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status,created);
 CREATE INDEX IF NOT EXISTS jobs_project ON jobs(project_id,created);
+CREATE TABLE IF NOT EXISTS job_monitor_events (
+ job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+ seq INTEGER NOT NULL, recorded REAL NOT NULL, event TEXT NOT NULL,
+ PRIMARY KEY(job_id,seq));
 CREATE TABLE IF NOT EXISTS fixed_steady_tasks (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
  source_job_id TEXT NOT NULL REFERENCES jobs(id),
@@ -56,6 +60,17 @@ CREATE TABLE IF NOT EXISTS fixed_steady_trim_checks (
  submitted_by TEXT NOT NULL REFERENCES users(id), created REAL NOT NULL,
  report TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS fixed_steady_trim_checks_task ON fixed_steady_trim_checks(task_id,created);
+CREATE TABLE IF NOT EXISTS component_iterations (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+ source_job_id TEXT NOT NULL REFERENCES jobs(id), component TEXT NOT NULL,
+ target_revision INTEGER NOT NULL, submitted_by TEXT NOT NULL REFERENCES users(id),
+ created REAL NOT NULL, snapshot TEXT NOT NULL,
+ FOREIGN KEY(project_id,target_revision) REFERENCES revisions(project_id,revision));
+CREATE INDEX IF NOT EXISTS component_iterations_project ON component_iterations(project_id,created);
+CREATE TABLE IF NOT EXISTS hardware_baselines (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+ source_job_id TEXT NOT NULL REFERENCES jobs(id), submitted_by TEXT NOT NULL REFERENCES users(id),
+ created REAL NOT NULL, snapshot TEXT NOT NULL, UNIQUE(project_id,source_job_id));
 """
 
 

@@ -177,6 +177,29 @@ test("component aliases prefer saved SI quantities without discarding a usable f
   assert.equal(fields.find(field=>field.key==="p_in_Pa").value,1);
 });
 
+test("historical bar pressures render in MPa without rewriting or duplicating saved values", () => {
+  for (const [outputs,expected] of [
+    [{p_in_bar:9.5,p_out_bar:400,delta_p_bar:390.5},[.95,40,39.05]],
+    [{p_in_Pa:950000,p_in_bar:999,p_out_MPa:40,p_out_bar:999,
+      delta_p_Pa:39050000,delta_p_MPa:999,delta_p_bar:999},[.95,40,39.05]],
+    [{p_in_Pa:null,p_in_bar:0,p_out_bar:0,delta_p_Pa:null,delta_p_bar:0},[0,0,0]],
+  ]) {
+    const input=record();
+    input.result.calculation.components.ox_pump.outputs=outputs;
+    const before=structuredClone(input);
+    const fields=componentAnalysisItems(input.result).find(item=>item.id==="ox_pump").fields;
+    assert.equal(fields.length,3,"each pressure appears once");
+    for (const [index,prefix] of ["p_in_","p_out_","delta_p_"].entries()) {
+      const field=fields.find(item=>item.key.startsWith(prefix));
+      assert.equal(field.unit,"MPa");
+      assert(Math.abs(field.value-expected[index])<1e-10);
+    }
+    const html=renderAnalysis("components",input);
+    assert.doesNotMatch(html,/\[bar\]|>bar</);
+    assert.deepEqual(input,before,"unit display must not mutate the original record");
+  }
+});
+
 test("retired results are unavailable in all system views and retain their raw data",()=>{
   const input=record('gg'),before=structuredClone(input);
   for(const view of ['overview','results_overview','solver_diagnostics','states','components','topology','log']){
@@ -470,6 +493,18 @@ test("engineering tables separate symbols, values and units while solver diagnos
   assert.match(html,/role="img" aria-label="系统质量流量，单位 kg\/s/);
   assert(html.indexOf('class="summary-grid"') < html.indexOf("<h2>系统约束校核</h2>"));
   assert(html.indexOf("<h2>系统约束校核</h2>") < html.indexOf('class="panel engineering-panel diagnostics-panel"'));
+});
+
+test("BM result summary and pre-loss temperature labels preserve the declared EOS meaning",()=>{
+  configureResultSchema({...schema,overview_groups:{ffsc:[{title:"求解状态",fields:[{key:"thermo_source",label:"热力学计算来源",unit:"—"}]}]}});
+  const input=record();
+  input.result.calculation.inputs.gas_eos="Peng-Robinson-Boston-Mathias";
+  input.result.calculation.summary.thermo_source=1;
+  input.result.calculation.components.main_chamber={outputs:{T_chamber_ideal_K:3400}};
+  const before=structuredClone(input),html=renderAnalysis("overview",input);
+  assert.match(html,/PR–BM 求解 \/ Cantera 物种热数据/);
+  assert.equal(componentAnalysisItems(input.result).find(row=>row.id==="main_chamber").fields[0].label,"经验温升折减前 HP 温度");
+  assert.deepEqual(input,before);
 });
 
 test("flow comparisons retain the actual shared scale and reveal mass imbalance", () => {

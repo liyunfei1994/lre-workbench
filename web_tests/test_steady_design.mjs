@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {renderSteadyDesignSummary,renderSteadyDesignBasis,renderSupplyBasis} from "../webapp/static/steady-design.js";
+import {renderSteadyDesignSummary,renderSteadyDesignBasis,renderSupplyBasis,renderDesignTraceability} from "../webapp/static/steady-design.js";
 import {renderGasHandoff} from "../webapp/static/gas-handoff.js";
 
 const fixture=()=>({schema_version:1,status:"review_required",scope_label:"FFSC 稳态总体设计基线",source:"保存记录 A",gates:[{id:"energy",label:"能量闭合",status:"pass",target:"checks",detail:"重核保存状态"},{id:"constraints",label:"系统约束",status:"review",target:"checks",detail:"壁温限值未设定"}],models:[{label:"燃气 EOS",value:"ideal-gas"}],modules:[{label:"泵",status:"recorded",delivers:"所需泵功",pending:"特性图验证"}],actions:[{label:"高压筛查",detail:"选择同一记录",target:"models"}],stations:[{label:"涡轮入口",p_Pa:60e6,T_K:750,state_basis:{pressure:"total",temperature:"total"},status:"complete"}]});
+
+test("steady summary carries the same project, revision and evidence as pump handoff",()=>{
+  const trace={status:"verified",source:{project_id:"project-A",revision:7,record_id:"job-A"},
+    calculation_sha256:"solution-hash",geometry_sha256:{ox:"ox-geometry",fuel:"fuel-geometry"}};
+  const report={...fixture(),traceability:trace},before=structuredClone(report);
+  const html=renderSteadyDesignSummary(report);
+  for(const text of ["project-A","v7","job-A","solution-hash","ox-geometry","fuel-geometry","来源与保存证据一致"])assert.ok(html.includes(text),text);
+  assert.deepEqual(report,before);
+  assert.equal(renderDesignTraceability(null),"");
+  assert.match(renderDesignTraceability({...trace,status:"legacy"}),/追溯证据未冻结/);
+  const conflict=renderDesignTraceability({...trace,status:"conflict",issues:['<script>bad</script>']});
+  assert.match(conflict,/暂停泵几何交接/);assert.match(conflict,/&lt;script&gt;/);assert.doesNotMatch(conflict,/<script>/);
+});
 
 test("overall evidence separates equation closure from hardware and preserves source",()=>{
   const r=fixture(), before=JSON.stringify(r), html=renderSteadyDesignSummary(r)+renderSteadyDesignBasis(r);

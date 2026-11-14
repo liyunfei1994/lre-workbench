@@ -10,6 +10,11 @@ const ffscIds = ["fuel_tank", "lox_tank", "fuel_boost_out", "lox_boost_out", "fu
 const ffsc = () => Object.fromEntries(ffscIds.map(id => [id, sample({name: id})]));
 const node = (model, id) => model.nodes.find(item => item.id === id);
 const group = (model, id) => model.groups.find(item => item.id === id);
+const valveInputs=topology_id=>({valve_configuration_json:JSON.stringify({schema_version:1,enabled:true,topology_id,valves:{
+  MFV:{id:"MFV",fluid:"CH4",upstream_node:"fuel_after_pump",downstream_node:"cooling_inlet"},
+  OPFV:{id:"OPFV",fluid:"CH4",upstream_node:topology_id==="paper_split_before_cooling_v1"?"fuel_after_pump":"fuel_after_cooling",downstream_node:"opfv_outlet"},
+  FPOV:{id:"FPOV",fluid:"O2",upstream_node:"lox_after_pump",downstream_node:"fpov_outlet"},
+}})});
 const freezeDeep = value => {
   if (value && typeof value === "object") { Object.values(value).forEach(freezeDeep); Object.freeze(value); }
   return value;
@@ -27,6 +32,25 @@ test("FFSC separates supply routes and both gas branches without invented nodes"
   for (const entry of model.groups) assert.match(entry.caption, /离散接口状态.*不表示空间距离/);
   assert.equal(node(model, "lox_tank").code, "O01");
   assert.equal(node(model, "main_chamber").code, "C01");
+});
+
+test("valve state routes use saved split topology and break at a missing valve outlet",()=>{
+  const states={...ffsc(),cooling_inlet:sample(),opfv_outlet:sample(),fpov_outlet:sample()};
+  for(const topology of ["paper_split_before_cooling_v1","all_fuel_cooled_then_split_valves_v1"]){
+    const inputs=valveInputs(topology),model=buildFlowModel(states,{inputs}),fuelRoutes=group(model,"fuel").segments;
+    assert.deepEqual(fuelRoutes[0].slice(-3),["fuel_after_pump","cooling_inlet","fuel_after_cooling"]);
+    assert.deepEqual(fuelRoutes[1],[topology==="paper_split_before_cooling_v1"?"fuel_after_pump":"fuel_after_cooling","opfv_outlet"]);
+    assert.deepEqual(group(model,"ox").segments[1],["lox_after_pump","fpov_outlet"]);
+    const partial={...states};delete partial.cooling_inlet;
+    assert.ok(!group(buildFlowModel(partial,{inputs}),"fuel").segments.some(route=>route.includes("fuel_after_pump")&&route.includes("fuel_after_cooling")));
+  }
+});
+
+test("unrecognized saved valve topology never falls back to historical all-fuel routes",()=>{
+  const states=ffsc(),inputs={valve_configuration_json:'{"schema_version":2,"enabled":true}'};
+  const model=buildFlowModel(states,{inputs});
+  assert.ok(group(model,"fuel").segments.every(segment=>segment.length===1));
+  assert.match(group(model,"fuel").caption,/无法识别/);
 });
 
 
@@ -94,6 +118,13 @@ test("metadata distinguishes inlet mixture quantities, backend sources and unkno
   assert.equal(fallback.nodes[0].metadata[0].value, "替代热力学模型");
   const unknown = buildFlowModel({main_chamber: sample({metadata: {thermo_source: 7}})});
   assert.equal(unknown.nodes[0].metadata[0].value, 7);
+});
+
+test("BM flow ports identify their solver separately from the Cantera reference data",()=>{
+  const states={main_chamber:sample({metadata:{thermo_source:1,model:{eos:"Peng-Robinson-Boston-Mathias"}}})};
+  const before=structuredClone(states),model=buildFlowModel(states);
+  assert.equal(model.nodes[0].metadata.find(row=>row.key==="thermo_source").value,"PR–BM 求解 / Cantera 物种热数据");
+  assert.deepEqual(states,before);
 });
 
 test("component links refer only to adjacent components actually present in the result", () => {

@@ -3,17 +3,15 @@ from __future__ import annotations
 import copy
 import math
 from lre_workbench.runtime.tasks import checkpoint
+from lre_workbench.solvers.monitor import emit_monitor, monitored
+from lre_workbench.solvers.controls import COUPLING_CRITERIA, COUPLING_MAX_ITERATIONS
 
 
 THERMAL_FEEDBACK_SOURCE = "regen_quasi1d_ph_v1"
-COUPLING_CRITERIA = (
-    ("pressure_residual_Pa", .5, "Pa"),
-    ("hot_side_temperature_residual_K", .001, "K"),
-    ("geometry_relative_residual", 2e-8, "1"),
-    ("heat_relative_residual", 2e-8, "1"),
-    ("hot_side_relative_residual", 5e-7, "1"),
-    ("cell_heat_relative_residual", 5e-7, "1"),
-)
+
+
+def cooling_pressure_seed(inputs):
+    return inputs.cooling_estimated_dp_pa if inputs.cooling_bartz_mode == 2 else inputs.cooling_dp_pa
 
 
 def coupling_checks(evidence):
@@ -87,15 +85,25 @@ def cooling_arguments(model, material=None):
         gas_emissivity=i.cooling_gas_emissivity,wall_temp_limit_K=i.cooling_wall_temp_limit_K,
         wall_temp_limit_status=getattr(i,"cooling_wall_temp_limit_status","provisional"),
         wall_temp_limit_basis=getattr(i,"cooling_wall_temp_limit_basis",""),
-        film_fraction=i.film_cooling_fraction)
+        film_fraction=i.film_cooling_fraction,
+        reference_wall_temperature_K=i.cooling_reference_wall_temp_K,
+        estimate_basis=i.cooling_estimate_basis)
 
 
 def close_regen_cycle(model,evaluator,*x):
     from lre_workbench.components.pumps.model import fluid_density
     from lre_workbench.components.cooling.marching import CoolantMarchError
     physical=bool(model.inputs.cooling_bartz_mode)
-    if not physical and not getattr(model,"_feed_hardware",None):
+    if not physical and not getattr(model,"_feed_hardware",None) and not getattr(model,"_valve_configuration",{}).get("enabled"):
         return evaluator(*x)
+    return _close_regen_cycle_monitored(model, evaluator, *x)
+
+
+@monitored("thermal", scope="model_evaluation")
+def _close_regen_cycle_monitored(model, evaluator, *x):
+    from lre_workbench.components.pumps.model import fluid_density
+    from lre_workbench.components.cooling.marching import CoolantMarchError
+    physical=bool(model.inputs.cooling_bartz_mode)
     previous=getattr(model,"_hydraulic_trial",None)
     model._hydraulic_trial={}
     seed=getattr(model,"_regen_seed",None)
@@ -114,27 +122,32 @@ def close_regen_cycle(model,evaluator,*x):
     old_q=None
     old_cell_heat=None
     try:
-        for iteration in range(40):
+        for iteration in range(COUPLING_MAX_ITERATIONS):
             checkpoint()
             try:
                 result=evaluator(*x)
             except CoolantMarchError as exc:
-                if not physical or pressure_seed_attempts>=8:
+                if model.inputs.cooling_bartz_mode != 1 or pressure_seed_attempts>=8:
                     raise
-                tried=model._hydraulic_trial.get("cooling_dp",model.inputs.cooling_dp_pa)
+                tried=model._hydraulic_trial.get("cooling_dp",cooling_pressure_seed(model.inputs))
                 proposed=(.5*(last_valid_dp+tried) if last_valid_dp is not None and last_valid_dp>tried
                           else max(2.*tried,1e6))
                 rejected.append(dict(iteration=iteration+1,reason=str(exc),
                     trial_pressure_drop_Pa=tried,next_pressure_drop_Pa=proposed,
                     accepted_as_physical_state=False))
+                emit_monitor(model, "point", "thermal", iteration=iteration + 1,
+                    values=dict(residual_K=None, acceptance_norm=None, trial_pressure_drop_Pa=tried),
+                    units=dict(residual_K="K", acceptance_norm="1", trial_pressure_drop_Pa="Pa"),
+                    accepted=False, termination_reason="pressure_trial_rejected", error=str(exc),
+                    tolerance=1., residual_tolerance_K=.001)
                 model._hydraulic_trial["cooling_dp"]=proposed
                 pressure_seed_attempts+=1
                 continue
             comp=result.components["cooling_channel"]
             cooled=result.states["fuel_after_cooling"]
-            pump=result.states["fuel_after_pump"]
+            pump=result.states.get("cooling_inlet",result.states["fuel_after_pump"])
             trial=model._hydraulic_trial
-            last_valid_dp=trial.get("cooling_dp",model.inputs.cooling_dp_pa)
+            last_valid_dp=trial.get("cooling_dp",cooling_pressure_seed(model.inputs))
             dp=pump.pressure-cooled.pressure
             signed_pressure_residual=dp-last_valid_dp
             if (last_pressure_residual is not None
@@ -144,9 +157,10 @@ def close_regen_cycle(model,evaluator,*x):
             last_pressure_residual=signed_pressure_residual
             closure=getattr(result,"steady_closure",None) or {}
             feed=closure.get("feed_network",{})
-            pressure_error=feed.get("hydraulic_iteration_error_Pa",abs(dp-trial.get("cooling_dp",model.inputs.cooling_dp_pa)))
+            pressure_error=feed.get("hydraulic_iteration_error_Pa",abs(dp-trial.get("cooling_dp",cooling_pressure_seed(model.inputs))))
             next_trial=dict(cooling_dp=last_valid_dp+pressure_relaxation*signed_pressure_residual,
                 densities={"fuel":fluid_density(model.propellant.fuel_species if hasattr(model,"propellant") else "CH4",cooled.temperature,cooled.pressure),"ox":result.states["lox_after_pump"].density})
+            next_trial["pump_densities"]={"fuel":result.states["fuel_after_pump"].density,"ox":result.states["lox_after_pump"].density}
             area_error=hot_error=heat_error=vector_error=cell_heat_error=0.
             fixed_area_error=None
             if physical:
@@ -155,13 +169,13 @@ def close_regen_cycle(model,evaluator,*x):
                 hot=nozzle.profile["cells"]
                 # Hot output is in gas order; the coolant mesh may be counterflow.
                 hot=sorted(hot,key=lambda c:c["x_m"],reverse=profile["flow_direction"]=="counterflow")
-                used=[c["hot_side"] for c in profile["cells"] if c["kind"]=="channel"]
+                used=[c["hot_side"] for c in profile["cells"] if c["kind"] in ("channel", "heat_estimate")]
                 if len(hot)!=len(used) or not hot:
                     raise ValueError("热侧/冷却侧反馈单元数不一致。")
                 hot_error=max(abs(a["T_aw_K"]-b["T_aw_K"]) for a,b in zip(hot,used))
                 keys=("T_static_K","T_aw_K","T0_K","p_Pa","M","cp_JkgK","mu_Pas","Pr","gamma")
                 vector_error=max(abs(a[k]-b[k])/max(abs(a[k]),1e-12) for a,b in zip(hot,used) for k in keys)
-                cell_heat=[c["Q_W"] for c in profile["cells"] if c["kind"]=="channel"]
+                cell_heat=[c["Q_W"] for c in profile["cells"] if c["kind"] in ("channel", "heat_estimate")]
                 cell_heat_error=(max(abs(a-b)/max(abs(a),1.) for a,b in zip(cell_heat,old_cell_heat))
                     if old_cell_heat is not None and len(cell_heat) == len(old_cell_heat) else 1.)
                 old_cell_heat=cell_heat
@@ -180,10 +194,22 @@ def close_regen_cycle(model,evaluator,*x):
                 heat_relative_residual=heat_error,hot_side_relative_residual=vector_error,
                 cell_heat_relative_residual=cell_heat_error))
             passed=coupling_passed(history[-1])
+            monitor_values = {name: history[-1][name] for name, _, _ in COUPLING_CRITERIA}
+            monitor_values.update(acceptance_norm=max(history[-1][name] / limit for name, limit, _ in COUPLING_CRITERIA),
+                residual_K=hot_error, coolant_outlet_temperature_K=cooled.temperature,
+                cooling_pressure_drop_Pa=dp)
+            emit_monitor(model, "point", "thermal", iteration=iteration + 1,
+                values=monitor_values,
+                units={**{name: unit for name, _, unit in COUPLING_CRITERIA},
+                    "acceptance_norm": "1", "residual_K": "K", "coolant_outlet_temperature_K": "K", "cooling_pressure_drop_Pa": "Pa"},
+                tolerance=1., residual_tolerance_K=.001, physical_state_evaluated=True,
+                closure_passed=passed,
+                residual_tolerances={name: limit for name, limit, _ in COUPLING_CRITERIA})
             feed["hydraulic_iterations"]=len(history)
             if passed:
                 if physical:
                     comp.profile["hot_side_coupling"]=dict(status="pass",iterations=len(history),attempts=iteration+1,
+                        model_id=profile.get("model_id", THERMAL_FEEDBACK_SOURCE), pressure_loss_source="estimated" if model.inputs.cooling_bartz_mode == 2 else "channel_momentum",
                         rejected_pressure_trials=rejected,
                         fixed_hardware_area_relative_residual=fixed_area_error,
                         fixed_hardware_area_owner="outer_throttle_solve" if fixed_area_error is not None else None,
