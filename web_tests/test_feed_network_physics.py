@@ -8,8 +8,8 @@ import unittest
 
 import numpy as np
 
-from feed_network import FeedNetworkModel, evaluate_pump_map, validate_settings
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.operations.feed_network import FeedNetworkModel, evaluate_pump_map, validate_settings
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 
 
 def network_fixture():

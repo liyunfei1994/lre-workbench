@@ -17,6 +17,7 @@ export function coolingDisplayState(result={}) {
   const calculation=obj(result.calculation ?? result), component=obj(obj(calculation.components).cooling_channel);
   const profile=obj(component.profile), outputs=obj(component.outputs), summary=obj(profile.summary);
   const available=profile.version===1 && profile.model_id==="regen_quasi1d_ph_v1" && list(profile.nodes).length>=2 && list(profile.cells).length>0;
+  const concept=profile.version===1 && profile.model_id==="regen_concept_heat_v1" && outputs.mode===2;
   const hasProfile=Object.keys(profile).length>0;
   const validity=obj(profile.validity), warnings=list(validity.warnings).filter(v=>typeof v==="string");
   const complete=available && list(profile.nodes).every(raw=>["s_m","p_Pa","T_K","h_Jkg"].every(key=>finite(obj(raw)[key])))
@@ -27,7 +28,7 @@ export function coolingDisplayState(result={}) {
     kind=validity.status==="pass" && complete && !warnings.length ? "pass" : "review";
     label=kind==="pass" ? "内核检查通过" : "适用性需核查";
   }
-  return {component,profile,outputs,available,hasProfile,kind,label,warnings,
+  return {component,profile,outputs,available,concept,hasProfile,kind,label,warnings,
     summary:{
       Q_total_W:first(summary.Q_total_W,outputs.Q_total_W,outputs.heat_load_W),
       dp_total_Pa:first(summary.dp_total_Pa,outputs.dp_total_Pa,outputs.delta_p_Pa,scaled(outputs.delta_P_MPa,1e6)),
@@ -52,7 +53,7 @@ export function coolingCurveSegments(points,field,scale=1) {
   flush();return segments;
 }
 
-function chart(title,unit,points,definitions) {
+function chart(title,unit,points,definitions,axisLabel="沿冷却剂流向的弧长 s / m") {
   const series=definitions.map(([field,label,scale=1])=>({field,label,segments:coolingCurveSegments(points,field,scale)}));
   const all=series.flatMap(s=>s.segments.flat());
   const head=`<figcaption>${esc(title)}<span>${esc(unit)}</span></figcaption>`;
@@ -73,7 +74,7 @@ function chart(title,unit,points,definitions) {
     return line+marks;
   }).join("")).join("");
   const legend=series.map((s,i)=>`<span><i class="cool-key cool-series-${i}"></i>${esc(s.label)}</span>`).join("");
-  return `<figure class="cool-chart">${head}<svg viewBox="0 0 620 244" role="img" aria-label="${esc(`${title}，横轴为沿冷却剂流向的弧长 s，单位 m`)}"><title>${esc(title)} · 已保存离散值</title>${ticks}${paths}<text class="cool-axis-title" x="325" y="240" text-anchor="middle">沿冷却剂流向的弧长 s / m</text></svg><div class="cool-legend">${legend}</div></figure>`;
+  return `<figure class="cool-chart">${head}<svg viewBox="0 0 620 244" role="img" aria-label="${esc(`${title}，横轴为${axisLabel}`)}"><title>${esc(title)} · 已保存离散值</title>${ticks}${paths}<text class="cool-axis-title" x="325" y="240" text-anchor="middle">${esc(axisLabel)}</text></svg><div class="cool-legend">${legend}</div></figure>`;
 }
 
 function summaryCards(summary) {
@@ -168,7 +169,7 @@ export function coolingModelSummaryState(profile={}) {
 }
 
 function coolingGeometryFigure(model) {
-  const caption='<figcaption>型面与冷却范围 <span>本次保存的几何</span></figcaption>';
+  const caption=`<figcaption>型面与冷却范围 <span>${model.concept?"本次概略几何":"本次保存的几何"}</span></figcaption>`;
   if(!model.drawingAvailable)return `<figure class="cool-scope-figure">${caption}<p class="cool-empty">本记录未保存完整且流向一致的型面与冷却路径，无法绘制范围示意。</p></figure>`;
   const {full,channel,geometry}=model, xmin=full[0].x_m, xmax=full.at(-1).x_m, rmax=Math.max(...full.map(p=>p.r_m));
   const scale=Math.min(550/(xmax-xmin),136/(2*rmax)), left=(620-(xmax-xmin)*scale)/2;
@@ -177,7 +178,9 @@ function coolingGeometryFigure(model) {
   const arrow=(x1,x2,y,klass,label)=>{const end=X(x2),sgn=Math.sign(x2-x1);return `<g class="${klass}"><line x1="${X(x1)}" x2="${end}" y1="${y}" y2="${y}"/><path d="M ${end-7*sgn} ${y-4} L ${end} ${y} L ${end-7*sgn} ${y+4}"/><text x="${(X(x1)+end)/2}" y="${y-8}" text-anchor="middle">${esc(label)}</text></g>`;};
   const throat=finite(geometry.x_throat_m) && geometry.x_throat_m>xmin && geometry.x_throat_m<xmax ? `<line class="cool-scope-throat" x1="${X(geometry.x_throat_m)}" x2="${X(geometry.x_throat_m)}" y1="62" y2="209"/><text x="${X(geometry.x_throat_m)}" y="222" text-anchor="middle">喉部 x=${esc(fmt(geometry.x_throat_m))}</text>` : "";
   const paths=[1,-1].map(side=>`<polyline class="cool-scope-outline" points="${curve(full,side)}"/><polyline class="cool-scope-covered" points="${curve(channel,side)}"/>`).join("");
-  return `<figure class="cool-scope-figure">${caption}<svg viewBox="0 0 620 252" role="img" aria-label="保存的推力室内型面与冷却覆盖；灰色为完整型面，蓝色为冷却范围"><title>保存的内型面与冷却覆盖，同一坐标比例</title><line class="cool-scope-axis" x1="${X(xmin)}" x2="${X(xmax)}" y1="130" y2="130"/>${throat}${paths}${arrow(xmin,xmax,42,"cool-gas-arrow","热气流向")}${arrow(model.inletX,model.outletX,20,"coolant-arrow","冷却剂流向")}<text x="${X(xmin)}" y="240" text-anchor="start">喷注面 x=${esc(fmt(xmin))} m</text><text x="${X(xmax)}" y="240" text-anchor="end">型面出口 x=${esc(fmt(xmax))} m</text></svg><p class="cool-note"><i class="cool-scope-swatch"></i>蓝线为冷却覆盖：冷却剂入口 x=${esc(fmt(model.inletX))} m → 出口 x=${esc(fmt(model.outletX))} m。轴向 x 从喷注面起算；图示为内壁边界。</p></figure>`;
+  const pathLabel=model.concept ? "估算受热范围" : "冷却剂流向";
+  const explanation=model.concept ? "蓝线为估算受热范围，未求解冷却剂沿程状态。" : `蓝线为冷却覆盖：冷却剂入口 x=${esc(fmt(model.inletX))} m → 出口 x=${esc(fmt(model.outletX))} m。`;
+  return `<figure class="cool-scope-figure">${caption}<svg viewBox="0 0 620 252" role="img" aria-label="保存的推力室内型面与冷却覆盖；灰色为完整型面，蓝色为冷却范围"><title>保存的内型面与冷却覆盖，同一坐标比例</title><line class="cool-scope-axis" x1="${X(xmin)}" x2="${X(xmax)}" y1="130" y2="130"/>${throat}${paths}${arrow(xmin,xmax,42,"cool-gas-arrow","热气流向")}${arrow(model.inletX,model.outletX,20,"coolant-arrow",pathLabel)}<text x="${X(xmin)}" y="240" text-anchor="start">喷注面 x=${esc(fmt(xmin))} m</text><text x="${X(xmax)}" y="240" text-anchor="end">型面出口 x=${esc(fmt(xmax))} m</text></svg><p class="cool-note"><i class="cool-scope-swatch"></i>${explanation}轴向 x 从喷注面起算；图示为内壁边界。</p></figure>`;
 }
 
 function modelSummary(profile) {
@@ -205,11 +208,13 @@ function statusSummary(profile) {
 
 function diagnostics(profile) {
   const balance=obj(profile.balance), coupling=obj(profile.hot_side_coupling);
-  const rows=[
+  const rows=(profile.model_id==="regen_concept_heat_v1" ? [
+    ["冷却端口能量残差",balance.energy_residual_W,"W"],
+  ] : [
     ["冷却剂能量总残差",balance.energy_residual_W,"W"],
     ["单元最大能量残差",balance.max_cell_energy_residual_W,"W"],
     ["单元最大动量残差",balance.max_cell_momentum_residual_Pa,"Pa"],
-  ].map(([label,value,unit])=>`<tr>${cell(label)}${cell(quantity(value,unit))}</tr>`);
+  ]).map(([label,value,unit])=>`<tr>${cell(label)}${cell(quantity(value,unit))}</tr>`);
   const measures=[
     ["供给/冷却压力残差","pressure_residual_Pa","pressure_tolerance_Pa","Pa"],
     ["热气侧恢复温度残差","hot_side_temperature_residual_K","temperature_tolerance_K","K"],
@@ -276,7 +281,7 @@ export function coolingMaterialState(profile={}) {
 function materialDetails(profile) {
   const {audit,available,complete,kind,label,match}=coolingMaterialState(profile);
   const matchKind=audit.manufacturing_match==="matched" ? "pass" : audit.manufacturing_match==="mismatch" ? "review" : "unknown";
-  const heading=`<summary>壁面材料与数据适用性 ${badge(kind,label)}${available ? ` ${badge(matchKind,match)}` : ""}</summary>`;
+  const heading=`<summary>推力室内衬材料与数据适用性 ${badge(kind,label)}${available ? ` ${badge(matchKind,match)}` : ""}</summary>`;
   if(!available)return `<details class="cool-details cool-materials">${heading}<p class="cool-note">历史记录未保存逐单元材料数据与温区检查；需重新计算，不能用当前材料设置补写历史证据。</p></details>`;
   const datasets=list(audit.datasets).map(raw=>obj(raw));
   const title=(dataset)=>dataset.label || dataset.display_name || dataset.material_name || dataset.dataset_id || "未记录";
@@ -286,7 +291,8 @@ function materialDetails(profile) {
     const source=obj(list(dataset.sources)[0]), manufacturing=obj(dataset.manufacturing_state);
     const url=/^https:\/\//i.test(source.url || dataset.source_url || "") ? source.url || dataset.source_url : null;
     const sourceLabel=source.title || dataset.source_title || "来源未记录";
-    return `<tr>${cell(title(dataset))}${cell(dataset.dataset_id || "未记录")}${cell(manufacturing.label || "未记录")}${cell(span(conductivity.range_K))}${cell(span(heatCapacity.range_K))}${cell(quantity(dataset.reference_density_kg_m3,"kg/m³"))}<td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(sourceLabel)}</a>` : esc(sourceLabel)}</td></tr>`;
+    const capacityNote=heatCapacity.statistic==="composition_weighted_estimate" ? "；成分加权估算，非独立实测" : "";
+    return `<tr>${cell(title(dataset))}${cell(dataset.dataset_id || "未记录")}${cell(manufacturing.label || "未记录")}${cell(span(conductivity.range_K))}${cell(span(heatCapacity.range_K)+capacityNote)}${cell(quantity(dataset.reference_density_kg_m3,"kg/m³"))}<td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(sourceLabel)}</a>` : esc(sourceLabel)}</td></tr>`;
   });
   const details=list(audit.cells).filter(raw=>obj(raw).status!=="within_range").map(raw=>{
     const row=obj(raw),material=obj(row.material),range=row.actual_temperature_range_K || row.temperature_range_K || [row.min_temperature_K,row.max_temperature_K];
@@ -314,8 +320,39 @@ function profileTables(profile) {
   return `<details class="cool-details"><summary>查看保存的沿程节点与单元（${nodes.length} 个节点 / ${cells.length} 个单元）</summary><p class="cool-note">s 随冷却剂流向递增；x 为内核保存的发动机轴向位置。集流腔端口与通道节点按记录顺序保留。静焓 h 与总焓 h₀ 分列，缺失值显示 —。</p>${table(["节点","s / m","x / m","压力 / MPa","温度 / K","静焓 / kJ·kg⁻¹","总焓 / kJ·kg⁻¹","密度 / kg·m⁻³","流速 / m·s⁻¹"],nodes)}${table(["单元","类型","s / m","x / m","热流密度 / MW·m⁻²","热面壁温 / K","冷面壁温 / K","吸热 / MW","摩擦压降 / MPa","动量项 / MPa","局部压降 / MPa"],cells)}</details>`;
 }
 
+function renderConceptHeat(state) {
+  const {profile,outputs,summary}=state, assumptions=obj(profile.assumptions);
+  const cells=list(profile.cells).map(obj), saved=obj(profile.summary), geometry=obj(profile.geometry);
+  const complete=cells.length>0 && cells.every(c=>c.kind==="heat_estimate" && ["s_m","x_m","dA_hot_m2","q_W_m2","Q_W"].every(key=>finite(c[key])));
+  const values=[
+    ["估算吸热功率",scaled(summary.Q_total_W,1e-6),"MW"],
+    ["受热面积",first(saved.hot_area_m2,outputs.A_hot_m2),"m²"],
+    ["估算峰值热流密度",scaled(saved.peak_heat_flux_W_m2,1e-6),"MW/m²"],
+    ["峰值轴向位置",saved.peak_x_m,"m"],
+    ["参考热面壁温 · 输入假设",assumptions.reference_wall_temperature_K,"K"],
+    ["采用的压降估计",scaled(assumptions.estimated_pressure_drop_Pa,1e-6),"MPa"],
+    ["出口温度 · 端口能量估算",summary.T_out_K,"K"],
+    ["出口压力 · 采用估计压降",scaled(summary.p_out_Pa,1e-6),"MPa"],
+  ];
+  const cards=`<div class="cool-kpis">${values.map(([label,value,unit])=>`<div><span>${esc(label)}</span><strong>${fmt(value)} <small>${esc(unit)}</small></strong></div>`).join("")}</div>`;
+  const notes=list(obj(profile.validity).notes).filter(v=>typeof v==="string");
+  const rows=cells.map((c,i)=>`<tr>${cell(i)}${cell(fmt(c.x_m))}${cell(fmt(c.dA_hot_m2))}${cell(fmt(scaled(c.q_W_m2,1e-6)))}${cell(fmt(scaled(c.Q_W,1e-6)))}</tr>`);
+  const curve=chart("估算沿程热流密度","MW/m²",cells,[["q_W_m2","总热流",1e-6],["q_conv_W_m2","对流",1e-6],["q_rad_W_m2","辐射",1e-6]],"沿燃气流向的热面弧长 s / m");
+  // The highlighted path is cooled coverage, not a computed coolant flow path.
+  const surface=coolingModelSummaryState({...profile,flow_direction:"coflow"});
+  const figure=coolingGeometryFigure({...surface,concept:true});
+  return `<section class="panel cooling-workspace" aria-label="概略热负荷估算"><div class="cool-heading"><div><span class="cool-kicker">CONCEPT HEAT LOAD</span><h2>再生冷却 · 概略热负荷估算</h2><p>读取本次设计点保存的概略型面、燃气状态与参考壁温，展示沿程热流及其面积积分。</p></div>${badge("review","概略估算 · 冷却能力待校核")}</div>${cards}
+    <p class="cool-notice">参考壁温是估算热负荷的输入假设，不是求得的实际壁温或材料允许温度。压降采用估计值；本模型未求解通道尺寸、壁面导热或冷却剂沿程状态。总能量平衡与热侧耦合收敛不能证明冷却可行。</p>
+    <p class="cool-note">估算依据：${esc(assumptions.basis?.trim() || "尚未登记")}</p>${!complete?'<p class="cool-notice">沿程估算字段不完整，缺失值保留断点；不能将本记录视为完整估算。</p>':""}${notes.length?`<ul class="cool-warnings">${notes.map(v=>`<li>${esc(v)}</li>`).join("")}</ul>`:""}
+    <div class="cool-chart-grid">${figure}${curve}</div>
+    <p class="cool-note">热侧采用 Bartz 型对流关联与灰体辐射近似；喉部位置 x=${esc(fmt(geometry.x_throat_m))} m。热流峰值与总吸热功率分别保留，详细部件设计需进一步校核壁温及冷却能力。</p>
+    <details class="cool-details"><summary>保存的热流估算单元（${cells.length} 个）</summary>${table(["单元","轴向 x / m","受热面积 / m²","估算热流 / MW·m⁻²","吸热功率 / MW"],rows)}</details>
+    ${diagnostics(profile)}</section>`;
+}
+
 export function renderCooling(result={}) {
   const state=coolingDisplayState(result), {profile,summary}=state;
+  if(state.concept)return renderConceptHeat(state);
   const header=`<div class="cool-heading"><div><span class="cool-kicker">REGENERATIVE COOLING</span><h2>再生冷却 · 沿程热流与状态</h2><p>展示本次循环计算采用的同一份冷却结果；沿程曲线只读取保存记录。</p></div>${badge(state.kind,state.label)}</div>`;
   const start=`<section class="panel cooling-workspace" aria-label="再生冷却沿程分析">${header}${summaryCards(summary)}`;
   if(!state.available){

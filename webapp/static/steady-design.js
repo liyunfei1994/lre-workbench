@@ -3,10 +3,21 @@ const escape=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">"
 const rows=v=>Array.isArray(v)?v:[];
 const number=(v,scale=1)=>typeof v==="number"&&Number.isFinite(v)?(v*scale).toLocaleString("zh-CN",{maximumSignificantDigits:6}):"未记录";
 const labels={pass:"已核对",fail:"未通过",review:"待确认",unknown:"证据不足",unavailable:"证据不足",recorded:"已保存模型结果",missing:"缺少记录",complete:"交接完整",incomplete:"交接不完整",inconsistent:"存在冲突"};
-const badge=s=>`<span class="sd-state sd-${s==="fail"?"fail":s==="pass"?"pass":"review"}">${escape(labels[s]||"待确认")}</span>`;
+export const steadyGateStatusLabel=gate=>typeof gate?.status_label==="string"&&gate.status_label.trim()?gate.status_label.trim():labels[gate?.status]||"待确认";
+const badge=(s,status_label)=>`<span class="sd-state sd-${s==="fail"?"fail":s==="pass"?"pass":"review"}">${escape(steadyGateStatusLabel({status:s,status_label}))}</span>`;
 const jump=(target,text)=>`<button type="button" data-steady-open="${escape(["checks","models","cooling","convergence"].includes(target)?target:"models")}">${escape(text)}</button>`;
 const table=(heads,data)=>`<div class="table-wrap"><table><thead><tr>${heads.map(h=>`<th>${escape(h)}</th>`).join("")}</tr></thead><tbody>${data.map(row=>`<tr>${row.map(cell=>`<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 const active=report=>report?.schema_version===1&&!["unavailable","not_applicable"].includes(report.status);
+
+export function renderDesignTraceability(trace){
+  if(!trace)return "";
+  const source=trace.source||{},status={verified:"来源与保存证据一致",legacy:"历史记录 · 追溯证据未冻结",conflict:"来源冲突 · 暂停泵几何交接"}[trace.status]||"追溯待核对";
+  const identities=[["方案",source.project_id],["版本",source.revision],["计算记录",source.record_id],
+    ["提交输入 SHA-256",trace.submitted_inputs_sha256],["求解输入 SHA-256",trace.calculation_inputs_sha256],
+    ["稳态结果 SHA-256",trace.calculation_sha256],["泵输出 SHA-256",trace.pump_outputs_sha256],
+    ["液氧泵几何 SHA-256",trace.geometry_sha256?.ox],["燃料泵几何 SHA-256",trace.geometry_sha256?.fuel]];
+  return `<details class="sd-tasks" data-design-traceability><summary>概念输入 → 稳态结果 → 泵几何 / CAD：${escape(status)}</summary><p>方案 ${escape(source.project_id||"未记录")} · v${escape(source.revision??"未记录")} · 记录 ${escape(source.record_id||"未记录")}</p>${table(["追溯项","保存标识"],identities.map(([label,value])=>[escape(label),escape(value??"未记录")]))}<p>${escape(trace.note||"追溯一致性不代表工程约束或详细部件设计通过。")}</p>${rows(trace.issues).length?`<ul>${trace.issues.map(issue=>`<li>${escape(issue)}</li>`).join("")}</ul>`:""}</details>`;
+}
 
 export function renderSupplyBasis(supply){
   if(!supply)return "";
@@ -26,7 +37,8 @@ export function renderSupplyBasis(supply){
 export function renderSteadyDesignSummary(report){
   if(!active(report))return "";
   const gates=rows(report.gates);
-  return `<section class="panel sd-summary" aria-label="稳态总体设计依据"><div class="sd-heading"><div><span class="sd-kicker">STEADY DESIGN BASIS</span><h2>${escape(report.scope_label)}</h2></div>${jump("models","查看设计依据 →")}</div><p class="sd-conclusion">${report.status==="blocked"?"存在未通过项，先核对模型内的一致性与适用范围。":"已形成总体计算基线；下列结论分别成立，模型适用性与部件能力仍需核实。"}</p><div class="sd-gates">${gates.map(g=>`<article><div><b>${escape(g.label)}</b>${badge(g.status)}</div><p>${escape(g.detail)}</p>${jump(g.target,"查看依据")}</article>`).join("")}</div><details class="sd-tasks"><summary>本记录需要处理的事项（${rows(report.actions).length} 项）</summary><ul>${rows(report.actions).map(a=>`<li><b>${escape(a.label)}</b><p>${escape(a.detail)}</p>${jump(a.target,"查看")}</li>`).join("")}</ul></details></section>`;
+  const scopeNote=report.scope==="lox_methane_ffsc_steady_design"?'<p class="sd-definition sd-design-scope">本记录用于设计点热力匹配。推力达到输入目标属于约束闭合，不能单独验证预测精度；部件能否实现所需流量、压升和功率，仍需结合专业设计校核。</p>':"";
+  return `<section class="panel sd-summary" aria-label="稳态总体设计依据"><div class="sd-heading"><div><span class="sd-kicker">STEADY DESIGN BASIS</span><h2>${escape(report.scope_label)}</h2></div>${jump("models","查看设计依据 →")}</div><p class="sd-conclusion">${report.status==="blocked"?"存在未通过项，先核对模型内的一致性与适用范围。":"已形成总体计算基线；下列结论分别成立，模型适用性与部件能力仍需核实。"}</p>${scopeNote}${renderDesignTraceability(report.traceability)}<div class="sd-gates">${gates.map(g=>`<article><div><b>${escape(g.label)}</b>${badge(g.status,g.status_label)}</div><p>${escape(g.detail)}</p>${jump(g.target,"查看依据")}</article>`).join("")}</div><details class="sd-tasks"><summary>本记录需要处理的事项（${rows(report.actions).length} 项）</summary><ul>${rows(report.actions).map(a=>`<li><b>${escape(a.label)}</b><p>${escape(a.detail)}</p>${jump(a.target,"查看")}</li>`).join("")}</ul></details></section>`;
 }
 
 export function renderSteadyDesignBasis(report){

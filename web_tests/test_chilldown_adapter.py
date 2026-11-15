@@ -57,18 +57,17 @@ class ChilldownAdapterTests(unittest.TestCase):
                 normalize_request({'source_job_id':source['id'],**fragment},source)
         with self.assertRaises(ValueError): normalize_request({'source_job_id':'wrong',**base},source)
 
-    def test_pq_initialization_and_kerosene_proxy(self):
+    def test_pq_initialization_and_removed_cycle_rejection(self):
         source=source_fixture()
         request=normalize_request({'source_job_id':source['id'],'circuits':[{'id':'ox','initial_mode':'PQ','initial_quality':.25}]},source)
-        from chilldown import ChilldownModel
+        from lre_workbench.operations.chilldown import ChilldownModel
         model=ChilldownModel(request); sample=model.sample(0.,model.initial)['circuits'][0]
         self.assertAlmostEqual(sample['quality'],.25,places=6)
         self.assertGreater(sample['void_fraction'],sample['quality'])
         self.assertAlmostEqual(sample['liquid_mass_kg']+sample['vapor_mass_kg'],sample['mass_kg'],places=9)
-        proxy=chilldown_setup(source_fixture('gg',True))
-        self.assertTrue(proxy['ready'],proxy['issues'])
-        self.assertEqual(proxy['defaults']['circuits'][1]['fluid'],'n-Dodecane')
-        self.assertTrue(any('RP-1' in note for note in proxy['limitations']))
+        for source in (source_fixture('gg'),source_fixture('ffsc',True)):
+            self.assertFalse(chilldown_setup(source)['ready'])
+            with self.assertRaises(ValueError): normalize_request({'source_job_id':source['id']},source)
 
 
 if __name__=='__main__': unittest.main()

@@ -28,7 +28,7 @@ def main(argv=None):
     if not args.manifest or not args.result:
         parser.error("--self-test requires --manifest and --result")
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from cfd_exchange import load_cfd_job
+    from lre_workbench.integrations.cfd_exchange import load_cfd_job
     manifest_path = Path(args.manifest).expanduser().resolve()
     if manifest_path.name != "manifest.json":
         raise ValueError("The manifest argument must refer to the job's manifest.json")

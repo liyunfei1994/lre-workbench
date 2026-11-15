@@ -8,11 +8,14 @@ import hashlib
 import json
 import math
 
+from webapp.pump_design import pump_design_handoff
+
 
 G = 9.80665
 METHOD = "radial_impeller_meridional_v1"
 ASSUMPTION_KEYS = ("inlet_flow_coefficient", "outlet_flow_coefficient",
                    "eye_hub_ratio", "axial_length_ratio")
+IDENTITY_KEYS = ("record_id", "project_id", "revision", "mode")
 SOURCES = [
     {"title": "CFturbo · Impeller main dimensions", "url": "https://manual.cfturbo.com/en/md_dimensions_pumpvent.html"},
     {"title": "CFturbo · Design parameters and work coefficient", "url": "https://manual.cfturbo.com/en/md_parameters_pumpvent.html"},
@@ -212,11 +215,34 @@ def _build_pump(result, side, record_id):
     return pump
 
 
-def _saved_pump(pump, record_id):
+def _bind_source(saved, context):
+    """Bind missing historical identity, but never relabel an identified snapshot."""
+    if not isinstance(saved, dict):
+        raise ValueError("保存的泵几何缺少来源。")
+    value = deepcopy(saved)
+    for key in IDENTITY_KEYS:
+        actual, expected = saved.get(key), context.get(key)
+        for item in (actual, expected):
+            if item is None or item == "":
+                continue
+            if key == "revision":
+                valid = isinstance(item, int) and not isinstance(item, bool) and item > 0
+            else:
+                valid = isinstance(item, str)
+            if not valid:
+                raise ValueError("保存的泵几何来源标识无效：" + key)
+        if actual not in (None, "") and expected not in (None, "") and actual != expected:
+            raise ValueError("保存的泵几何来源不一致，禁止跨方案或跨记录交接：" + key)
+        if expected not in (None, ""):
+            value[key] = expected
+    return value
+
+
+def _saved_pump(pump, source):
     if not isinstance(pump, dict) or not isinstance(pump.get("source"), dict):
         raise ValueError("保存的泵几何缺少来源。")
     value = deepcopy(pump)
-    value["source"]["record_id"] = record_id
+    value["source"] = _bind_source(value["source"], source)
     if not value.get("available"):
         return value
     if value.get("assumptions", {}).get("method_id") != METHOD:
@@ -238,23 +264,47 @@ def _saved_pump(pump, record_id):
     return value
 
 
-def pump_geometry_view(result, record_id=""):
+def pump_geometry_view(result, record_id="", *, source_context=None):
     """Build a snapshot for new results, or read a saved one without draft inputs."""
     source = {"record_id": record_id, "label": "本次计算记录", "kind": "saved_record"}
-    response = {"schema_version": 1, "source": source, "pumps": {}}
     saved = result.get("pump_geometry") if isinstance(result, dict) else None
+    source_error = None
+    try:
+        source = _bind_source(source, source_context or {})
+        if saved is not None:
+            if not isinstance(saved, dict) or saved.get("schema_version") != 1:
+                raise ValueError("保存的泵几何快照版本无效。")
+            source = _bind_source(saved.get("source"), source)
+            # Check every snapshot identity before adopting any curve. This also
+            # catches a mixed pair when a legacy top-level source has no ID.
+            for pump in (saved.get("pumps") or {}).values():
+                bound = _bind_source(pump.get("source"), source)
+                source = _bind_source(source, bound)
+    except (TypeError, ValueError, AttributeError) as exc:
+        source_error = str(exc)
+    response = {"schema_version": 1, "source": source, "pumps": {}}
     for side in ("ox", "fuel"):
         try:
+            if source_error:
+                raise ValueError(source_error)
             if saved is not None:
-                if not isinstance(saved, dict) or saved.get("schema_version") != 1:
-                    raise ValueError("保存的泵几何快照版本无效。")
-                pump = _saved_pump(saved.get("pumps", {}).get(side), record_id)
+                pump = _saved_pump(saved.get("pumps", {}).get(side), source)
             elif isinstance(result, dict):
-                pump = _build_pump(result, side, record_id)
+                pump = _build_pump(result, side, source.get("record_id", ""))
+                pump["source"] = _bind_source(pump["source"], source)
             else:
                 raise ValueError("选择已完成的设计点记录后查看泵几何。")
         except (TypeError, ValueError, KeyError, OverflowError, ZeroDivisionError, AttributeError) as exc:
             pump = {"available": False, "label": "液氧主泵" if side == "ox" else "燃料主泵",
                     "source": deepcopy(source), "reason": str(exc), "design_point": {}, "dimensions": {}}
+            if source_error:
+                pump["source_conflict"] = True
         response["pumps"][side] = pump
+    response["design_handoff"] = pump_design_handoff(result, response["pumps"])
+    for side, pump in response["pumps"].items():
+        # Inspecting a frozen curve is useful for diagnosing a conflict; exporting
+        # it alongside another record's conditions would falsely certify lineage.
+        # Availability is checked by each exporter. A missing legacy curve does
+        # not itself invalidate a separately recorded hydraulic parameter sheet.
+        pump["export_allowed"] = response["design_handoff"]["pumps"][side]["status"] != "conflict"
     return response

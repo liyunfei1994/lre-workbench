@@ -1,9 +1,10 @@
-// Read-only turbine design handoff. Values and exports come from the selected saved record.
+// Saved conditions remain immutable; preliminary scenarios use a separate read-only API.
+import {renderPreliminaryForm,mountPreliminaryWorkspace} from "./turbine-preliminary.js";
 const finite=value=>typeof value==="number"&&Number.isFinite(value);
 const escape=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
-const keys=model=>["ox","fuel","shared"].filter(key=>Object.hasOwn(model?.turbines||{},key));
-const labels={ox:"富氧涡轮",fuel:"富燃涡轮",shared:"燃气发生器共轴涡轮"};
-const statuses={saved:"已保存",saved_with_extrapolation:"部分超出机制温区",derived:"由保存值计算",ready:"已齐备",assumed:"采用假设",missing:"待补充",incomplete:"待补充",conflict:"冲突",pass:"检查通过",unavailable:"未保存",not_evaluated:"待设计",disabled:"未启用",kinematic_only:"运动学初选"};
+const keys=model=>["ox","fuel"].filter(key=>Object.hasOwn(model?.turbines||{},key));
+const labels={ox:"富氧涡轮",fuel:"富燃涡轮"};
+const statuses={saved:"已保存",saved_with_extrapolation:"部分超出机制温区",derived:"由保存值计算",ready:"已齐备",assumed:"采用假设",missing:"待补充",incomplete:"待补充",conflict:"冲突",pass:"检查通过",warning:"需复核",review:"需复核",fail:"未通过",unavailable:"未保存",not_evaluated:"待设计",disabled:"未启用",kinematic_only:"运动学初选"};
 const array=value=>Array.isArray(value)?value:[];
 const textValue=value=>value==null||typeof value==="number"&&!Number.isFinite(value)?"":typeof value==="object"?JSON.stringify(value):String(value);
 const displayValue=value=>{
@@ -22,7 +23,7 @@ const safeUrl=value=>{try{const url=new URL(value);return ["https:","http:"].inc
 
 function fieldTable(fields,fallback="",empty="本记录未保存此组设计条件。") {
   const items=array(fields);if(!items.length)return `<p class="td-empty">${escape(empty)}</p>`;
-  return `<div class="td-table-wrap"><table class="td-fields"><thead><tr><th>设计条件</th><th>保存值</th><th>单位</th><th>状态</th><th>来源 / 说明</th></tr></thead><tbody>${items.map(field=>`<tr data-td-field="${escape(field?.key)}"><th scope="row">${escape(field?.label||field?.key||"未命名条件")}</th><td class="td-value">${escape(displayValue(field?.value))}</td><td class="td-unit">${escape(field?.unit||"—")}</td><td>${badge(fieldStatus(field))}</td><td class="td-provenance">${sourceText(field,fallback)?`<span>${escape(sourceText(field,fallback))}</span>`:""}${field?.note?`<p>${escape(field.note)}</p>`:""}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="td-table-wrap"><table class="td-fields"><thead><tr><th>设计条件</th><th>保存值</th><th>单位</th><th>状态</th><th>定义与依据</th></tr></thead><tbody>${items.map(field=>`<tr data-td-field="${escape(field?.key)}"><th scope="row">${escape(field?.label||field?.key||"未命名条件")}</th><td class="td-value">${escape(displayValue(field?.value))}</td><td class="td-unit">${escape(field?.unit||"—")}</td><td>${badge(fieldStatus(field))}</td><td class="td-provenance">${field?.note?`<p>${escape(field.note)}</p>`:""}${sourceText(field,fallback)?`<details class="td-field-source"><summary>数据来源</summary><span>${escape(sourceText(field,fallback))}</span></details>`:""}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function checkList(checks) {
@@ -63,7 +64,7 @@ const MEANLINE_COLUMNS=[
   ["cu1_m_s","入口绝对切向速度 cu₁","m/s"],["cu2_m_s","出口绝对切向速度 cu₂","m/s"],["wu1_m_s","入口相对切向速度 wu₁","m/s"],["wu2_m_s","出口相对切向速度 wu₂","m/s"],
   ["c1_m_s","入口绝对速度 c₁","m/s"],["c2_m_s","出口绝对速度 c₂","m/s"],["w1_m_s","入口相对速度 w₁","m/s"],["w2_m_s","出口相对速度 w₂","m/s"],
   ["alpha1_deg","入口绝对流角 α₁","°"],["alpha2_deg","出口绝对流角 α₂","°"],["beta1_deg","入口相对流角 β₁","°"],["beta2_deg","出口相对流角 β₂","°"],
-  ["rotor_static_drop_j_kg","动叶静焓降代数量","J/kg"],["reaction_target","目标反动度","—"],["reaction_check","反动度代数检查","—"],["euler_residual_j_kg","Euler 残差","J/kg"],
+  ["rotor_static_drop_j_kg","动叶静焓降代数量","J/kg"],["reaction_target","反动度初选值","—"],["reaction_check","反动度代数检查","—"],["euler_residual_j_kg","Euler 残差","J/kg"],
 ];
 
 function renderMeanline(meanline) {
@@ -75,22 +76,59 @@ function renderMeanline(meanline) {
 function renderNodeValues(machine,fallback) {
   const point=machine?.design_point||{},configs=[["pressure_in_pa","系统入口节点压力","Pa"],["pressure_out_pa","系统出口节点压力","Pa"],["temperature_in_k","系统入口节点温度","K"],["temperature_out_k","系统出口节点温度","K"],["pressure_ratio","系统节点压力比","—"]];
   const fields=configs.filter(([key])=>Object.hasOwn(point,key)).map(([key,label,unit])=>({key:`node_${key}`,label,unit,value:point[key],status:finite(point[key])?"saved":"missing",source:fallback}));
-  const basis=point.state_basis==="total_to_total"?"显式总总接口近似":point.state_basis||"未声明";
-  return `<details class="td-details td-node-values"${!point.state_basis?" open":""}><summary>保存的系统节点值与状态约定</summary><p class="td-caption">状态基准：${escape(basis)}。${point.state_assumption?escape(point.state_assumption):"节点值按原记录列出；未声明状态定义时不把 p、T 自动标为总压或总温。"}</p>${fieldTable(fields,fallback,"本记录未保存原始节点压力与温度。")}</details>`;
+  const basis=point.state_basis==="total_to_total"?"显式总总接口近似":!point.state_basis||point.state_basis==="unspecified"?"未声明（仅系统节点量）":point.state_basis;
+  return `<details class="td-details td-node-values"${point.state_basis!=="total_to_total"?" open":""}><summary>保存的系统节点值与状态约定</summary><p class="td-caption">状态基准：${escape(basis)}。${point.state_assumption?escape(point.state_assumption):"节点值按原记录列出；未声明状态定义时不把 p、T 自动标为总压或总温。"}</p>${fieldTable(fields,fallback,"本记录未保存原始节点压力与温度。")}</details>`;
 }
 
-function renderMachine(machine,key,selected) {
+function metric(machine,keys,scale=1) {
+  for(const key of keys){
+    const value=machine?.design_point?.[key]??[...array(machine?.global_fields),...array(machine?.power_matching?.fields),...array(machine?.stage_handoff?.fields)].find(field=>field?.key===key)?.value;
+    if(finite(value))return value*scale;
+  }
+  return null;
+}
+
+function renderWorkflow(workspace) {
+  const steps=array(workspace?.workflow);
+  const defaults=[
+    {title:"确认全局设计点",note:"核对 ṁ、n、入口总压/总温及总总或总静压比。总态接口的改变需要形成新计算记录。",url:"https://manual.cfturbo.com/en/global_setup.html"},
+    {title:"建立两侧燃气模型",note:"分别交接完整质量组成、cp(T)、气体常数和物性范围；核对 EOS 与焓降。",url:"https://manual.cfturbo.com/en/gas-mixtures.html"},
+    {title:"设计级与通流",note:"分配逐级比功，校核速比、反动度、速度三角形、静态通流面积和马赫数。",url:"https://manual.cfturbo.com/en/md_dimensions_axturbine.html"},
+    {title:"完成静叶与动叶",note:"用负荷和节距初选叶片数，继续设计金属角、厚度、扭转、喉部和间隙。",url:"https://manual.cfturbo.com/en/bladeprop.html"},
+    {title:"验证并回传设计",note:"核对功率、损失、工况包线与热/结构响应；回传工况及版本。当前文件是交接资料，不是 CFturbo 原生工程。",url:"https://manual.cfturbo.com/en/md_parameter_axturbine.html"},
+  ];
+  return `<ol class="td-workflow">${(steps.length?steps:defaults).map((step,i)=>`<li><span>${String(i+1).padStart(2,"0")}</span><div><h4>${escape(step.title)}</h4><p>${escape(step.note||step.description)}</p>${safeUrl(step.url)?`<a href="${escape(safeUrl(step.url))}" target="_blank" rel="noopener noreferrer">官方方法 ↗</a>`:""}</div></li>`).join("")}</ol>`;
+}
+
+function renderParameterMap(workspace) {
+  const rows=array(workspace?.parameter_map);if(!rows.length)return "";
+  return `<section class="td-section"><h3>CFturbo 参数对应</h3><div class="td-table-wrap"><table class="td-fields"><thead><tr><th>设计参数</th><th>CFturbo 对应</th><th>来源与定义</th></tr></thead><tbody>${rows.map(row=>`<tr><th>${escape(row.parameter)}<small> ${escape(row.unit||"")}</small></th><td>${escape(row.cfturbo)}</td><td class="td-provenance"><p>${escape(row.note)}</p>${row.source?`<details class="td-field-source"><summary>数据依据</summary>${escape(row.source)}</details>`:""}</td></tr>`).join("")}</tbody></table></div></section>`;
+}
+
+function renderWorkspaceMachine(machine,key,selected,workspace) {
   const fallback=machine?.source?.component_key||"保存的系统记录",checks=array(machine?.checks),powerChecks=array(machine?.power_matching?.checks);
   const conflicts=[...checks,...powerChecks].filter(check=>check?.status==="conflict");
   const hasConflict=machine?.status==="conflict"||conflicts.length||[...array(machine?.global_fields),...array(machine?.power_matching?.fields),...array(machine?.gas?.fields),...array(machine?.stage_handoff?.fields)].some(field=>field?.status==="conflict");
   const title=hasConflict?"存在待解决冲突":machine?.ready_for_global_setup?"Global setup 数据齐备":"Global setup 待补充";
-  const links=array(machine?.references).map(item=>({...item,url:safeUrl(item?.url)})).filter(item=>item.url);
-  return `<article class="td-machine" data-td-machine="${key}"${selected?"":" hidden"}><div class="td-machine-heading"><div><h3>${escape(machine?.label||labels[key])}</h3><p>系统部件：${escape(fallback)}${machine?.source?.inlet_state_key?` · 入口节点：${escape(machine.source.inlet_state_key)}`:""}${machine?.source?.outlet_state_key?` · 出口节点：${escape(machine.source.outlet_state_key)}`:""}</p></div><span class="td-readiness ${hasConflict?"is-conflict":machine?.ready_for_global_setup?"is-ready":""}">${title}</span></div><div class="td-toolbar"><p>按当前计算记录整理 CFturbo 输入与设计约束。</p><div>${machine?.source?.component_key?'<button type="button" data-td-inspect>查看部件结果</button>':""}${["json","csv","md"].map(ext=>`<button type="button" data-td-export="${ext}">${{json:"JSON 数据",csv:"CSV 条件表",md:"Markdown 任务书"}[ext]}</button>`).join("")}</div></div><div class="td-primary-grid"><section class="td-section"><div class="td-section-heading"><div><span class="td-kicker">GLOBAL SETUP</span><h3>全局设计条件</h3></div></div>${fieldTable(machine?.global_fields,fallback)}${renderNodeValues(machine,fallback)}${array(machine?.missing_requirements).length?`<div class="td-pending"><h4>进入 Global setup 前需补充</h4>${requirementList(machine.missing_requirements)}</div>`:""}</section><section class="td-section"><div class="td-section-heading"><div><span class="td-kicker">POWER / EFFICIENCY</span><h3>功率匹配与效率口径</h3></div></div>${fieldTable(machine?.power_matching?.fields,fallback)}${checkList(powerChecks)}</section></div>${renderGas(machine?.gas,fallback)}<section class="td-section"><div class="td-section-heading"><div><span class="td-kicker">1D DESIGN HANDOFF</span><h3>一维设计约束与后续输入</h3></div></div>${fieldTable(machine?.stage_handoff?.fields,fallback)}${machine?.stage_handoff?.note?`<p class="td-caption">${escape(machine.stage_handoff.note)}</p>`:""}${requirementList(machine?.stage_handoff?.missing_requirements)}<p class="td-caption">此处整理一维设计输入与约束；逐级气动闭合、叶型与性能仍需专业设计。</p>${renderMeanline(machine?.meanline)}</section><details class="td-details td-audit"${conflicts.length?" open":""}><summary>记录一致性审计${conflicts.length?` · ${conflicts.length} 项冲突`:""}</summary>${checkList(checks)}${array(machine?.notes).length?`<ul class="td-notes">${machine.notes.map(note=>`<li>${escape(note)}</li>`).join("")}</ul>`:""}${machine?.geometry?.note?`<p class="td-caption">概念几何：${escape(machine.geometry.note)}</p>`:""}<p class="td-fingerprint">设计任务书标识：${escape(machine?.design_sha256||"未保存")}</p></details>${links.length?`<footer class="td-references"><strong>CFturbo 手册</strong>${links.map(item=>`<a href="${escape(item.url)}" target="_blank" rel="noopener noreferrer">${escape(item.title||item.url)}</a>`).join("")}</footer>`:""}</article>`;
+  const own=workspace?.turbines?.[key]||{},links=[...array(machine?.references),...array(workspace?.references)].map(item=>({...item,url:safeUrl(item?.url)})).filter(item=>item.url);
+  const metrics=[["燃气质量流量 ṁ",metric(machine,["mass_flow_kg_s"]),"kg/s"],["同轴转速 n",metric(machine,["shaft_speed_rpm"]),"rpm"],["实际气体功率",metric(machine,["turbine_power_w","actual_gas_power_w"],1e-6),"MW"],["保存候选级数",metric(machine,["n_stages_recommended","stages"]),"级"]];
+  const tabs=[["boundary","循环边界"],["gas","燃气物性"],["preliminary","方案初选"],["handoff","CFturbo 交接"]];
+  const panel=(id,body)=>`<div id="td-panel-${key}-${id}" class="td-tab-panel" role="tabpanel" aria-labelledby="td-tab-${key}-${id}" data-td-panel="${id}"${id==="boundary"?"":" hidden"}>${body}</div>`;
+  return `<article class="td-machine" data-td-machine="${key}"${selected?"":" hidden"}>
+    <div class="td-machine-heading"><div><h3>${escape(machine?.label||labels[key])}</h3><p>${key==="ox"?"富氧预燃室 → 富氧涡轮 · 同轴驱动液氧主泵":"富燃预燃室 → 富燃涡轮 · 同轴驱动甲烷主泵"}</p></div><span class="td-readiness ${hasConflict?"is-conflict":machine?.ready_for_global_setup?"is-ready":""}">${title}</span></div>
+    <div class="td-metrics">${metrics.map(([label,value,unit])=>`<div><span>${label}</span><strong>${escape(displayValue(value))}<small>${unit}</small></strong></div>`).join("")}</div>
+    <div class="td-workspace-note"><strong>${hasConflict?"先处理记录冲突":machine?.ready_for_global_setup?"已具备全局设计点交接条件":"先明确设计边界，再进入详细建模"}</strong><p>${hasConflict?"来源检查存在不一致，请核对下方审计；局部初选不覆盖保存结果。":machine?.ready_for_global_setup?"数据齐备表示可以核对录入；逐级气动、叶型及强度仍需设计验证。":"节点温压已有数值不等于已经确认总态。可先完成均径运动学初选，总态与物性齐备后再确定静态通流尺寸。"}</p></div>
+    <div class="td-workspace-tabs" role="tablist" aria-label="${escape(machine?.label||labels[key])}设计工作区">${tabs.map(([id,label],i)=>`<button type="button" id="td-tab-${key}-${id}" role="tab" aria-selected="${i===0}" aria-controls="td-panel-${key}-${id}" tabindex="${i===0?"0":"-1"}" data-td-tab="${id}">${label}</button>`).join("")}</div>
+    ${panel("boundary",`<div class="td-primary-grid"><section class="td-section"><div class="td-section-heading"><div><span class="td-kicker">GLOBAL SETUP</span><h3>全局设计条件</h3></div></div>${fieldTable(machine?.global_fields,fallback)}${renderNodeValues(machine,fallback)}${array(machine?.missing_requirements).length?`<div class="td-pending"><h4>进入 Global setup 前需补充</h4>${requirementList(machine.missing_requirements)}</div>`:""}</section><section class="td-section"><div class="td-section-heading"><div><span class="td-kicker">POWER / EFFICIENCY</span><h3>功率匹配与效率口径</h3></div></div>${fieldTable(machine?.power_matching?.fields,fallback)}${checkList(powerChecks)}${checkList(own.engineering_checks)}</section></div>`)}
+    ${panel("gas",`<p class="td-caption">两侧使用各自预燃室出口的混合燃气；导出保留完整组分和物性来源。温区采样为固定压力、冻结组成数据，不是沿程流动解。</p>${renderGas(machine?.gas,fallback)}`)}
+    ${panel("preliminary",`${renderPreliminaryForm(machine,own,key)}<details class="td-details td-saved-initial"><summary>查看原记录的部件初选与工程筛查</summary>${fieldTable(machine?.stage_handoff?.fields,fallback)}${machine?.stage_handoff?.note?`<p class="td-caption">${escape(machine.stage_handoff.note)}</p>`:""}${array(own.engineering_fields).length?fieldTable(own.engineering_fields,fallback):""}${checkList(own.engineering_checks)}${requirementList(machine?.stage_handoff?.missing_requirements)}${renderMeanline(machine?.meanline)}</details>`)}
+    ${panel("handoff",`<div class="td-toolbar"><p>导出同一计算记录的 CFturbo 设计任务书。局部方案结果在“方案初选”中单独导出。</p><div>${machine?.source?.component_key?'<button type="button" data-td-inspect>查看部件结果</button>':""}${["json","csv","md"].map(ext=>`<button type="button" data-td-export="${ext}">${{json:"JSON 数据",csv:"CSV 条件表",md:"Markdown 任务书"}[ext]}</button>`).join("")}</div></div>${renderWorkflow(workspace)}${renderParameterMap(workspace)}<details class="td-details td-audit"${conflicts.length?" open":""}><summary>记录一致性审计${conflicts.length?` · ${conflicts.length} 项冲突`:""}</summary>${checkList(checks)}${array(machine?.notes).length?`<ul class="td-notes">${machine.notes.map(note=>`<li>${escape(note)}</li>`).join("")}</ul>`:""}${machine?.geometry?.note?`<p class="td-caption">概念几何：${escape(machine.geometry.note)}</p>`:""}<p class="td-fingerprint">设计条件记录标识：${escape(machine?.design_sha256||"未保存")}</p></details>${links.length?`<footer class="td-references"><strong>CFturbo 手册</strong>${links.map(item=>`<a href="${escape(item.url)}" target="_blank" rel="noopener noreferrer">${escape(item.title||item.url)}</a>`).join("")}</footer>`:""}`)}
+  </article>`;
 }
 
 export function renderTurbineDesign(model) {
   const sides=keys(model);
-  return `<section class="turbine-design" data-turbine-design><header class="td-title"><span class="td-kicker">TURBINE SYSTEM DESIGN</span><h2>涡轮总体设计 <span>CFturbo 设计任务书</span></h2><p>系统设计点、真实燃气物性与待确认条件，汇总到同一计算记录。</p></header><p class="td-source">计算记录：<span>${escape(model?.source?.record_id||"未指定")}</span> · 读取保存值；修改输入后需重新计算。</p>${sides.length?`<div class="td-select" role="group" aria-label="涡轮选择">${sides.map((key,i)=>`<button type="button" data-td-side="${key}" aria-pressed="${i===0}">${escape(model.turbines[key]?.label||labels[key])}</button>`).join("")}</div>${sides.map((key,i)=>renderMachine(model.turbines[key],key,i===0)).join("")}`:'<p class="td-empty">本条记录没有保存可用的涡轮部件。计算设计点后可查看设计任务书。</p>'}</section>`;
+  return `<section class="turbine-design" data-turbine-design><header class="td-title"><span class="td-kicker">TURBINE / DESIGN HANDOFF</span><h2>涡轮设计与建模交接 <span>循环需求与部件初选</span></h2><p>涡轮设计条件、燃气物性、逐级方案初选与 CFturbo 建模依据。</p></header><p class="td-source">计算记录：<span>${escape(model?.source?.record_id||"未指定")}</span> · 保存记录只读；局部初选不回写循环。</p>${sides.length?`<div class="td-select" role="group" aria-label="涡轮选择">${sides.map((key,i)=>`<button type="button" data-td-side="${key}" aria-pressed="${i===0}">${escape(model.turbines[key]?.label||labels[key])}</button>`).join("")}</div>${sides.map((key,i)=>renderWorkspaceMachine(model.turbines[key],key,i===0,model.workspace)).join("")}`:'<p class="td-empty">本条记录没有保存可用的涡轮部件。计算设计点后可查看设计条件并导出任务书。</p>'}</section>`;
 }
 
 function selectedMachine(model,key) {return keys(model).includes(key)&&model.turbines[key]&&typeof model.turbines[key]==="object"?model.turbines[key]:null;}
@@ -156,27 +194,40 @@ export function buildTurbineDesignMarkdown(model,key) {
 }
 
 export function turbineDesignExportFilename(model,key,extension) {
-  const machineKey=["ox","fuel","shared"].includes(key)?key:"unknown",record=String(model?.source?.record_id||model?.turbines?.[machineKey]?.source?.record_id||"unrecorded").replace(/[^a-zA-Z0-9_-]/g,"_").slice(0,80);
+  const machineKey=["ox","fuel"].includes(key)?key:"unknown",record=String(model?.source?.record_id||model?.turbines?.[machineKey]?.source?.record_id||"unrecorded").replace(/[^a-zA-Z0-9_-]/g,"_").slice(0,80);
   return `turbine-design-${machineKey}-${record}.${["json","csv","md"].includes(extension)?extension:"txt"}`;
 }
 
-export function mountTurbineDesign(container,model,{onInspectComponent,initialComponent}={}) {
+export function mountTurbineDesign(container,model,{onInspectComponent,initialComponent,onCalculatePreliminary}={}) {
   const root=container?.matches?.("[data-turbine-design]")?container:container?.querySelector?.("[data-turbine-design]");if(!root)return ()=>{};
   root._turbineDesignCleanup?.();const doc=root.ownerDocument,win=doc.defaultView||window,sides=keys(model);let selected=sides.find(key=>initialComponent&&model.turbines[key]?.source?.component_key===initialComponent)||sides[0],disposed=false;
   for(const tab of root.querySelectorAll("[data-td-side]"))tab.setAttribute("aria-pressed",String(tab.dataset.tdSide===selected));
   for(const panel of root.querySelectorAll("[data-td-machine]"))panel.hidden=panel.dataset.tdMachine!==selected;
   for(const button of root.querySelectorAll("[data-td-inspect]"))button.hidden=typeof onInspectComponent!=="function";
+  const preliminaryCleanups=[...root.querySelectorAll("[data-td-preliminary]")].map(panel=>mountPreliminaryWorkspace(panel,{turbineKey:panel.dataset.tdPreliminary,recordId:model?.source?.record_id,onCalculate:onCalculatePreliminary}));
+  const selectTab=(panel,id)=>{
+    for(const tab of panel.querySelectorAll("[data-td-tab]")){const active=tab.dataset.tdTab===id;tab.setAttribute("aria-selected",String(active));tab.setAttribute("tabindex",active?"0":"-1");}
+    for(const content of panel.querySelectorAll("[data-td-panel]"))content.hidden=content.dataset.tdPanel!==id;
+  };
   const click=event=>{if(disposed)return;const button=event.target?.closest?.("button");if(!button||!root.contains(button))return;
     const key=button.dataset.tdSide;
     if(sides.includes(key)){selected=key;for(const tab of root.querySelectorAll("[data-td-side]"))tab.setAttribute("aria-pressed",String(tab.dataset.tdSide===key));for(const panel of root.querySelectorAll("[data-td-machine]"))panel.hidden=panel.dataset.tdMachine!==key;return;}
     const owner=button.closest?.("[data-td-machine]")?.dataset?.tdMachine;
     if(owner&&owner!==selected)return;
+    if(button.dataset.tdTab){selectTab(button.closest("[data-td-machine]"),button.dataset.tdTab);return;}
     if(button.hasAttribute("data-td-inspect")){const component=model?.turbines?.[selected]?.source?.component_key;if(component&&typeof onInspectComponent==="function")onInspectComponent(component,selected);return;}
     const ext=button.dataset.tdExport;if(!["json","csv","md"].includes(ext))return;
     const content={json:buildTurbineDesignJson,csv:buildTurbineDesignCsv,md:buildTurbineDesignMarkdown}[ext](model,selected);if(!content)return;
     const blob=new win.Blob([content],{type:{json:"application/json",csv:"text/csv;charset=utf-8",md:"text/markdown;charset=utf-8"}[ext]}),url=win.URL.createObjectURL(blob),anchor=doc.createElement("a");
     anchor.href=url;anchor.download=turbineDesignExportFilename(model,selected,ext);doc.body.append(anchor);try{anchor.click();}finally{anchor.remove();win.setTimeout(()=>win.URL.revokeObjectURL(url),1000);}
   };
+  const keydown=event=>{
+    const tab=event.target?.closest?.("[data-td-tab]");if(disposed||!tab?.dataset?.tdTab||!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
+    const panel=tab.closest("[data-td-machine]"),tabs=[...panel.querySelectorAll("[data-td-tab]")],i=tabs.indexOf(tab);
+    const next=event.key==="Home"?tabs[0]:event.key==="End"?tabs.at(-1):tabs[(i+(event.key==="ArrowRight"?1:-1)+tabs.length)%tabs.length];
+    event.preventDefault();selectTab(panel,next.dataset.tdTab);next.focus();
+  };
   root.addEventListener("click",click);
-  const cleanup=()=>{disposed=true;root.removeEventListener("click",click);if(root._turbineDesignCleanup===cleanup)delete root._turbineDesignCleanup;};root._turbineDesignCleanup=cleanup;return cleanup;
+  root.addEventListener("keydown",keydown);
+  const cleanup=()=>{disposed=true;root.removeEventListener("click",click);root.removeEventListener("keydown",keydown);preliminaryCleanups.forEach(clean=>clean());if(root._turbineDesignCleanup===cleanup)delete root._turbineDesignCleanup;};root._turbineDesignCleanup=cleanup;return cleanup;
 }

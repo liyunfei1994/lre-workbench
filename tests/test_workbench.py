@@ -16,12 +16,12 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool
 from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
-from workbench_fonts import configure_fonts
-from workbench import PAGES, WorkbenchWindow
-from windows_identity import configure_process_identity, current_process_identity, APP_USER_MODEL_ID
-from qt_chart_canvas import SafeFigureCanvasQTAgg
-from engine_presets import preset_input_values
-from core import ComponentResult, CycleResults, EngineInputs
+from lre_workbench.desktop.fonts import configure_fonts
+from lre_workbench.desktop.workbench import PAGES, WorkbenchWindow
+from lre_workbench.desktop.windows_identity import configure_process_identity, current_process_identity, APP_USER_MODEL_ID
+from lre_workbench.desktop.charts import SafeFigureCanvasQTAgg
+from lre_workbench.application.presets import preset_input_values
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs
 
 
 class DesktopTests(unittest.TestCase):
@@ -249,7 +249,7 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(w.parameter_pane.isEnabled())
 
     def test_gg_preburner_scan_explains_limitation_without_wrong_model(self):
-        from sweep import sweep_ox_preburner_mr, sweep_fuel_preburner_mr
+        from lre_workbench.analysis.sweep import sweep_ox_preburner_mr, sweep_fuel_preburner_mr
         w = self.window
         w._apply_engine_preset("tq12a_gg")
         self.assertFalse(w.btn_run_of_sweep.isEnabled())

@@ -15,13 +15,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtWidgets import QApplication, QMessageBox
-from cfd_exchange import load_cfd_job
-from core import EngineInputs
-from cycle import FFSCCycleModel
-from geometry import compute_geometry, geometry_to_dict
-from version import APP_VERSION
-from workbench import WorkbenchWindow
-from windows_identity import APP_USER_MODEL_ID
+from lre_workbench.integrations.cfd_exchange import load_cfd_job
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.systems.ffsc import FFSCCycleModel
+from lre_workbench.systems.geometry import compute_geometry, geometry_to_dict
+from lre_workbench.version import APP_VERSION
+from lre_workbench.desktop.workbench import WorkbenchWindow
+from lre_workbench.desktop.windows_identity import APP_USER_MODEL_ID
 
 
 class CfdIntegrationTests(unittest.TestCase):
@@ -116,7 +116,7 @@ class CfdIntegrationTests(unittest.TestCase):
         panel.timeout_edit.setText("1e")
         raw = panel.snapshot_settings()
         path = Path(self.directory.name) / "带CFD配置.json"
-        with patch("workbench.QFileDialog.getSaveFileName", return_value=(str(path), "JSON")):
+        with patch('lre_workbench.desktop.workbench.QFileDialog.getSaveFileName', return_value=(str(path), "JSON")):
             self.assertTrue(self.w.save_case())
         panel.restore_settings({})
         self.w.load_case_path(path)
@@ -208,7 +208,7 @@ class CfdIntegrationTests(unittest.TestCase):
         self.assertFalse(self.w.header_run.isEnabled())
         self.assertFalse(self.w.btn_run_of_sweep.isEnabled())
         self.assertTrue(panel.cancel_button.isEnabled())
-        with patch("workbench.legacy.OFSweepWorker") as native_scan:
+        with patch('lre_workbench.desktop.workbench.legacy.OFSweepWorker') as native_scan:
             self.w._on_run_of_sweep_clicked()
         native_scan.assert_not_called()
         old_document = self.w.case_document()

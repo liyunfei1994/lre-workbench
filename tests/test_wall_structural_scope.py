@@ -11,11 +11,11 @@ from unittest.mock import patch
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import EngineInputs
-import chamber_design
-import thermal_structural as ts
+from lre_workbench.domain.models import EngineInputs
+import lre_workbench.components.chambers.design as chamber_design
+import lre_workbench.analysis.thermal_structural as ts
 from tests.test_saved_cooling_views import profile_fixture
-from wall_materials import GRCOP84_DATASET_ID, CUZR_DATASET_ID, get_wall_dataset
+from lre_workbench.materials.wall import GRCOP84_DATASET_ID, CUZR_DATASET_ID, get_wall_dataset
 
 
 def material_profile(dataset_ids, *, match="matched", status="within_range"):

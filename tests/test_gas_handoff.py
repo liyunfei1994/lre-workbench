@@ -9,13 +9,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from core import FlowState
-from chamber import MainChamber
-from preburner import Preburner
-from turbine import Turbine
-from gas_handoff import capture_gas_handoff, load_verified_gas_model
-from thermo import validate_gas_streams, chamber_equilibrium
-from thermo_data import methane_dataset_scope
+from lre_workbench.domain.models import FlowState
+from lre_workbench.components.chambers.model import MainChamber
+from lre_workbench.components.preburners.model import Preburner
+from lre_workbench.components.turbines.model import Turbine
+from lre_workbench.integrations.gas_handoff import capture_gas_handoff, load_verified_gas_model
+from lre_workbench.properties.thermochemistry import validate_gas_streams, chamber_equilibrium
+from lre_workbench.properties.datasets import methane_dataset_scope, gas_eos_scope
 
 
 def fixture():
@@ -178,6 +178,67 @@ class GasHandoffTests(unittest.TestCase):
         self.assertTrue(all(check["status"] == "pass" for check in result["element_checks"]))
         source["environment"]["mechanism_sha256"] = "0" * 64
         self.assertFalse(any(check["status"] == "pass" for check in capture_gas_handoff(source)["element_checks"]))
+
+    def test_pr_cycle_pure_port_fallback_retains_ideal_chemical_reference(self):
+        with gas_eos_scope("Peng-Robinson", "pr_supported_v1"):
+            source = fixture()
+        self.assertEqual(capture_gas_handoff(source)["status"], "complete")
+        reference = source["calculation"]["states"]["main_chamber"]["metadata"]["model"]
+        source["environment"] = {
+            "physics": {"mechanism": reference["mechanism"], "phase": reference["phase"]},
+            "mechanism_sha256": reference["mechanism_sha256"],
+            "dependencies": {"cantera": reference["cantera_version"]},
+            "thermodynamic_scope": {"gas_eos": "Peng-Robinson", "pure_fluid_backend": "HEOS"}}
+        for name, state in source["calculation"]["states"].items():
+            if name.startswith("branch_"):
+                state["metadata"].pop("model")
+                state["metadata"]["thermochemical_data"] = reference["mechanism"]
+        before = deepcopy(source)
+        result = capture_gas_handoff(source)
+        self.assertEqual(result["status"], "complete")
+        self.assertTrue(all(row["status"] == "pass" for row in result["element_checks"]))
+        for station in result["stations"]:
+            if station["id"].startswith("branch_"):
+                self.assertEqual(station["model"]["eos"], "HEOS")
+                self.assertEqual(station["model"]["chemical_reference_eos"], "ideal-gas")
+            else:
+                self.assertEqual(station["model"]["eos"], "Peng-Robinson")
+        self.assertEqual(before, source)
+        # The same record-level PR environment cannot invent missing identity
+        # for a reacting gas port; only pure v2 reference projection is allowed.
+        source["calculation"]["states"]["ox_preburner_outlet"]["metadata"].pop("model")
+        self.assertEqual(capture_gas_handoff(source)["status"], "inconsistent")
+
+    def test_pure_port_reference_mismatch_cannot_reuse_cached_phase_validation(self):
+        source = deepcopy(self.source)
+        model = source["calculation"]["states"]["branch_fuel_to_opb"]["metadata"]["model"]
+        model["chemical_reference_eos"] = "Peng-Robinson"
+        result = capture_gas_handoff(source)
+        station = next(row for row in result["stations"] if row["id"] == "branch_fuel_to_opb")
+        self.assertEqual(next(c for c in station["checks"] if c["id"].endswith("model_identity"))["status"], "fail")
+
+    def test_candidate_model_cannot_infer_missing_eos_or_ignore_model_version(self):
+        from lre_workbench.properties.gas_eos import build_gas
+        _, saved = build_gas("gri30_highT", "Peng-Robinson-Boston-Mathias", "pr_supported_v1")
+        for change in ("missing_eos", "downgrade_ideal", "downgrade_native_pr"):
+            model = deepcopy(saved)
+            if change == "missing_eos": model.pop("eos")
+            else: model["eos"] = "ideal-gas" if change == "downgrade_ideal" else "Peng-Robinson"
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                load_verified_gas_model(model)
+        # A pre-candidate full ideal record did not have a PR model version.
+        old = deepcopy(self.source["calculation"]["states"]["main_chamber"]["metadata"]["model"])
+        old.pop("eos")
+        self.assertEqual(load_verified_gas_model(old).thermo_model, "ideal-gas")
+
+    def test_candidate_policy_declaration_cannot_bypass_cache_validation(self):
+        with gas_eos_scope("Peng-Robinson-Boston-Mathias", "pr_supported_v1"):
+            source = fixture()
+        source["calculation"]["states"]["fuel_preburner_outlet"]["metadata"]["model"]["species_policy"] = "full"
+        result = capture_gas_handoff(source)
+        station = next(row for row in result["stations"] if row["id"] == "fuel_preburner_outlet")
+        self.assertEqual(next(c for c in station["checks"] if c["id"].endswith("model_identity"))["status"], "fail")
+        self.assertEqual(result["status"], "inconsistent")
 
     def test_bad_inputs_do_not_invent_zero_residual(self):
         result = capture_gas_handoff({})

@@ -11,7 +11,7 @@ const fmt = value => {
 };
 const exact = value => finite(value) ? String(value) : "未提供";
 const branch = value => ["ox","fuel","gas","chamber"].includes(String(value)) ? String(value) : "other";
-const COMPONENTS = {ox_pump:"液氧泵",fuel_pump:"燃料泵",cooling_channel:"再生冷却",ox_preburner:"富氧预燃室",fuel_preburner:"富燃预燃室",gas_generator:"燃气发生器",main_chamber:"主燃烧室",injector:"喷注器",nozzle:"主喷管",ox_preburner_turbine:"富氧涡轮",fuel_preburner_turbine:"富燃涡轮",gg_turbine:"GG 涡轮",gg_turbine_ox:"液氧泵涡轮",gg_turbine_fuel:"燃料泵涡轮",gg_exhaust_nozzle:"GG 排气喷管"};
+const COMPONENTS = {ox_pump:"液氧泵",fuel_pump:"燃料泵",cooling_channel:"再生冷却",ox_preburner:"富氧预燃室",fuel_preburner:"富燃预燃室",main_chamber:"主燃烧室",injector:"喷注器",nozzle:"主喷管",ox_preburner_turbine:"富氧涡轮",fuel_preburner_turbine:"富燃涡轮",};
 const QUANTITIES = [
   {key:"pressure",label:"压力",symbol:"p",unit:"MPa"},
   {key:"temperature",label:"温度",symbol:"T",unit:"K"},
@@ -112,6 +112,7 @@ function inspector(node,group,first) {
 }
 
 export function renderFlowWorkspace(model) {
+  if(model?.status==='unsupported')return '<section class="panel"><h2>流路分析不可用</h2><p>当前平台仅支持全流量补燃循环（FFSC）。请导出原始历史记录查看。</p></section>';
   const {nodes,groups}=prepare(model);
   if (!nodes.length) return '<section class="sa-workspace sa-workspace-empty" aria-label="流路状态分析"><span aria-hidden="true">◎</span><h2>暂无流路状态数据</h2><p>选择已完成的设计点计算记录后，可在此检查各位置的压力、温度、流量与组成。</p></section>';
   const initialGroup=groups[0],first=nodes.find(node=>node.group===initialGroup.id) || nodes[0];

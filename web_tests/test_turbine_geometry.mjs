@@ -17,7 +17,7 @@ test("missing and old records never synthesize turbine coordinates",()=>{
     for (const build of [buildTurbineSvg,buildTurbineCsv,buildTurbineDxf,buildTurbineObj,buildTurbineJson]) assert.equal(build(t),"");
     assert.equal(buildTurbinePointTxt(t,"hub"),"");assert.deepEqual(buildTurbineMesh(t),{vertices:[],faces:[]});
   }
-  const html=renderTurbineGeometry({turbines:{shared:{available:false,reason:"旧记录缺少涡轮几何假设",design_point:turbine().design_point}}});
+  const html=renderTurbineGeometry({turbines:{fuel:{available:false,reason:"旧记录缺少涡轮几何假设",design_point:turbine().design_point}}});
   assert.doesNotMatch(html,/<svg|<canvas|data-tg-export/);assert.match(html,/旧记录缺少涡轮几何假设/);assert.match(html,/500/);assert.match(html,/缺少的假设和坐标不会由前端默认值补齐/);
   assert.match(renderTurbineGeometry(null),/本条记录未保存可用的涡轮系统点/);
 });
@@ -63,15 +63,15 @@ test("3D and OBJ revolve saved boundaries into open surfaces without fictional b
   assert.match(obj,/units: m/);assert.match(obj,/Open surfaces only/);assert.match(obj,/record-123/);assert.match(obj,/origin=first_stator_inlet/);
 });
 
-test("exchange JSON preserves all assumptions, row envelopes and source; filenames support shared turbines",()=>{
+test("exchange JSON preserves all assumptions, row envelopes and source; filenames support fuel turbines",()=>{
   const m=model(),t=m.turbines.ox,data=JSON.parse(buildTurbineJson(t,m.source));assert.deepEqual(data.turbine,t);assert.equal(data.source.record_id,"record-123");assert.equal(data.exchange.length_unit,"m");assert.equal(data.exchange.coordinate_origin,"first_stator_inlet");assert.equal(data.exchange.rotation_axis,"z");assert.match(data.exchange.usage,/CFD-ready mesh/);
-  assert.equal(turbineExportFilename(m,"ox","obj"),"turbine-ox-record-123.obj");assert.equal(turbineExportFilename(m,"shared","hub-txt"),"turbine-shared-record-123-hub.txt");m.source.record_id='../../<bad>';assert.doesNotMatch(turbineExportFilename(m,"fuel","dxf"),/[<>/\\]/);
+  assert.equal(turbineExportFilename(m,"ox","obj"),"turbine-ox-record-123.obj");assert.equal(turbineExportFilename(m,"fuel","hub-txt"),"turbine-fuel-record-123-hub.txt");m.source.record_id='../../<bad>';assert.doesNotMatch(turbineExportFilename(m,"fuel","dxf"),/[<>/\\]/);
 });
 
-test("selection follows available FFSC or GG branches, preserves physical scope and has no editable assumptions",()=>{
+test("selection follows available FFSC branches, preserves physical scope and has no editable assumptions",()=>{
   const html=renderTurbineGeometry(model());for(const text of ["氧侧涡轮","燃料侧涡轮","二维子午面","三维流道边界","剖开 ¼","线框","尺寸与设计点 JSON","轮毂 TXT","外缘 TXT","尚未评估","系统 p、T 作为静态近似","几何插值","全部保存级数","CFD 网格","CFTurbo","NX / UG","OBJ 始终导出完整周向边界"])assert.ok(html.includes(text),text);
   assert.match(html,/data-tg-turbine="fuel" hidden/);assert.match(html,/data-tg-panel="3d" hidden/);assert.doesNotMatch(html,/<input|<select/);
-  const shared=renderTurbineGeometry({turbines:{shared:{...turbine(),label:"共轴涡轮"}}});assert.match(shared,/data-tg-side="shared" aria-pressed="true"/);assert.doesNotMatch(shared,/data-tg-turbine="shared" hidden|data-tg-side="ox"|data-tg-side="fuel"/);
+  const fuel=renderTurbineGeometry({turbines:{fuel:{...turbine(),label:"富燃涡轮"}}});assert.match(fuel,/data-tg-side="fuel" aria-pressed="true"/);assert.doesNotMatch(fuel,/data-tg-turbine="fuel" hidden|data-tg-side="ox"|data-tg-side="shared"/);
   const fuelOnly=renderTurbineGeometry({turbines:{fuel:turbine()}});assert.doesNotMatch(fuelOnly,/data-tg-turbine="fuel" hidden/);
 });
 
@@ -102,8 +102,8 @@ test("switching preserves turbine-local view and cleanup cancels callbacks, obse
   assert.equal(dom.frames.size,2);cleanup();assert.equal(dom.frames.size,0);assert.ok(dom.observers.every(o=>o.disconnected));assert.equal(dom.root._turbineCleanup,undefined);assert.equal(dom.root.events.get("click").size,0);assert.equal(panel.events.get("click").size,0);cleanup();
 });
 
-test("shared-turbine canvas rotates by keyboard and releases all state on remount",()=>{
-  const dom=fakeDom(["shared"],true),m={turbines:{shared:turbine()}};mountTurbineGeometry(dom.root,m);const panel=dom.panels[0],canvas=panel.selectors['[data-tg-canvas]'];panel.fire("click",{target:panel.groups['[data-tg-view]'][1]});dom.flush();const first=dom.draws[0];assert.ok(dom.draws.length>0);assert.ok(dom.draws.every(p=>p.every(Number.isFinite)));
+test("fuel-turbine canvas rotates by keyboard and releases all state on remount",()=>{
+  const dom=fakeDom(["fuel"],true),m={turbines:{fuel:turbine()}};mountTurbineGeometry(dom.root,m);const panel=dom.panels[0],canvas=panel.selectors['[data-tg-canvas]'];panel.fire("click",{target:panel.groups['[data-tg-view]'][1]});dom.flush();const first=dom.draws[0];assert.ok(dom.draws.length>0);assert.ok(dom.draws.every(p=>p.every(Number.isFinite)));
   dom.draws.length=0;canvas.fire("keydown",{key:"ArrowRight",preventDefault(){}});dom.flush();assert.notDeepEqual(dom.draws[0],first);
   const cleanup=mountTurbineGeometry(dom.root,m);assert.equal(dom.root.events.get("click").size,1);assert.ok(dom.observers[0].disconnected);cleanup();assert.equal(typeof mountTurbineGeometry(null,m),"function");mountTurbineGeometry(null,m)();
 });
@@ -137,4 +137,9 @@ test("all six download buttons dispatch the selected turbine payload, MIME, file
   cleanup();timers.forEach(timer=>timer.fn());
   assert.deepEqual(revoked,downloads.map(download=>download.url));
   assert.ok(appended.every(anchor=>anchor.removed&&!anchor.attached));
+});
+
+test("legacy shared turbine geometry is excluded from the platform",()=>{
+  const html=renderTurbineGeometry({turbines:{shared:turbine()}});
+  assert.doesNotMatch(html,/data-tg-side=/);
 });

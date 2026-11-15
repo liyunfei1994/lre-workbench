@@ -7,10 +7,10 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import ComponentResult, CycleResults, EngineInputs, FlowState
-from ffsc_coupled import MUTATED_INPUTS, _initial_vector, _source_checks, coupled_residuals, solve_coupled
-from steady_network import BRANCH_IDS, audit_network, solve_design
-from task_control import TaskCancelled
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs, FlowState
+from lre_workbench.systems.coupled import MUTATED_INPUTS, _initial_vector, _source_checks, coupled_residuals, solve_coupled
+from lre_workbench.systems.steady_network import BRANCH_IDS, audit_network, solve_design
+from lre_workbench.runtime.tasks import TaskCancelled
 
 
 class AnalyticCycle:
@@ -73,8 +73,8 @@ class CoupledTests(unittest.TestCase):
         model = AnalyticCycle()
         reference, checks = source(model)
         before = asdict(model.inputs)
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, reference.inputs)), \
-             patch("ffsc_coupled.audit_energy", return_value={"status": "pass"}):
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, reference.inputs)), \
+             patch('lre_workbench.systems.coupled.audit_energy', return_value={"status": "pass"}):
             report = solve_coupled(model, reference, perturbation=.02, max_nfev=400)
         self.assertEqual(report["status"], "pass", report.get("error"))
         self.assertEqual(len(report["residuals"]), 18)
@@ -94,8 +94,8 @@ class CoupledTests(unittest.TestCase):
         before = asdict(model.inputs)
         previous = {"sentinel": 1}
         model._network_trial = previous
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, reference.inputs)), \
-             patch("ffsc_coupled.audit_energy", return_value={"status": "pass"}):
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, reference.inputs)), \
+             patch('lre_workbench.systems.coupled.audit_energy', return_value={"status": "pass"}):
             report = solve_coupled(model, reference, max_nfev=1)
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["nfev"], 1)
@@ -106,7 +106,7 @@ class CoupledTests(unittest.TestCase):
         model = AnalyticCycle()
         reference, checks = source(model)
         checks["feed"]["status"] = "fail"
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, reference.inputs)):
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, reference.inputs)):
             report = solve_coupled(model, reference)
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(model.calls, 0)
@@ -122,8 +122,8 @@ class CoupledTests(unittest.TestCase):
     def test_root_equations_do_not_override_failed_independent_energy_audit(self):
         model = AnalyticCycle()
         reference, checks = source(model)
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, reference.inputs)), \
-             patch("ffsc_coupled.audit_energy", return_value={"status": "fail"}):
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, reference.inputs)), \
+             patch('lre_workbench.systems.coupled.audit_energy', return_value={"status": "fail"}):
             report = solve_coupled(model, reference, perturbation=0, max_nfev=1)
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["termination_reason"], "independent_closure_failed")
@@ -132,7 +132,7 @@ class CoupledTests(unittest.TestCase):
         model = AnalyticCycle()
         reference, checks = source(model)
         before = asdict(model.inputs)
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, reference.inputs)), \
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, reference.inputs)), \
              patch.object(model, "_evaluate_once", side_effect=TaskCancelled("cancelled")):
             with self.assertRaises(TaskCancelled):
                 solve_coupled(model, reference)
@@ -146,7 +146,7 @@ class CoupledTests(unittest.TestCase):
         def ignores_trial(*args):
             del model._network_trial
             return original(*args)
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, reference.inputs)), \
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, reference.inputs)), \
              patch.object(model, "_evaluate_once", side_effect=ignores_trial):
             report = solve_coupled(model, reference, max_nfev=1)
         self.assertEqual(report["status"], "fail")
@@ -157,7 +157,7 @@ class CoupledTests(unittest.TestCase):
         reference, checks = source(model)
         source_dict = asdict(reference.inputs)
         model.inputs.thrust += 10
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, source_dict)):
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, source_dict)):
             with self.assertRaises(ValueError):
                 solve_coupled(model, reference)
 
@@ -167,8 +167,8 @@ class CoupledTests(unittest.TestCase):
         checks["numeric"]["layers"] = {"inner": {"tolerance": 1e-6, "checks": [
             {"name": "thrust", "tolerance": .004}, {"name": "ox_power", "tolerance": 5},
             {"name": "fuel_power", "tolerance": 3}]}}
-        with patch("ffsc_coupled._source_checks", return_value=(reference, checks, reference.inputs)), \
-             patch("ffsc_coupled.audit_energy", return_value={"status": "pass"}):
+        with patch('lre_workbench.systems.coupled._source_checks', return_value=(reference, checks, reference.inputs)), \
+             patch('lre_workbench.systems.coupled.audit_energy', return_value={"status": "pass"}):
             report = solve_coupled(model, reference, perturbation=0, max_nfev=1)
         self.assertEqual([row["tolerance"] for row in report["residuals"][:3]], [.004, 5, 3])
 
@@ -192,8 +192,8 @@ class CoupledTests(unittest.TestCase):
             preburner={"tolerance": 3}, thermal={"enabled": True, "checks": [
                 {"name": "temperature", "tolerance": 5}, {"name": "gamma", "tolerance": 1e-4},
                 {"name": "molar_mass", "tolerance": 1e-4}]})
-        with patch("ffsc_coupled.numerical_convergence", return_value={"status": "pass", "layers": layers}), \
-             patch("ffsc_coupled.audit_energy", return_value={"status": "pass"}):
+        with patch('lre_workbench.systems.coupled.numerical_convergence', return_value={"status": "pass", "layers": layers}), \
+             patch('lre_workbench.systems.coupled.audit_energy', return_value={"status": "pass"}):
             _, verified, _ = _source_checks(reference)
         self.assertEqual(verified["numeric"]["status"], "pass")
         self.assertEqual(verified["equations"]["status"], "fail")

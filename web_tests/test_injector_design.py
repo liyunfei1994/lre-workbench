@@ -8,7 +8,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from injector import Injector
+from lre_workbench.components.injectors.model import Injector
 from webapp.injector_design import injector_design_view
 
 
@@ -246,6 +246,28 @@ class InjectorDesignTests(unittest.TestCase):
         result = fixture()
         result["calculation"]["components"]["ox_preburner"] = {
             "outputs": {"injector_dp_Pa": 999e6}}
+        self.assertEqual(injector_design_view(result)["stations"][1]["boundary_status"], "inconsistent")
+
+    def test_partial_branch_budgets_do_not_fall_back_to_legacy_shared_value(self):
+        result = fixture()
+        network = result["calculation"]["steady_closure"]["feed_network"]
+        network["design_loss_inputs"]["branches"] = {}
+        for station in injector_design_view(result)["stations"][1:]:
+            self.assertEqual(station["boundary_status"], "incomplete")
+            checks = [c for c in station["checks"] if "保存设计压降比" in c["label"]]
+            self.assertEqual(len(checks), 2)
+            self.assertTrue(all(c["status"] == "unavailable" for c in checks))
+
+    def test_individual_branch_budget_and_component_drop_are_checked(self):
+        result = fixture()
+        network = result["calculation"]["steady_closure"]["feed_network"]
+        network["design_loss_inputs"]["branches"] = {
+            b["id"]: {"injector_ratio": b["injector_drop_Pa"] / b["destination_pressure_Pa"]}
+            for b in network["branches"]}
+        network["design_loss_inputs"]["injector_ratio"] = 99.
+        self.assertEqual(injector_design_view(result)["stations"][1]["boundary_status"], "consistent")
+        result["calculation"]["components"]["ox_preburner"] = {
+            "outputs": {"oxidizer_injector_dp_Pa": 999e6, "injector_dp_Pa": None}}
         self.assertEqual(injector_design_view(result)["stations"][1]["boundary_status"], "inconsistent")
 
     def test_fixed_resistance_uses_branch_law_not_preburner_design_ratio(self):

@@ -7,7 +7,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from geometry.pumps import estimate_pump
+from lre_workbench.components.pumps.geometry import estimate_pump
 from webapp.pump_geometry import G, pump_geometry_view
 
 
@@ -108,17 +108,85 @@ class PumpGeometryTests(unittest.TestCase):
         self.assertNotIn("meridional", p)
         self.assertEqual(result, before)
 
-    def test_frozen_snapshot_is_unaffected_by_later_draft_or_inputs(self):
+    def test_frozen_snapshot_is_not_rebuilt_when_record_inputs_change(self):
         result = fixture()
         result["pump_geometry"] = pump_geometry_view(result, "old-id")
         expected = deepcopy(result["pump_geometry"]["pumps"]["ox"])
         result["calculation"]["inputs"].update(lox_pump_inlet_flow_coefficient=.9, lox_pump_head_coefficient_psi=.7)
         result["calculation"]["components"]["ox_pump"]["outputs"]["nr_rpm"] = 1
-        p = pump_geometry_view(result, "new-id")["pumps"]["ox"]
-        expected["source"]["record_id"] = "new-id"
+        p = pump_geometry_view(result, "old-id")["pumps"]["ox"]
+        expected["export_allowed"] = False
         self.assertEqual(p, expected)
         p["meridional"]["hub"][0][1] = 999
         self.assertNotEqual(result["pump_geometry"]["pumps"]["ox"]["meridional"]["hub"][0][1], 999)
+
+    def test_identified_snapshot_cannot_be_relabelled_to_another_record_or_project(self):
+        context = {"project_id": "plan-a", "record_id": "record-a", "revision": 2, "mode": "concept_design"}
+        result = fixture()
+        result["pump_geometry"] = pump_geometry_view(result, "record-a", source_context=context)
+        before = deepcopy(result)
+        for change in ({"record_id": "record-b"}, {"project_id": "plan-b"}, {"revision": 3}, {"mode": "fixed_steady"}):
+            other = context | change
+            view = pump_geometry_view(result, other["record_id"], source_context=other)
+            for pump in view["pumps"].values():
+                self.assertFalse(pump["available"])
+                self.assertFalse(pump["export_allowed"])
+                self.assertIn("来源不一致", pump["reason"])
+                self.assertNotIn("meridional", pump)
+            self.assertTrue(all(h["status"] == "conflict" for h in view["design_handoff"]["pumps"].values()))
+        self.assertEqual(result, before)
+
+    def test_unbound_snapshot_can_bind_once_and_empty_context_preserves_identity(self):
+        result = fixture()
+        result["pump_geometry"] = pump_geometry_view(result)
+        context = {"project_id": "plan-a", "record_id": "record-a", "revision": 2, "mode": "concept_design"}
+        bound = pump_geometry_view(result, "record-a", source_context=context)
+        for source in [bound["source"]] + [p["source"] for p in bound["pumps"].values()]:
+            self.assertEqual({key: source[key] for key in context}, context)
+        result["pump_geometry"] = bound
+        self.assertEqual(pump_geometry_view(result), bound)
+
+    def test_mixed_pump_source_ids_are_rejected_even_without_requested_context(self):
+        result = fixture()
+        result["pump_geometry"] = pump_geometry_view(result)
+        result["pump_geometry"]["pumps"]["ox"]["source"]["record_id"] = "record-a"
+        result["pump_geometry"]["pumps"]["fuel"]["source"]["record_id"] = "record-b"
+        view = pump_geometry_view(result)
+        self.assertTrue(all(not p["available"] and not p["export_allowed"] for p in view["pumps"].values()))
+
+    def test_frozen_input_assumptions_and_output_conflicts_disable_exports_without_changing_curves(self):
+        for kind, key in (("input", "lox_pump_inlet_flow_coefficient"),
+                          ("input", "lox_pump_outlet_flow_coefficient"),
+                          ("input", "lox_pump_eye_hub_ratio"),
+                          ("input", "lox_pump_axial_length_ratio"),
+                          ("input", "lox_pump_head_coefficient_psi"),
+                          ("input", "lox_pump_n_stages"),
+                          ("output", "psi_head_coefficient"),
+                          ("output", "nr_rpm")):
+            for missing in (False, True):
+                result = fixture()
+                result["pump_geometry"] = pump_geometry_view(result, "record-a")
+                frozen = deepcopy(result["pump_geometry"]["pumps"]["ox"])
+                target = result["calculation"]["inputs"] if kind == "input" else result["calculation"]["components"]["ox_pump"]["outputs"]
+                if missing:
+                    del target[key]
+                else:
+                    target[key] *= 1.1
+                view = pump_geometry_view(result, "record-a")
+                with self.subTest(kind=kind, key=key, missing=missing):
+                    self.assertEqual(view["pumps"]["ox"]["meridional"], frozen["meridional"])
+                    self.assertEqual(view["pumps"]["ox"]["geometry_sha256"], frozen["geometry_sha256"])
+                    self.assertFalse(view["pumps"]["ox"]["export_allowed"])
+                    self.assertEqual(view["design_handoff"]["pumps"]["ox"]["status"], "conflict")
+                    self.assertTrue(view["pumps"]["fuel"]["export_allowed"])
+
+    def test_frozen_fuel_cannot_follow_a_changed_propellant_pair(self):
+        result = fixture()
+        result["pump_geometry"] = pump_geometry_view(result, "record-a")
+        result["calculation"]["inputs"]["propellant_pair"] = "lox_rp1"
+        view = pump_geometry_view(result, "record-a")
+        self.assertFalse(view["pumps"]["fuel"]["export_allowed"])
+        self.assertEqual(view["design_handoff"]["pumps"]["fuel"]["status"], "conflict")
 
     def test_broken_snapshot_is_not_rebuilt_from_inputs(self):
         result = fixture()

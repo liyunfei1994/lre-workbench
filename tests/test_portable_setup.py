@@ -16,6 +16,26 @@ import bootstrap
 
 
 class PortableSetupTests(unittest.TestCase):
+    def test_resources_resolve_from_another_working_directory_without_loading_ui(self):
+        code = (
+            "import json,sys;sys.path.insert(0,sys.argv[1]);"
+            "from lre_workbench.resources import PROJECT_ROOT,PACKAGE_ROOT,ASSET_ROOT,DESKTOP_ASSET_ROOT;"
+            "from lre_workbench.desktop.style import stylesheet;"
+            "assert not any(n.startswith(('PySide6','matplotlib')) for n in sys.modules);"
+            "assert (ASSET_ROOT/'chevron.svg').as_posix() in stylesheet();"
+            "print(json.dumps({'root':str(PROJECT_ROOT),'package':str(PACKAGE_ROOT),"
+            "'assets':[str(ASSET_ROOT/'app.ico'),str(ASSET_ROOT/'fonts'/'NotoSansSC.ttf'),"
+            "str(DESKTOP_ASSET_ROOT/'app_icon.png'),str(DESKTOP_ASSET_ROOT/'app_icon.ico')]}))"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([sys.executable, "-X", "utf8", "-c", code, str(ROOT / "src")],
+                                    cwd=directory, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paths = json.loads(result.stdout)
+        self.assertEqual(Path(paths["root"]), ROOT)
+        self.assertEqual(Path(paths["package"]), ROOT / "src" / "lre_workbench")
+        self.assertTrue(all(Path(path).is_file() for path in paths["assets"]))
+
     def test_interpreter_policy_rejects_old_or_incompatible_builds(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "python.exe"
@@ -120,6 +140,11 @@ class PortableSetupTests(unittest.TestCase):
                                  ".github/workflows/validate.yml", "SOURCE_MANIFEST.json"} <= files)
                 self.assertTrue({"webapp/app.py", "webapp/static/app.js", "requirements-web.txt",
                                  "start_web_windows.bat", "stop_web_windows.bat", "docs/WEB_LOCAL.md"} <= files)
+                self.assertTrue({"src/lre_workbench/__init__.py", "src/lre_workbench/resources.py",
+                                 "src/lre_workbench/domain/models.py", "src/lre_workbench/systems/ffsc.py",
+                                 "src/lre_workbench/desktop/assets/app_icon.png",
+                                 "src/lre_workbench/desktop/assets/app_icon.ico", "scripts/make_icon.py"} <= files)
+                self.assertFalse({"src/core.py", "src/cycle.py", "src/gui_pyside6.py", "src/make_icon.py"} & files)
                 self.assertFalse(any(".venv" in name or name.endswith(".lnk")
                                      or name.startswith((".runtime/", "diagnostics/", ".git/", "user_data/", ".cache/"))
                                      for name in files))

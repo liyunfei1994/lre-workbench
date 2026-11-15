@@ -5,6 +5,7 @@ import math
 
 from webapp.solver import plain, science_environment
 from webapp.validation import fingerprint
+from webapp.design_scope import require_supported_source
 
 
 LIMITATIONS = [
@@ -17,7 +18,7 @@ LIMITATIONS = [
     '入口与容腔物性在各自状态求值；超出物性或用户压力范围时停止并保留有效记录，不用相态钳制伪造持续充填。',
     '液相质量分数与液相体积分数是不同指标。液相体积分数用于本页充填判据，不代表已解析空间液位。',
     '末态快照只描述本页容腔和壁面；尚不能自动覆盖供给网络、热态瞬态或整机点火初值，也不代表满足点火或泵启动条件。',
-    '质量和能量账目闭合属于数值验证；尚无本装置的独立预冷/充填试验验证。正十二烷是煤油代理纯工质，不是真实 RP-1 混合物。',
+    '质量和能量账目闭合属于数值验证；尚无本装置的独立预冷/充填试验验证。',
 ]
 
 
@@ -70,22 +71,22 @@ def _finite(v):
 
 
 def _defaults(source):
+    require_supported_source(source)
     if source.get('status')!='succeeded':
         raise ValueError('请选择已完成的稳态设计记录，以取得推进剂种类和供给温度。')
     calc=(source.get('result') or {}).get('calculation') or {}
     inp=calc.get('inputs')
-    if not isinstance(inp,dict) or inp.get('propellant_pair') not in ('lox_methane','lox_kerosene'):
-        raise ValueError('支持液氧/甲烷或液氧/正十二烷代理工质的设计记录。')
+    if not isinstance(inp,dict) or inp.get('propellant_pair') != 'lox_methane':
+        raise ValueError('请选择液氧/甲烷 FFSC 设计记录。')
     circuits=[]
-    fuel='n-Dodecane' if inp['propellant_pair']=='lox_kerosene' else 'Methane'
+    fuel='Methane'
     for side,fluid,label,key in [('ox','Oxygen','液氧预冷单元','ox_inlet_temp'),('fuel',fuel,'燃料预冷单元','fuel_inlet_temp')]:
         temperature=inp.get(key)
         if not _finite(temperature) or temperature<=0:
             raise ValueError(f'{label} 来源供给温度无效。')
-        cold=fluid!='n-Dodecane'
         circuits.append(dict(id=side,label=label,fluid=fluid,volume_m3=.0002,
-            initial_mode='PT',initial_pressure_Pa=2e5,initial_temperature_K=290. if cold else float(temperature),
-            initial_quality=1.,wall_temperature_K=290. if cold else max(320.,temperature+20.),
+            initial_mode='PT',initial_pressure_Pa=2e5,initial_temperature_K=290.,
+            initial_quality=1.,wall_temperature_K=290.,
             wall_heat_capacity_J_K=120.,wall_UA_W_K=15.,ambient_temperature_K=290.,ambient_UA_W_K=0.,
             supply_pressure_Pa=8e5,supply_temperature_K=float(temperature),back_pressure_Pa=1e5,
             inlet_CdA_m2=.5e-6,outlet_CdA_m2=1e-6,
@@ -99,7 +100,7 @@ def chilldown_setup(source):
     issues=[]; defaults={}
     try:
         defaults=_defaults(source)
-        from chilldown import ChilldownModel
+        from lre_workbench.operations.chilldown import ChilldownModel
         ChilldownModel(defaults)
     except (ValueError,TypeError,KeyError,OverflowError) as exc:
         issues.append(str(exc))
@@ -144,15 +145,15 @@ def normalize_request(value,source):
         if c['initial_mode'] not in ('PT','PQ'): raise ValueError('初态只能采用 PT 或 PQ。')
         selected.append(c)
     out['circuits']=selected
-    from chilldown import ChilldownModel
+    from lre_workbench.operations.chilldown import ChilldownModel
     ChilldownModel(out)
     json.dumps(out,allow_nan=False)
     return out
 
 
 def calculate_chilldown(request,source,progress=None):
-    from chilldown import ChilldownModel
-    from version import APP_VERSION
+    from lre_workbench.operations.chilldown import ChilldownModel
+    from lre_workbench.version import APP_VERSION
     request=normalize_request(request,source); model=ChilldownModel(request)
     result=dict(schema_version=1,application_version=APP_VERSION,analysis_type='chilldown_filling',
         source=dict(job_id=source['id'],project_id=source['project_id'],revision=source['revision'],result_sha256=fingerprint(source['result'])),

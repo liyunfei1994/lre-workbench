@@ -17,13 +17,11 @@ METRICS = (
     ("fuel_pump_out_pressure_Pa", "燃料泵出口压力", "Pa"),
     ("ox_preburner_pressure_Pa", "富氧预燃室压力", "Pa"),
     ("fuel_preburner_pressure_Pa", "富燃预燃室压力", "Pa"),
-    ("gg_pressure_Pa", "燃气发生器压力", "Pa"),
     ("ox_pump_power_MW", "氧泵功率", "MW"),
     ("fuel_pump_power_MW", "燃料泵功率", "MW"),
     ("chamber_temperature_K", "主燃烧室温度", "K"),
     ("ox_preburner_T_combustion_K", "富氧预燃室温度", "K"),
     ("fuel_preburner_T_combustion_K", "富燃预燃室温度", "K"),
-    ("gg_T_combustion_K", "燃气发生器温度", "K"),
 )
 
 

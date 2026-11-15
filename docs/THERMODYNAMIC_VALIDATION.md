@@ -65,12 +65,11 @@ CEA 的火箭模型包含等压绝热燃烧和等熵喷管膨胀，可选择连�
 | 项目 | 计算依据 | 绝对 + 相对容差 |
 | --- | --- | --- |
 | 总流量 | 总流量与燃料、氧化剂流量之和 | `1e-6 kg/s + 1e-6 × max(|左|, |右|)` |
-| GG 分流 | GG 两推进剂、主室/GG 分流、主路燃料/GG 燃料 | 同上 |
 | FFSC 分流 | 两预燃室的燃料、氧化剂及两路热气流量 | 同上 |
-| 主轴/双轴功率 | 涡轮可用功率与主泵功率 | `1 W + 1e-3 × max(|左|, |右|)` |
+| 两侧主轴功率 | 富氧、富燃涡轮各自输出功率与对应主泵功率 | `1 W + 1e-3 × max(|左|, |右|)` |
 | 泵功率汇总 | 部件 `power_W` 与汇总 MW 的单位换算 | `1 W + 1e-6 × max(|左|, |右|)` |
 
-这些阈值是本平台明确选取的数值检查政策，不是实验不确定度或厂家验收标准。GG 采用本次记录的机械效率乘涡轮毛功率；FFSC 沿用当前模型的涡轮轴功率定义。GG 双轴分别检查两侧，避免一侧欠功率被另一侧多余功率抵消。外部增压/补压泵不属于当前主轴平衡。
+这些阈值是本平台明确选取的数值检查政策，不是实验不确定度或厂家验收标准。当前平台仅支持 FFSC，沿用当前模型的涡轮轴功率定义，并分别检查两侧。外部增压/补压泵不属于当前主轴平衡。
 
 源结果还必须包含收敛信息和工程约束状态。求解残差不低于 `1e-3`、求解警告或已失败的工程约束会阻止完整通过；缺失或非有限数据不会补成零。
 
@@ -130,7 +129,7 @@ REFPROP 可用时，使用**同一 T/P 和同一纯流体**分别计算。由于
 {
   "role": "holdout",
   "conditions": {
-    "propellant_pair": "lox_methane", "cycle_type": "gg", "gg_layout": "single_shaft",
+    "propellant_pair": "lox_methane", "cycle_type": "ffsc",
     "pc": {"value": 10.1, "unit": "MPa", "tolerance": 0.01},
     "of_ratio": {"value": 3.4, "unit": "1", "tolerance": 0.01},
     "fuel_inlet_temp": {"value": 100, "unit": "K", "tolerance": 1},
@@ -144,11 +143,11 @@ REFPROP 可用时，使用**同一 T/P 和同一纯流体**分别计算。由于
 }
 ```
 
-以上数据仅为接口说明，不是实机试验记录。最多 20 项，指标不能重复。必须确认推进剂、循环、燃烧室压力、全机 O/F、两推进剂入口温度；GG 还需轴系。环境压力下的推力/比冲还需环境压力。每个数值工况需显式绝对容差。工况不匹配、遗漏或源记录失效时，测量差值可显示供诊断，但测量检查为 `unavailable`，不能通过。
+以上数据仅为接口说明，不是实机试验记录。最多 20 项，指标不能重复。必须确认推进剂、FFSC 循环、燃烧室压力、全机 O/F、两推进剂入口温度。环境压力下的推力/比冲还需环境压力。每个数值工况需显式绝对容差。工况不匹配、遗漏或源记录失效时，测量差值可显示供诊断，但测量检查为 `unavailable`，不能通过。
 
 `role=calibration` 仅表示标定数据一致性；`role=holdout` 表示提交者声明为未参与调参的独立数据。程序不能自动证明数据独立性。不能将计算值复制到测量字段后称为实测验证，也不能仅因表单由计算工况预填就默认它是试验记录。
 
-支持推力 `thrust_N/thrust_vac_N`、比冲 `Isp_s/Isp_vac_s`、总流量/推进剂流量/GG 流量、主室/GG/排气温度、氧泵/燃料泵出口压力、GG 压力和主泵/涡轮功率。可用单位为同量纲的 `N/kN`、`s`、`kg/s`、`K`、`Pa/kPa/MPa/bar`、`W/kW/MW`，无量纲为 `1`。功率输出从计算记录的 MW 换算为 W。
+支持推力 `thrust_N/thrust_vac_N`、比冲 `Isp_s/Isp_vac_s`、总流量/推进剂流量、主室温度、氧泵/燃料泵出口压力和主泵/涡轮功率。可用单位为同量纲的 `N/kN`、`s`、`kg/s`、`K`、`Pa/kPa/MPa/bar`、`W/kW/MW`，无量纲为 `1`。功率输出从计算记录的 MW 换算为 W。
 
 测量的 `tolerance` 与 `uncertainty` 都是所填单位下的绝对量。给出 tolerance 时，以 `|计算−实测| ≤ tolerance` 判定；仅给 uncertainty 时，只判定是否在所报区间内，不推定其置信水平或覆盖因子，也没有合成模型不确定度。每项返回 `predicted_si/measured_si/difference_si/relative_difference/tolerance_si/uncertainty_si/unit`。
 
@@ -164,4 +163,4 @@ REFPROP 可用时，使用**同一 T/P 和同一纯流体**分别计算。由于
 
 三个检查组共有 `{kind, status, checks, notes}`，每项至少有 `{id, label, status}`。`pass` 只适用于明确列出的检查判据，`fail` 表示判据不满足，`partial` 表示仅部分证据可用，`unavailable` 表示没有足够依据执行，`not_provided` 表示未提交可选数据。完整试验验证不能由内部守恒检查或交叉软件一致性替代。
 
-运行 `.venv-web\Scripts\python.exe -m unittest web_tests.test_validation_checks -v`（命令中的路径按当前项目根目录使用）。测试包含真实 HEOS 三流体物性、超界拒绝、无 REFPROP 的诚实缺失、参考焓/熵零点消除、单/双轴功率抵消错误、单位归一、工况不匹配及源记录不可变性。测试中的 REFPROP 接口替身仅用于证明参考零点处理逻辑，不充当实际 REFPROP 验证数据。
+运行 `.venv-web\Scripts\python.exe -m unittest web_tests.test_validation_checks -v`（命令中的路径按当前项目根目录使用）。测试包含真实 HEOS 三流体物性、超界拒绝、无 REFPROP 的诚实缺失、参考焓/熵零点消除、FFSC 两侧轴功率检查、单位归一、工况不匹配及源记录不可变性。测试中的 REFPROP 接口替身仅用于证明参考零点处理逻辑，不充当实际 REFPROP 验证数据。

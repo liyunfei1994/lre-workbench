@@ -1,6 +1,6 @@
 from copy import deepcopy
 import unittest
-from shutdown_gas import ShutdownGasModel,default_settings,validate_settings
+from lre_workbench.operations.shutdown_gas import ShutdownGasModel,default_settings,validate_settings
 
 
 def closed(**updates):

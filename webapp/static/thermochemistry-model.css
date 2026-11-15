@@ -1,0 +1,19 @@
+.thermochemistry-decision{grid-column:1/-1;display:grid;gap:18px;min-width:0}
+.thermochemistry-decision-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding-bottom:16px;border-bottom:1px solid var(--line,#dbe5ec)}
+.thermochemistry-decision-header h3{margin:4px 0 0;font-size:18px}
+.thermochemistry-decision-header .fine{margin:0}
+.thermochemistry-model-selector{min-width:0;padding:14px 16px;background:#f4f8fb;border:1px solid var(--line,#dbe5ec);border-radius:3px}
+.thermochemistry-model-selector>label{display:grid;min-width:0;gap:8px;margin:0}
+.thermochemistry-model-selector select{width:100%;max-width:100%;min-width:0}
+.thermochemistry-model-selector .parameter-inline-help{font-size:14px;line-height:1.7}
+.thermochemistry-decision-facts{display:grid;grid-template-columns:minmax(108px,.34fr) minmax(0,1fr);gap:11px 16px;margin:0;font-size:16px;line-height:1.65}
+.thermochemistry-decision-facts dt{color:#526b7b;font-weight:600}
+.thermochemistry-decision-facts dd{margin:0;overflow-wrap:anywhere;color:#263f50}
+.thermochemistry-decision-limits{padding:12px 15px;background:#fff8eb;border-left:3px solid #bd914c;color:#785a2e;font-size:14px;line-height:1.7}
+.thermochemistry-decision-limits p{margin:0 0 5px}.thermochemistry-decision-limits p:last-child{margin-bottom:0}
+.thermochemistry-configuration-error{padding:12px 15px;background:#fff2ef;border-left:3px solid #b65948;color:#854436;font-size:14px;line-height:1.7}
+.thermochemistry-configuration-error p{margin:0 0 5px}.thermochemistry-configuration-error p:last-child{margin-bottom:0}
+.thermochemistry-baseline-action{padding:14px 16px;background:#eef5f9;border:1px solid #d6e5ed;border-radius:3px}
+.thermochemistry-baseline-action p{margin:9px 0 0;font-size:14px;line-height:1.7;color:#516d7d}
+.thermochemistry-reference-link{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0}
+@media(max-width:800px){.thermochemistry-decision-facts{grid-template-columns:minmax(88px,.3fr) minmax(0,1fr);gap:10px 12px}.thermochemistry-decision-header{flex-wrap:wrap}}

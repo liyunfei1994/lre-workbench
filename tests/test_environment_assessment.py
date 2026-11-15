@@ -13,17 +13,19 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from bootstrap import ensure_runtime
-from core import ComponentResult, CycleResults, EngineInputs, FlowState
-from engineering_assessment import assess_engineering
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs, FlowState
+from lre_workbench.analysis.assessment import assess_engineering
 from web_tests.convergence_fixture import converged_evidence
-from materials import material_evidence
+from lre_workbench.materials.catalog import material_evidence
 from tests.cooling_profile_fixture import cooling_profile
-from runtime_environment import environment_fingerprint, environment_report, requirements_hashes
+from lre_workbench.runtime.environment import environment_fingerprint, environment_report, requirements_hashes
 
 
 def example_result():
     inputs = EngineInputs(cooling_wall_temp_limit_status="documented",
-                          cooling_wall_temp_limit_basis="Synthetic test requirement: 800 K")
+                          cooling_wall_temp_limit_basis="Synthetic test requirement: 800 K",
+                          ox_preburner_temp_limit_status="provisional",
+                          fuel_preburner_temp_limit_status="provisional")
     inputs.turb_ox_rotor_material = "inconel718"
     summary = {"solver_residual_norm": 1e-5, "solver_iterations": 8,
                "crossflow_fuel_to_oxpb_margin_MPa": 0.4, "crossflow_lox_to_fuelpb_margin_MPa": 0.3,
@@ -38,6 +40,10 @@ def example_result():
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_default_requirement_root_uses_project_resources(self):
+        self.assertEqual(requirements_hashes(), requirements_hashes(ROOT))
+        self.assertEqual(len(requirements_hashes()), 3)
+
     def test_live_environment_report_is_json_serializable_and_pinned(self):
         report = environment_report(ROOT)
         self.assertTrue(report["ready"], report["dependencies"])
@@ -54,7 +60,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertNotEqual(environment_fingerprint(report), environment_fingerprint(other))
 
     def test_transitive_dependency_drift_blocks_complete_environment(self):
-        import runtime_environment
+        import lre_workbench.runtime.environment as runtime_environment
         original = runtime_environment.importlib.metadata.version
         def drift(name):
             return "0.0" if name == "packaging" else original(name)
@@ -70,7 +76,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertNotEqual(environment_fingerprint(report), environment_fingerprint(other))
 
     def test_basic_mode_does_not_require_science_dependency_lock(self):
-        import runtime_environment
+        import lre_workbench.runtime.environment as runtime_environment
         original = runtime_environment.importlib.metadata.version
         def drift(name):
             return "0.0" if name == "scipy" else original(name)
@@ -79,7 +85,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertTrue(report["ready"], report["lock_problems"])
 
     def test_missing_chemistry_cannot_claim_complete_environment(self):
-        import runtime_environment
+        import lre_workbench.runtime.environment as runtime_environment
         original = runtime_environment.importlib.import_module
         def missing_cantera(name):
             if name == "cantera":
@@ -93,7 +99,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(report["physical_path"]["equilibrium_chemistry"], "经验公式")
 
     def test_cantera_import_with_broken_mechanism_is_not_ready(self):
-        with patch("thermo._get_gas", side_effect=RuntimeError("mechanism unavailable")):
+        with patch('lre_workbench.properties.thermochemistry._get_gas', side_effect=RuntimeError("mechanism unavailable")):
             report = environment_report(ROOT)
         self.assertTrue(report["dependencies"]["cantera"]["available"])
         self.assertFalse(report["functional_checks"]["cantera_mechanism"]["ready"])
@@ -127,7 +133,7 @@ class EnvironmentTests(unittest.TestCase):
 
 class EngineeringTests(unittest.TestCase):
     def _network_result(self):
-        from steady_network import solve_design
+        from lre_workbench.systems.steady_network import solve_design
         result = example_result()
         result.summary.update(mdot_fuel_kg_s=100.0, mdot_ox_kg_s=360.0)
         network = solve_design(total_fuel=100.0, total_ox=360.0,

@@ -7,7 +7,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from wall_materials import (CUZR_DATASET_ID, GRCOP84_DATASET_ID,
+from lre_workbench.materials.wall import (CUZR_DATASET_ID, GRCOP84_DATASET_ID,
                             MaterialPropertyRangeError, default_dataset_for_material,
                             get_wall_dataset, list_wall_datasets)
 
@@ -127,7 +127,7 @@ class ApplicabilityTests(unittest.TestCase):
             dataset.conductivity(300, policy="silent")
         with self.assertRaises(KeyError):
             dataset.audit_interval(300, 500, property="yield_strength")
-        for unsupported in ("cucrzr", "c18150", "grcop42", "inconel718_wall", ""):
+        for unsupported in ("cucrzr", "c18150", "inconel718_wall", ""):
             with self.assertRaises(KeyError):
                 default_dataset_for_material(unsupported)
         with self.assertRaises(KeyError):

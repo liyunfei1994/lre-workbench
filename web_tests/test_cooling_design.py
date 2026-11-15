@@ -9,8 +9,8 @@ from unittest.mock import patch
 from webapp.solver import EngineInputs
 from webapp.cooling_design import (assess, calculate_cooling_design, configuration,
                                    normalize_request, pareto, source_data)
-from cooling import CoolingChannel
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.components.cooling.model import CoolingChannel
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 
 
 @lru_cache(maxsize=1)
@@ -20,7 +20,7 @@ def _source_fixture():
     This fixture is not a full-engine validation result. It supplies the saved
     data contract needed to test the one-way thermal-boundary study itself.
     """
-    inputs = EngineInputs(cooling_grid_points=40, cooling_channel_auto_size=0.,
+    inputs = EngineInputs(combustion_loss_model="adiabatic", cooling_grid_points=40, cooling_channel_auto_size=0.,
         cooling_channel_height_m=.008, cooling_wall_temp_limit_status="unset")
     _, component = CoolingChannel(mdot_fuel=166.3, t_inlet=122.35, p_inlet=74.89e6,
         mdot_total=765., pc=33e6, t_chamber=3773.34, gamma_c=1.189,
@@ -130,7 +130,7 @@ class CoolingDesignTests(unittest.TestCase):
             geom = source["result"]["calculation"]["components"]["cooling_channel"]["profile"]["geometry"]
             record = geom[group][2] if group else geom
             record[field] += 1e-4
-            with self.subTest(group=group, field=field), patch("cooling_marching.march_regen_circuit", return_value=solved):
+            with self.subTest(group=group, field=field), patch('lre_workbench.components.cooling.marching.march_regen_circuit', return_value=solved):
                 candidate = calculate_cooling_design(request_fixture(source), source)["candidates"][0]
                 self.assertEqual(candidate["status"], "failed")
                 self.assertIn("固定热侧轮廓", candidate["error"])

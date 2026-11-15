@@ -5,10 +5,10 @@ import math
 import unittest
 from webapp.solver import input_values
 from tests.test_regen_circuit import BASE
-from cooling_marching import march_regen_circuit, _wall_heat
-from wall_materials import get_wall_dataset, GRCOP84_DATASET_ID, CUZR_DATASET_ID
-from wall_thermal import parse_material_zones
-from core import EngineInputs, ValidationError
+from lre_workbench.components.cooling.marching import march_regen_circuit, _wall_heat
+from lre_workbench.materials.wall import get_wall_dataset, GRCOP84_DATASET_ID, CUZR_DATASET_ID
+from lre_workbench.components.cooling.wall_thermal import parse_material_zones
+from lre_workbench.domain.models import EngineInputs, ValidationError
 
 
 class WallThermalCouplingTests(unittest.TestCase):
@@ -56,6 +56,9 @@ class WallThermalCouplingTests(unittest.TestCase):
             self.assertIn(bound, [n["x_m"] for n in result["geometry"]["nodes"]])
         self.assertEqual(result["material_applicability"]["manufacturing_match"], "matched")
         self.assertEqual(result["material_assignment"]["zones"], zones)
+        self.assertEqual(result["material_assignment"]["default_material_id"], "grcop84")
+        self.assertEqual(result["material_assignment"]["zone_material_ids"], [dict(
+            x_start_m=.1, x_end_m=.2, dataset_id=CUZR_DATASET_ID, material_id="cuzr")])
 
     def test_invalid_zones_and_legacy_material_are_not_silently_replaced(self):
         z = {"x_start_m": .1, "x_end_m": .2, "dataset_id": CUZR_DATASET_ID, "manufacturing_state": "unspecified"}
@@ -68,13 +71,16 @@ class WallThermalCouplingTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             EngineInputs(chamber_inner_wall_material="cucrzr")
         self.assertEqual(EngineInputs(cooling_bartz_mode=0., chamber_inner_wall_material="grcop42").wall_thermal_dataset_id, "")
-        self.assertEqual(EngineInputs().wall_thermal_dataset_id, GRCOP84_DATASET_ID)
-        self.assertEqual(EngineInputs(chamber_inner_wall_material="cucrzr",
-            wall_thermal_dataset_id=CUZR_DATASET_ID).wall_thermal_dataset_id, CUZR_DATASET_ID)
+        self.assertEqual(EngineInputs().wall_thermal_dataset_id, "grcop42_chen2023_lpbf_v1")
+        # Cu-Zr data cannot stand in for the distinct Cu-Cr-Zr alloy.
+        with self.assertWarnsRegex(UserWarning, "内衬材料与默认热物性数据集不一致"):
+            draft = EngineInputs(chamber_inner_wall_material="cucrzr", wall_thermal_dataset_id=CUZR_DATASET_ID)
+        with self.assertRaisesRegex(ValidationError, "内衬材料与默认热物性数据集不一致"):
+            draft.validate_wall_material_binding()
 
     def test_api_does_not_inject_current_default_into_unsupported_history(self):
         with self.assertRaises(ValidationError):
-            input_values({"chamber_inner_wall_material":"grcop42"})
+            input_values({"chamber_inner_wall_material":"cucrzr"})
         values, _ = input_values({"chamber_inner_wall_material":"grcop42", "cooling_bartz_mode":0.})
         self.assertEqual(values["wall_thermal_dataset_id"], "")
         values, _ = input_values({"chamber_inner_wall_material":"grcop84"})

@@ -9,10 +9,10 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from heated_nozzle import heated_nozzle
-from regen_geometry import build_regen_geometry
-from thermo import _get_gas, _gas_to_state, nozzle_performance
-from thermo_data import methane_dataset_scope
+from lre_workbench.components.nozzles.heated import heated_nozzle
+from lre_workbench.components.cooling.geometry import build_regen_geometry
+from lre_workbench.properties.thermochemistry import _get_gas, _gas_to_state, nozzle_performance
+from lre_workbench.properties.datasets import methane_dataset_scope
 
 
 class HeatedNozzleTests(unittest.TestCase):

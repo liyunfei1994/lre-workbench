@@ -1,0 +1,19 @@
+.property-library{max-width:1440px;margin:auto;color:var(--text,#243e50)}
+.pl-tabs,.pl-actions,.pl-selectors,.pl-curve-form{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+.pl-tabs{margin-bottom:20px;border-bottom:1px solid #cbd9e2;padding-bottom:12px}
+.pl-tabs [aria-current=page]{background:#e3f1f8;border-color:#287da4;color:#185f83;font-weight:700}
+.pl-section{background:#fff;border:1px solid #cedce5;border-radius:6px;padding:24px;margin:18px 0}
+.pl-section h3{margin:0 0 14px}.pl-section h4{font-size:18px;margin:0 0 12px}
+.pl-section p,.pl-note{line-height:1.75}.pl-note{border-left:3px solid #5291ad;background:#edf6fa;padding:12px 16px}
+.pl-facts{display:grid;grid-template-columns:minmax(140px,210px) minmax(0,1fr);gap:0;margin:16px 0}
+.pl-facts dt,.pl-facts dd{padding:10px 12px;border-bottom:1px solid #e1e9ee;margin:0;overflow-wrap:anywhere;line-height:1.6}
+.pl-facts dt{color:#4a6577;background:#f5f8fa}.pl-section details{border-top:1px solid #dbe5eb;padding:12px 0;margin-top:10px}
+.pl-section summary{font-weight:600;cursor:pointer}.pl-section pre{max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#f4f7f9;font-size:13px;line-height:1.6}
+.pl-selectors label{min-width:180px;flex:1}.pl-selectors label:last-child{flex:2}
+.pl-species-layout{display:grid;grid-template-columns:minmax(190px,280px) minmax(0,1fr);gap:24px}
+.pl-species-list{max-height:430px;overflow:auto;padding:4px}.pl-species-list button{display:flex;width:100%;text-align:left;justify-content:space-between;gap:12px;margin:4px 0;padding:9px 10px}
+.pl-species-list button[aria-pressed=true]{background:#e3f1f8;border-color:#287da4}.pl-species-list span{font-size:12px}.pl-species-list [hidden]{display:none}
+.pl-table{max-height:440px;overflow:auto;margin:12px 0}.pl-table table{border-collapse:collapse;width:100%;font-size:14px}.pl-table td,.pl-table th{padding:9px 12px;border-bottom:1px solid #dbe5eb;text-align:left;overflow-wrap:anywhere}.pl-table th{background:#edf4f8;position:sticky;top:0}.pl-table td{min-width:90px}
+.pl-curve-form label{flex:1;min-width:140px}.pl-curve-form button{margin-bottom:0}.pl-plot{margin:20px 0}.pl-plot figcaption{font-weight:600}.pl-plot svg{display:block;width:100%;max-height:420px;margin-top:12px}.pl-plot text{font-size:12px;fill:#466174}.pl-grid{stroke:#dce7ed;stroke-width:1}.pl-line{fill:none;stroke:#237ca8;stroke-width:2.5}.pl-point{fill:#237ca8}.pl-marker{stroke:#b07b25;stroke-dasharray:5 5;opacity:.7}
+@media(max-width:900px){.pl-species-layout{grid-template-columns:1fr}.pl-species-list{max-height:200px}.pl-facts{grid-template-columns:140px minmax(0,1fr)}.pl-section{padding:16px}}
+@media(max-width:540px){.pl-facts{grid-template-columns:1fr}.pl-facts dt{padding-bottom:3px}.pl-section{padding:12px}}

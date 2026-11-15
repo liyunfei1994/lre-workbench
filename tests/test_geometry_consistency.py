@@ -11,13 +11,13 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import EngineInputs
-from geometry import compute_geometry
-from geometry.chamber import compute_chamber
-from regen_geometry import build_regen_geometry
-from chamber_design import (ChannelRow, default_rows_from_inputs, parse_channel_table,
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.systems.geometry import compute_geometry
+from lre_workbench.components.chambers.geometry import compute_chamber
+from lre_workbench.components.cooling.geometry import build_regen_geometry
+from lre_workbench.components.chambers.design import (ChannelRow, default_rows_from_inputs, parse_channel_table,
                             serialize_channel_table, resolve_channel_distribution, snapshot_from_results)
-from fea_chamber import _station_boundary
+from lre_workbench.analysis.chamber_fea import _station_boundary
 
 
 def profile():
@@ -74,7 +74,7 @@ class GeometryPreservationTests(unittest.TestCase):
     def geometry(self, source):
         with ExitStack() as stack:
             for name in ("estimate_pump","estimate_turbine","compute_preburner","compute_injector"):
-                stack.enter_context(patch("geometry."+name,return_value=None))
+                stack.enter_context(patch("lre_workbench.systems.geometry."+name,return_value=None))
             return compute_geometry(source)
 
     def test_assembler_uses_fixed_profile_area_not_required_nozzle_area(self):
@@ -100,7 +100,7 @@ class GeometryPreservationTests(unittest.TestCase):
         source = self.source(p)
         source.inputs.chamber_conv_half_angle_deg = 45.
         source.inputs.nozzle_bell_fraction = .9
-        with patch("geometry.compute_nozzle", wraps=__import__("geometry").compute_nozzle) as nozzle:
+        with patch('lre_workbench.systems.geometry.compute_nozzle', wraps=__import__('lre_workbench.systems.geometry', fromlist=['*']).compute_nozzle) as nozzle:
             g = self.geometry(source)
         self.assertEqual(nozzle.call_args.kwargs["theta_conv_deg"], 25.)
         self.assertEqual(nozzle.call_args.kwargs["bell_fraction"], .7)
@@ -112,7 +112,7 @@ class GeometryPreservationTests(unittest.TestCase):
             "cc_diameter_m": .4, "cc_length_m": .7, "cc_convergent_length_mm": 500.})
         source.states = {}
         source.inputs.expansion_ratio = 20.
-        with patch("convergence.numerical_convergence", return_value={"status":"pass"}):
+        with patch('lre_workbench.solvers.convergence.numerical_convergence', return_value={"status":"pass"}):
             snap = snapshot_from_results(source)
         self.assertIsNotNone(snap)
         self.assertAlmostEqual(snap.r_t_m, .1)
@@ -182,7 +182,7 @@ QT_AVAILABLE = importlib.util.find_spec("PySide6") is not None
 if QT_AVAILABLE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QTableWidget
-    from ui_chamber_design import ChamberDesignPanel
+    from lre_workbench.desktop.chamber_design import ChamberDesignPanel
 
 
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 is required for channel-table UI checks")
@@ -218,8 +218,8 @@ class ChannelTableQtTests(unittest.TestCase):
     def test_generate_action_uses_full_profile(self):
         result = GeometryPreservationTests.source(profile())
         fake = self.snapshot_action(deepcopy(result.inputs), result)
-        with patch("ui_chamber_design.QMessageBox.information") as info, \
-                patch("ui_chamber_design.QMessageBox.warning") as warning:
+        with patch('lre_workbench.desktop.chamber_design.QMessageBox.information') as info, \
+                patch('lre_workbench.desktop.chamber_design.QMessageBox.warning') as warning:
             ChamberDesignPanel._table_from_scalars(fake)
         warning.assert_not_called()
         info.assert_called_once()
@@ -231,7 +231,7 @@ class ChannelTableQtTests(unittest.TestCase):
         changed = deepcopy(result.inputs); changed.cooling_channel_width_m *= 1.1
         for inp, res in ((changed, result), (result.inputs, GeometryPreservationTests.source())):
             fake = self.snapshot_action(inp, res)
-            with patch("ui_chamber_design.QMessageBox.warning") as warning:
+            with patch('lre_workbench.desktop.chamber_design.QMessageBox.warning') as warning:
                 ChamberDesignPanel._table_from_scalars(fake)
             warning.assert_called_once()
             fake._table_set_rows.assert_not_called()

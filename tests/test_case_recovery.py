@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from case_recovery import RecoveryStore
+from lre_workbench.application.case_recovery import RecoveryStore
 
 
 class RecoveryTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class RecoveryTests(unittest.TestCase):
         original = {"raw_inputs": {"p_c": "30"}, "saved_path": "方案.json"}
         store.save(original)
         self.assertEqual(store.read(), original)
-        with patch("case_recovery.os.replace", side_effect=OSError("simulated disk error")):
+        with patch('lre_workbench.application.case_recovery.os.replace', side_effect=OSError("simulated disk error")):
             with self.assertRaises(OSError):
                 store.save({"raw_inputs": {"p_c": "40"}})
         self.assertEqual(store.read(), original)
@@ -61,7 +61,7 @@ class RecoveryTests(unittest.TestCase):
         crashed.close()
         crashed.path.write_text('{"interrupted":', encoding="utf-8")
         current = self.store()
-        with self.assertLogs("case_recovery", level="WARNING") as logs:
+        with self.assertLogs("lre_workbench.application.case_recovery", level="WARNING") as logs:
             self.assertEqual(current.discover(), [])
         self.assertIn("retained for diagnosis", "\n".join(logs.output))
         self.assertTrue(crashed.path.exists())
@@ -89,7 +89,7 @@ class RecoveryTests(unittest.TestCase):
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / 'src'))
-from case_recovery import RecoveryStore
+from lre_workbench.application.case_recovery import RecoveryStore
 store = RecoveryStore(sys.argv[2])
 store.save({'raw_inputs': {'p_c': 'partial edit'}})
 print(store.path, flush=True)
@@ -125,7 +125,7 @@ sys.stdin.readline()
         envelope["updated_at"] = "2026-10-12T09:00:00"
         crashed.path.write_text(json.dumps(envelope), encoding="utf-8")
         current = self.store()
-        with self.assertLogs("case_recovery", level="WARNING"):
+        with self.assertLogs("lre_workbench.application.case_recovery", level="WARNING"):
             self.assertEqual(current.discover(), [])
         unrelated = self.directory / "user_notes.json"
         unrelated.write_text("do not remove", encoding="utf-8")

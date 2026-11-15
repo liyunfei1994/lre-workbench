@@ -10,10 +10,10 @@ import unittest
 
 from webapp.throttle import source_baseline
 from web_tests.test_throttle_analysis import source_fixture
-from chamber_contour import convergent_geometry
-from regen_geometry import build_regen_geometry
-from wall_thermal import material_for_cell, audit_cell, material_summary
-from wall_materials import GRCOP84_DATASET_ID
+from lre_workbench.components.chambers.contour import convergent_geometry
+from lre_workbench.components.cooling.geometry import build_regen_geometry
+from lre_workbench.components.cooling.wall_thermal import material_for_cell, audit_cell, material_summary
+from lre_workbench.materials.wall import GRCOP84_DATASET_ID
 
 
 def physical_source_fixture(*, material_zones=(), cover_eps=0.,
@@ -23,6 +23,7 @@ def physical_source_fixture(*, material_zones=(), cover_eps=0.,
     v = c["inputs"]
     v.update(cooling_bartz_mode=1., cooling_grid_points=24., cooling_cover_eps=cover_eps,
              nozzle_contour_method=contour_method,
+             chamber_inner_wall_material="grcop84",
              wall_material_zones_json=json.dumps(list(material_zones)),
              wall_thermal_dataset_id=GRCOP84_DATASET_ID)
     boundaries = sorted({z[key] for z in material_zones for key in ("x_start_m", "x_end_m")})
@@ -111,6 +112,25 @@ def physical_source_fixture(*, material_zones=(), cover_eps=0.,
 
 
 class ThrottleCoolingContractTests(unittest.TestCase):
+    def test_pr_bm_can_supply_saved_geometry_but_cannot_initialize_local_throttle(self):
+        from webapp.operating_throttle import configuration
+
+        source = physical_source_fixture()
+        calculation = source["result"]["calculation"]
+        eos = "Peng-Robinson-Boston-Mathias"
+        calculation["inputs"]["gas_eos"] = source["inputs"]["gas_eos"] = eos
+        calculation["summary"]["thrust_N"] = 1e6
+        components = calculation["components"]
+        hot = components["nozzle"]["profile"]
+        hot.update(model_id="heated_frozen_pr_bm_quasi1d_v1", gas_eos=eos)
+        components["cooling_channel"]["profile"]["hot_side_profile"] = deepcopy(hot)
+        before = deepcopy(source)
+        self.assertEqual(source_baseline(source)[1]["cooling_hardware"]["status"], "saved_model_balances_checked")
+        setup = configuration(source)
+        self.assertFalse(setup["ready"])
+        self.assertIn("仅支持理想燃气", setup["issues"][0])
+        self.assertEqual(source, before)
+
     def test_checked_spatial_record_retains_geometry_without_certifying_accuracy(self):
         source = physical_source_fixture()
         before = deepcopy(source)
@@ -202,12 +222,10 @@ class ThrottleCoolingContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"重新计算"):
                     source_baseline(source)
 
-    def test_gg_physical_source_needs_same_cooling_evidence(self):
+    def test_removed_cycle_is_rejected_even_with_complete_cooling_evidence(self):
         source = physical_source_fixture()
         c = source["result"]["calculation"]
         c["inputs"]["cycle_type"] = "gg"
         c.pop("steady_closure")
-        self.assertEqual(source_baseline(source)[1]["cooling_hardware"]["mode"],"regen_quasi1d_ph_v1")
-        c["components"]["cooling_channel"]["profile"].pop("hot_side_coupling")
-        with self.assertRaisesRegex(ValueError,"热侧耦合"):
+        with self.assertRaisesRegex(ValueError,"FFSC"):
             source_baseline(source)

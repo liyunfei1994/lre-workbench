@@ -18,11 +18,11 @@ def main():
     args = parser.parse_args()
     from PySide6.QtCore import QCoreApplication, QEvent
     from PySide6.QtWidgets import QApplication, QMessageBox
-    from workbench_fonts import configure_fonts
+    from lre_workbench.desktop.fonts import configure_fonts
     app = QApplication([])
     app.setStyle("Fusion")
     configure_fonts(app)
-    from workbench import WorkbenchWindow
+    from lre_workbench.desktop.workbench import WorkbenchWindow
     configure_fonts(app)
     window = WorkbenchWindow()
     window.show()

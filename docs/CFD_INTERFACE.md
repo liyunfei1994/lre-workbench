@@ -45,7 +45,7 @@ last_result = load_imported_result(job)     # 未导入时返回 None
 
 `create_cfd_job` 返回新任务目录的 `pathlib.Path`；另外三个函数返回普通字典或 `None`。所有导入异常会抛出 `ValueError` 或文件系统异常，失败不会覆盖此前已导入的结果。
 
-支持的任务类型：`chamber_flow`、`cooling_flow`、`turbine_flow`。`turbine_side` 仅取 `ox` 或 `fuel`；GG 单轴使用实际 `gg_turbine`，GG 双轴使用所选支路的专用流量与出口温度。
+当前数字化平台的设计来源仅限全流量补燃循环（FFSC）。支持的任务类型：`chamber_flow`、`cooling_flow`、`turbine_flow`。`turbine_side` 仅取 `ox` 或 `fuel`，对应富氧涡轮和富燃涡轮。
 
 接口只把 `pressure_basis`、`temperature_basis`、`setup_reviewed`、`turbine_side` 写进任务设置。UI 中的执行路径、命令参数和超时属于本地运行配置，不是数据协议，也不会在本模块中执行。
 
@@ -84,7 +84,7 @@ last_result = load_imported_result(job)     # 未导入时返回 None
 
 `role=inlet` 行才记录该域实际参与计算的质量流量。`outlet_reference` 和 `domain_reference` 是下游 / 内部状态参考，其流量列留空，不能把它们累加成新的入口。例如 FFSC 主室两条涡轮排气入口流量相加后，主室内部总流量不再重复添加。
 
-GG 的主室域采用 `mdot_chamber_kg_s` 与 `chamber_mixture_ratio` 拆分主室推进剂流量，排除燃气发生器旁路。冷却域采用真正的冷却通流，不使用包含 GG 分流的泵总流量。GG 双轴涡轮域采用所选涡轮部件的支路流量，不把发生器总流量作为每台涡轮的流量。
+FFSC 的主室域采用两路涡轮排气入口；冷却域采用保存的冷却通流。涡轮域使用所选富氧或富燃涡轮的专用流量与出口状态，不把全发动机总流量作为每台涡轮的流量。
 
 这些 CSV 行是模型参考，不是可直接套用的完整求解器边界配置。喷注器结构、速度方向、组分、壁面热条件和外部远场等仍需建模者设置。
 

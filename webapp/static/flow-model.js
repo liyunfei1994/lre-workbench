@@ -1,5 +1,6 @@
+import {supportsCycleResult,savedValveTopology} from './cycle-model.js';
 // Read-only presentation of the solver's discrete FlowState records.
-// The routes below follow src/cycle.py and src/gg_cycle.py. They describe
+// The routes below follow src/cycle.py. They describe
 // recorded flow interfaces, never spatial samples or transient time steps.
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const numeric = (value, scale = 1) => finite(value) && Number.isFinite(value * scale) ? value * scale : null;
@@ -11,26 +12,25 @@ const NODE_SPECS = {
   lox_boost_out: ["O02", "ox", "液氧增压泵出口"],
   lox_pump_inlet: ["O03", "ox", "液氧泵入口（管路后）"],
   lox_after_pump: ["O04", "ox", "液氧泵出口"],
+  fpov_outlet: ["O05", "ox", "FPOV 出口"],
   fuel_tank: ["F01", "fuel", "燃料贮箱"],
   fuel_boost_out: ["F02", "fuel", "燃料增压泵出口"],
   fuel_pump_inlet: ["F03", "fuel", "燃料泵入口（管路后）"],
   fuel_after_pump: ["F04", "fuel", "燃料泵出口"],
   fuel_after_cooling: ["F05", "fuel", "燃料再生冷却出口"],
+  cooling_inlet: ["F06", "fuel", "MFV 出口 / 再生冷却入口"],
+  opfv_outlet: ["F07", "fuel", "OPFV 出口"],
   ox_preburner_outlet: ["G01", "gas", "富氧预燃室出口（涡轮入口）"],
   ox_turbine_exhaust: ["G02", "gas", "富氧涡轮出口"],
   fuel_preburner_outlet: ["G03", "gas", "富燃预燃室出口（涡轮入口）"],
   fuel_turbine_exhaust: ["G04", "gas", "富燃涡轮出口"],
-  gg_outlet: ["G05", "gas", "燃气发生器出口（涡轮入口）"],
-  gg_turbine_exhaust: ["G06", "gas", "GG 涡轮排气"],
-  gg_turbine_ox_exhaust: ["G07", "gas", "GG 液氧泵涡轮出口"],
-  gg_turbine_fuel_exhaust: ["G08", "gas", "GG 燃料泵涡轮出口"],
   main_chamber: ["C01", "chamber", "主燃烧室"],
 };
 
 const ROUTES = {
   ox: [["lox_tank", "lox_boost_out", "lox_pump_inlet", "lox_after_pump"]],
   fuel: [["fuel_tank", "fuel_boost_out", "fuel_pump_inlet", "fuel_after_pump", "fuel_after_cooling"]],
-  gas: [["ox_preburner_outlet", "ox_turbine_exhaust"], ["fuel_preburner_outlet", "fuel_turbine_exhaust"], ["gg_outlet", "gg_turbine_exhaust"]],
+  gas: [["ox_preburner_outlet", "ox_turbine_exhaust"], ["fuel_preburner_outlet", "fuel_turbine_exhaust"]],
   chamber: [["main_chamber"]],
 };
 
@@ -60,30 +60,35 @@ function copyValue(value) {
 function metadataRows(metadata) {
   return Object.entries(object(metadata)).map(([key, original]) => {
     const [label, unit] = own(META, key) ? META[key] : [`原始字段 · ${key}`, "—"];
-    const value = key === "thermo_source" && original === 1 ? "Cantera"
+    const value = key === "thermo_source" && original === 1 ?
+      (metadata.model?.eos === "Peng-Robinson-Boston-Mathias" ? "PR–BM 求解 / Cantera 物种热数据" : "Cantera")
       : key === "thermo_source" && original === 0 ? "替代热力学模型"
       : copyValue(original);
     return {key, label, value, unit};
   });
 }
 
-function componentsFor(id, available, gg, independentGG=false) {
+function componentsFor(id, available, topology) {
   const candidates = {
     lox_pump_inlet: ["ox_pump"],
     fuel_pump_inlet: ["fuel_pump"],
-    lox_after_pump: gg ? ["ox_pump", "gas_generator", "injector"] : ["ox_pump", "ox_preburner", "fuel_preburner"],
-    fuel_after_pump: gg ? ["fuel_pump", "cooling_channel", "gas_generator"] : ["fuel_pump", "cooling_channel"],
-    fuel_after_cooling: gg ? ["cooling_channel", "injector"] : ["cooling_channel", "ox_preburner", "fuel_preburner"],
+    lox_after_pump: ["ox_pump", "ox_preburner", "fuel_preburner"],
+    fuel_after_pump: ["fuel_pump", "cooling_channel"],
+    fuel_after_cooling: ["cooling_channel", "ox_preburner", "fuel_preburner"],
     ox_preburner_outlet: ["ox_preburner", "ox_preburner_turbine"],
     fuel_preburner_outlet: ["fuel_preburner", "fuel_preburner_turbine"],
     ox_turbine_exhaust: ["ox_preburner_turbine", "injector"],
     fuel_turbine_exhaust: ["fuel_preburner_turbine", "injector"],
-    gg_outlet: ["gas_generator", "gg_turbine", "gg_turbine_ox", "gg_turbine_fuel"],
-    gg_turbine_exhaust: independentGG ? ["gg_exhaust_nozzle"] : ["gg_turbine", "gg_turbine_ox", "gg_turbine_fuel", "gg_exhaust_nozzle"],
-    gg_turbine_ox_exhaust: ["gg_turbine_ox", "gg_exhaust_nozzle"],
-    gg_turbine_fuel_exhaust: ["gg_turbine_fuel", "gg_exhaust_nozzle"],
     main_chamber: ["injector", "main_chamber", "nozzle"],
   };
+  if(topology&&topology!=="unrecognized"){
+    candidates.fuel_after_pump=["fuel_pump","MFV",...(topology==="paper_split_before_cooling_v1"?["OPFV"]:[])];
+    candidates.cooling_inlet=["MFV","cooling_channel"];
+    candidates.fuel_after_cooling=["cooling_channel","fuel_preburner",...(topology==="paper_split_before_cooling_v1"?[]:["OPFV"])];
+    candidates.opfv_outlet=["OPFV","ox_preburner"];
+    candidates.lox_after_pump=["ox_pump","ox_preburner","FPOV"];
+    candidates.fpov_outlet=["FPOV","fuel_preburner"];
+  }
   return (own(candidates, id) ? candidates[id] : []).filter(key => available.has(key));
 }
 
@@ -108,14 +113,14 @@ function presentSegments(route, present) {
  */
 export function buildFlowModel(states, {labels = {}, inputs = {}, componentIds = []} = {}) {
   const source = object(states), names = object(labels), parameters = object(inputs);
+  const valveTopology=savedValveTopology(parameters);
   const available = new Set(Array.isArray(componentIds) ? componentIds.filter(id => typeof id === "string") : []);
   const fuel = parameters.propellant_pair === "lox_kerosene" ? "煤油" : "甲烷";
   const adaptLabel = value => fuel === "煤油"
     ? value.replace(/甲烷|燃料/g, "煤油").replace(/CH₄|CH4/g, "C₁₂H₂₆")
     : value.replace(/燃料/g, "甲烷");
-  const gg = parameters.cycle_type === "gg" || own(source, "gg_outlet") || available.has("gas_generator");
-  const branchOutlets=["gg_turbine_ox_exhaust","gg_turbine_fuel_exhaust"].filter(id=>own(source,id));
-  const splitGG = parameters.gg_layout==="dual_shaft" || branchOutlets.length>0 || available.has("gg_turbine_ox") && available.has("gg_turbine_fuel");
+  if(!supportsCycleResult({calculation:{inputs:parameters,states:source,components:Object.fromEntries([...available].map(id=>[id,{}]))}}))
+    return {status:'unsupported',nodes:[],groups:[]};
   const known = Object.keys(NODE_SPECS).filter(id => own(source, id));
   const unknown = Object.keys(source).filter(id => !own(NODE_SPECS, id)).sort();
   const nodes = [...known, ...unknown].map(id => {
@@ -128,33 +133,33 @@ export function buildFlowModel(states, {labels = {}, inputs = {}, componentIds =
       pressure: numeric(state.pressure, 1e-6), temperature: numeric(state.temperature),
       massFlow: numeric(state.mass_flow), density: numeric(state.density), enthalpy: numeric(state.enthalpy, 1e-3),
       composition: Object.fromEntries(Object.entries(object(state.composition)).map(([key, value]) => [key, numeric(value)])),
-      metadata: metadataRows(state.metadata), componentIds: componentsFor(id, available, gg,branchOutlets.length>0),
+      metadata: metadataRows(state.metadata), componentIds: componentsFor(id, available,valveTopology),
     };
   });
   const discrete = "离散接口状态；节点间距不表示空间距离。";
-  const aggregateNote=own(source,"gg_turbine_exhaust")?"G06 汇总排气记录的流量为总量、温度取液氧侧涡轮出口，并非混合温度。":"";
-  const dualCaption=branchOutlets.length
-    ? `GG 燃气并联驱动双涡轮。${branchOutlets.length===2?"两条独立出口分别展示各自的温度与流量。":"已记录的独立出口按所属支路展示；另一支路出口未记录。"}${aggregateNote}`
-    : "GG 燃气并联驱动双涡轮。排气记录为总质量流量，温度取液氧侧涡轮出口；并非混合温度，未提供两支路独立出口状态。";
   const definitions = [
     {id: "ox", title: "液氧供给", color: "#427ca4", caption: `${discrete}贮箱 → 增压泵出口 → 主泵入口 → 主泵出口。`},
     {id: "fuel", title: "燃料供给与冷却", color: "#b28b46", caption: `${discrete}${fuel}${fuel === "煤油" ? "（正十二烷替代物）" : ""}供给及再生冷却；分流前后质量流量可能不同。`},
-    {id: "gas", title: "燃气流路", color: "#9270a8", caption: `${discrete}${gg
-      ? splitGG ? dualCaption
-        : "燃气发生器 → 涡轮排气；排气进入独立排气喷管，不进入主燃烧室。"
-      : "富氧、富燃预燃室各自驱动对应涡轮；两条燃气支路分开展示，之后进入主燃烧室。"}`},
+    {id: "gas", title: "燃气流路", color: "#9270a8", caption: `${discrete}富氧、富燃预燃室各自驱动对应涡轮；两条燃气支路分开展示，之后进入主燃烧室。`},
     {id: "chamber", title: "主燃烧室", color: "#b96359", caption: `${discrete}主燃烧室集总状态；不表示室内温度场或喷管沿程分布。`},
     {id: "other", title: "其他记录节点", color: "#778596", caption: `${discrete}连接关系未定义，各记录独立展示。`},
   ];
   const present = new Set(nodes.map(node => node.id));
-  // Independent branch outlets replace the legacy aggregate route. The aggregate,
-  // when retained by the solver, is an isolated report rather than a third branch.
-  const gasRoutes=branchOutlets.length
-    ? [...ROUTES.gas.slice(0,2),...branchOutlets.map(id=>["gg_outlet",id]),...(present.has("gg_turbine_exhaust")?[["gg_turbine_exhaust"]]:[])]
-    : ROUTES.gas;
+  const routes=valveTopology&&valveTopology!=="unrecognized"?{
+    ...ROUTES,
+    ox:[...ROUTES.ox,["lox_after_pump","fpov_outlet"]],
+    fuel:[["fuel_tank","fuel_boost_out","fuel_pump_inlet","fuel_after_pump","cooling_inlet","fuel_after_cooling"],
+      [valveTopology==="paper_split_before_cooling_v1"?"fuel_after_pump":"fuel_after_cooling","opfv_outlet"]],
+  }:ROUTES;
+  if(valveTopology){
+    definitions.find(group=>group.id==="fuel").caption+=valveTopology==="paper_split_before_cooling_v1"
+      ?" 本记录泵后先分流：MFV 支路经冷却；OPFV 支路绕过冷却。"
+      :valveTopology==="unrecognized"?" 阀门安装定义无法识别，供给节点独立展示，不沿用历史连接。":" 本记录全部燃料经 MFV 和冷却后分流，OPFV 位于冷却出口支路。";
+  }
   const groups = definitions.filter(group => nodes.some(node => node.group === group.id)).map(group => ({
     ...group, segments: group.id === "other" ? unknown.map(id => [id])
-      : (group.id==="gas"?gasRoutes:ROUTES[group.id]).flatMap(route => presentSegments(route, present)),
+      :valveTopology==="unrecognized"&&["ox","fuel"].includes(group.id)?nodes.filter(node=>node.group===group.id).map(node=>[node.id])
+      : routes[group.id].flatMap(route => presentSegments(route, present)),
   }));
   return {nodes, groups};
 }

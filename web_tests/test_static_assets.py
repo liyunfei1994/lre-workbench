@@ -33,6 +33,8 @@ class StaticAssetTests(unittest.TestCase):
     def test_entry_page_and_all_transitive_modules_are_served_with_correct_mime(self):
         entry = self.client.get("/")
         self.assertEqual(entry.status_code, 200)
+        directives = dict(part.strip().split(" ", 1) for part in entry.headers["content-security-policy"].split(";") if part.strip())
+        self.assertEqual(directives["style-src"], "'self'")
         refs = References()
         refs.feed(entry.text)
         pending, visited = refs.assets[:], set()
@@ -55,7 +57,34 @@ class StaticAssetTests(unittest.TestCase):
                 self.assertIn("text/css", response.headers["content-type"], path)
         self.assertTrue({"/static/bootstrap.js", "/static/app.js", "/static/results.js",
                          "/static/convergence.js", "/static/convergence.css",
+                         "/static/solver-monitor.js", "/static/solver-monitor.css",
+                         "/static/partitioned-workspace.css",
+                         "/static/help-manual.js", "/static/help-manual.css",
+                         "/static/thermochemistry-model.js", "/static/thermochemistry-model.css",
+                          "/static/property-library.js", "/static/property-library.css",
+                         "/static/preburner-design.js",
+                         "/static/pressure-design.js", "/static/pressure-design.css",
+                         "/static/design-review-migration.js",
+                         "/static/valve-configuration.js", "/static/valve-design.js",
+                         "/static/cooling-channel-inputs.js", "/static/cooling-channel-inputs.css",
+                         "/static/cooling-input-summary.js",
                          "/static/cooling.js", "/static/cooling.css"} <= visited)
+
+    def test_valve_editor_and_saved_design_modules_are_available_at_startup(self):
+        # A Node import from disk cannot catch a missing server allowlist entry.
+        # Both modules load with app.js before login or project selection.
+        application = self.client.get("/static/app.js")
+        self.assertEqual(application.status_code, 200)
+        for name in ("valve-configuration.js", "valve-design.js"):
+            with self.subTest(module=name):
+                self.assertIn(f'from "./{name}"', application.text)
+                response = self.client.get(f"/static/{name}")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertIn(response.headers["content-type"].split(";", 1)[0],
+                              {"text/javascript", "application/javascript"})
+                self.assertNotIn("<html", response.text.lower())
+                self.assertEqual(response.headers["cache-control"], "no-store")
+                self.assertEqual(response.headers["x-content-type-options"], "nosniff")
 
     def test_unknown_files_and_traversal_remain_unavailable(self):
         for path in ("/static/not-registered.js", "/static/app.py", "/static/%2E%2E%2Fapp.py",

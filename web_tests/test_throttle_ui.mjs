@@ -1,7 +1,7 @@
 // Synthetic chart fixtures only; these numbers are not engine validation data.
 import assert from "node:assert/strict";
 import test from "node:test";
-import {buildThrottleRequest,prepareThrottleData,renderThrottleCharts,renderThrottleResponseGains,renderThrottleResult,buildThrottleCsv,buildThrottleSvg,mountThrottle} from "../webapp/static/throttle.js";
+import {buildThrottleRequest,buildOperatingThrottleRequest,prepareThrottleData,renderThrottleCharts,renderThrottleResponseGains,renderThrottleResult,buildThrottleCsv,buildThrottleSvg,mountThrottle,mountOperatingThrottle} from "../webapp/static/throttle.js";
 
 const clone=value=>JSON.parse(JSON.stringify(value));
 const source=()=>({project:{id:"project-1",revision:3},dirty:true,draft:{pc:99e6,thrust:9e6},record:{id:"design-1",project_id:"project-1",revision:2,status:"succeeded",created:1,inputs:{pc:8e6,thrust:999999},result:{calculation:{inputs:{pc:9e6,thrust:1000000,ambient_pressure:101325},summary:{thrust_N:1000001}}}}});
@@ -35,6 +35,18 @@ test("request binds the completed source and validates the actual backend bounds
   assert.deepEqual(context,before);
 });
 
+test("conflicting saved identities cannot launch a throttle scan",()=>{
+  for(const location of ["inputs","submitted_inputs","calculation"]){
+    const context=source();
+    if(location==="inputs")context.record.inputs.cycle_type="gg";
+    else if(location==="submitted_inputs")context.record.result.submitted_inputs={cycle_type:"gg"};
+    else context.record.result.calculation.inputs.cycle_type="gg";
+    assert.throws(()=>buildThrottleRequest(context,{minimum_percent:40,point_count:5}),/已完成/);
+  }
+  const legacy=result();legacy.baseline.cycle_type="gg";
+  assert.deepEqual(prepareThrottleData(legacy).panels,[]);
+});
+
 test("absent, unfinished and foreign sources cannot submit scans",()=>{
   for(const mutate of [c=>c.record=null,c=>c.record.status="running",c=>c.record.result=null,c=>c.record.project_id="foreign"]){const context=source();mutate(context);assert.throws(()=>buildThrottleRequest(context,{minimum_percent:40,point_count:5}),/已完成/);}
 });
@@ -63,13 +75,13 @@ test("the actual thrust curve breaks around failed points and uses review marker
   assert.doesNotMatch(html,/NaN|Infinity/);
 });
 
-test("missing GG preburners are absent instead of showing invented zero temperatures",()=>{
+test("removed generator fields do not appear as FFSC temperature series",()=>{
   const gg=result();
   for(const p of gg.points){delete p.summary.ox_preburner_T_combustion_K;delete p.summary.fuel_preburner_T_combustion_K;p.summary.gg_T_combustion_K=810;}
   const panel=prepareThrottleData(gg).panels.find(p=>p.id==="temperature");
-  assert.deepEqual(panel.series.map(s=>s.key),["chamber_temperature_K","gg_T_combustion_K"]);
+  assert.deepEqual(panel.series.map(s=>s.key),["chamber_temperature_K"]);
   const html=renderThrottleCharts(gg).match(/data-throttle-chart="temperature"[\s\S]*?<\/article>/)[0];
-  assert.match(html,/燃气发生器/);assert.doesNotMatch(html,/富氧预燃室|富燃预燃室/);
+  assert.doesNotMatch(html,/燃气发生器/);assert.doesNotMatch(html,/富氧预燃室|富燃预燃室/);
 });
 
 test("numeric ratio rounding does not add phantom points and duplicated saved ratios are not silently chosen",()=>{
@@ -167,20 +179,32 @@ test("response gains preserve review intervals, absent finite differences and un
 function container(){const listeners={};return {innerHTML:"",listeners,addEventListener(type,handler){listeners[type]=handler;},action(action){listeners.click({target:{closest:()=>({disabled:false,dataset:{throttleAction:action}})}});},field(name,value){listeners.input({target:{dataset:{throttleField:name},value}});},choose(id){listeners.change({target:{hasAttribute:attribute=>attribute==="data-throttle-record",value:id}});}};}
 const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
 
-test("mount displays actual frozen calculation inputs and does not present draft or recomputed summary as target",()=>{
+test("legacy mount is read only and cannot submit or cancel old scans",async()=>{
+  const calls=[];
+  const view=container(),ui=mountThrottle(view,{api:async(...args)=>{calls.push(args);return [];},getContext:source});
+  assert.match(view.innerHTML,/只读历史/);assert.doesNotMatch(view.innerHTML,/data-throttle-action="run"|data-throttle-field|data-throttle-action="cancel"/);
+  view.action("run");view.action("cancel");await tick();assert.deepEqual(calls,[]);ui.onLeave();
+});
+
+const configuration=()=>({ready:true,baseline:{thrust_N:1000001,pc_Pa:9e6,ambient_pressure_Pa:101325},hardware:{fingerprint:"fixed-snapshot"},model:{id:"fixed_geometry_local_throttle_v1"},limitations:["基准标定局部估算"]});
+
+test("operating mount displays actual saved thrust and fixed boundary without draft targets",async()=>{
   const view=container(),ctx=source(),ui=mountThrottle(view,{api:async()=>[],getContext:()=>ctx});
-  assert.match(view.innerHTML,/基准目标推力 \/ kN<\/span><b>1,000<\/b>/);
+  ui.onLeave();
+  const operating=mountOperatingThrottle(view,{api:async path=>path.endsWith("-config")?configuration():[],getContext:()=>ctx});
+  await operating.refresh();
+  assert.match(view.innerHTML,/100% 保存实际推力 \/ kN<\/span><b>1,000.001<\/b>/);
   assert.match(view.innerHTML,/基准室压 \/ MPa<\/span><b>9<\/b>/);
-  assert.match(view.innerHTML,/当前参数或方案版本/);assert.match(view.innerHTML,/固定主喷管喉部/);
-  assert.doesNotMatch(view.innerHTML,/从 100% 向最低|固定基准几何/);
-  assert.match(view.innerHTML,/readonly aria-label="最高节流比例固定为100%"/);ui.onLeave();
+  assert.match(view.innerHTML,/当前参数或方案版本/);assert.match(view.innerHTML,/90%–100%/);
+  assert.match(view.innerHTML,/供给等效通流系数比/);assert.match(view.innerHTML,/不是物理阀门开度/);
+  assert.doesNotMatch(view.innerHTML,/基准目标推力/);operating.onLeave();
 });
 
 test("mount submits only source ID and scan controls, then retains the created record",async()=>{
   const view=container(),ctx=source(),calls=[];
-  const ui=mountThrottle(view,{getContext:()=>ctx,api:async(path,method,body)=>{calls.push({path,method,body});return {id:"sweep-new",status:"succeeded",result:result()};}});
-  view.field("minimum_percent","55");view.field("point_count","4");view.action("run");await tick();
-  assert.deepEqual(calls,[{path:"/projects/project-1/throttles",method:"POST",body:{source_job_id:"design-1",throttle_min:.55,throttle_steps:4}}]);
+  const ui=mountOperatingThrottle(view,{getContext:()=>ctx,api:async(path,method,body)=>{if(!method)return path.endsWith("-config")?configuration():[];calls.push({path,method,body});return {id:"sweep-new",status:"succeeded",result:result()};}});
+  await ui.refresh();view.field("minimum_percent","90");view.field("maximum_percent","98");view.field("point_count","4");view.action("run");await tick();
+  assert.deepEqual(calls,[{path:"/projects/project-1/operating-throttle",method:"POST",body:{source_job_id:"design-1",throttle_min:.9,throttle_max:.98,throttle_steps:4}}]);
   assert.match(view.innerHTML,/sweep-ne/);assert.match(view.innerHTML,/扫描完成/);ui.onLeave();
 });
 
@@ -189,13 +213,13 @@ test("an in-flight history response cannot overwrite a newly selected project",a
   const ui=mountThrottle(view,{getContext:()=>ctx,api:async()=>pending.promise});
   const refresh=ui.refresh();ctx={...source(),project:{id:"project-2",revision:1},record:null};ui.sync();
   pending.resolve([{id:"old-sweep",project_id:"project-1",status:"succeeded"}]);await refresh;
-  assert.doesNotMatch(view.innerHTML,/old-sweep/);assert.match(view.innerHTML,/未选择已完成的设计记录/);ui.onLeave();
+  assert.doesNotMatch(view.innerHTML,/old-sweep/);assert.match(view.innerHTML,/历史记录不再重新计算/);ui.onLeave();
 });
 
 test("leaving the page prevents a pending run from updating or notifying the old view",async()=>{
   const view=container(),pending=deferred(),notices=[];
-  const ui=mountThrottle(view,{getContext:()=>source(),api:async()=>pending.promise,notify:text=>notices.push(text)});
-  view.action("run");ui.onLeave();const before=view.innerHTML;
+  const ui=mountOperatingThrottle(view,{getContext:()=>source(),api:async(path,method)=>method?pending.promise:path.endsWith("-config")?configuration():[],notify:text=>notices.push(text)});
+  await ui.refresh();view.action("run");ui.onLeave();const before=view.innerHTML;
   pending.resolve({id:"late-sweep",status:"queued"});await tick();
   assert.equal(view.innerHTML,before);assert.deepEqual(notices,[]);
 });
@@ -211,5 +235,77 @@ test("failed polling is visible and cancelled scans keep their partial points",a
 test("mount forwards zero-point cancelled state instead of initial run instructions",async()=>{
   const view=container(),record={id:"cancelled-empty",project_id:"project-1",revision:2,status:"cancelled",request:result().request,progress:{completed:0},result:{points:[]}};
   const ui=mountThrottle(view,{getContext:()=>source(),api:async path=>path.includes("/projects/")?[record]:record});
-  await ui.refresh();assert.match(view.innerHTML,/扫描已取消，尚未返回工况/);assert.doesNotMatch(view.innerHTML,/选择已完成的设计记录，设置最低/);ui.onLeave();
+  await ui.refresh();assert.match(view.innerHTML,/扫描已取消，尚未返回工况/);assert.doesNotMatch(view.innerHTML,/选择已完成的设计记录，设置最低|可以调整设置后重新运行|STEADY THROTTLE SWEEP/);assert.match(view.innerHTML,/原始请求与状态仅供历史追溯/);assert.match(view.innerHTML,/LEGACY DESIGN MATCHING · READ ONLY/);ui.onLeave();
+});
+
+function operatingResult(){
+  const value=result();
+  value.analysis_type="operating_throttle";value.analysis_mode="fixed_geometry_local_throttle";
+  value.model={id:"fixed_geometry_local_throttle_v1"};
+  value.request={source_job_id:"design-1",throttle_min:.8,throttle_max:.98,throttle_steps:4};
+  value.points=[.8,.86,.92,.98].map(ratio=>point(ratio,{status:"review",actual_thrust_ratio:ratio*.999,model_domain:{status:"within",violations:[]},hardware:{status:"pass",full_snapshot_sha256:"snapshot-123",calibration_sha256:"calibration-456"}}));
+  for(const p of value.points)Object.assign(p.summary,{shaft_speed_ox_rpm:26500*p.throttle_ratio,shaft_speed_fuel_rpm:38000*p.throttle_ratio,ox_pump_power_W:4e7,ox_turbine_power_W:4e7,fuel_pump_power_W:3.7e7,fuel_turbine_power_W:3.7e7,ox_effective_area_ratio:.95,fuel_effective_area_ratio:.96,of_ratio:3.5});
+  return value;
+}
+
+test("operating request validates both thrust endpoints, excludes design inputs and does not mutate source",()=>{
+  const context=source(),before=clone(context);
+  assert.deepEqual(buildOperatingThrottleRequest(context,{minimum_percent:90,maximum_percent:98,point_count:3}),{source_job_id:"design-1",throttle_min:.9,throttle_max:.98,throttle_steps:3});
+  for(const [minimum_percent,maximum_percent] of [[4,100],[50,101],[100,100],[60,50],["",100],[90,""]])assert.throws(()=>buildOperatingThrottleRequest(context,{minimum_percent,maximum_percent,point_count:5}));
+  assert.deepEqual(context,before);
+});
+
+test("operating charts preserve upper endpoint and exclude out-of-domain payloads from every performance series",()=>{
+  const value=operatingResult(),outside=value.points[1];
+  outside.converged=true;outside.model_domain={status:"outside",violations:[{quantity:"ox_feed_conductance",ratio:.62,lower:.75,upper:1.25}]};outside.status="out_of_domain";outside.summary.thrust_N=987654321;
+  const data=prepareThrottleData(value);
+  assert.deepEqual(data.points.map(p=>Number(p.throttle_ratio.toFixed(2))),[.8,.86,.92,.98]);
+  assert.equal(data.panels.length,10);
+  for(const panel of data.panels)for(const series of panel.series)if(!["target","target_thrust_ratio"].includes(series.key))assert.equal(series.value(outside),null,panel.id);
+  const html=renderThrottleCharts(value);assert.doesNotMatch(html,/987654321/);assert.match(html,/data-failed-ratio="0.86"/);assert.match(html,/krpm/);assert.match(html,/MW/);assert.match(html,/不是阀门开度/);
+  const full=renderThrottleResult(value,.86);assert.match(full,/超出范围/);assert.match(full,/氧路等效通流系数为基准的 62%/);assert.match(full,/75%–125%/);assert.match(full,/snapshot-123/);assert.match(full,/实际推力 \/ %/);
+});
+
+test("operating CSV and SVG preserve model identity, hardware provenance, units and failed gaps",()=>{
+  const value=operatingResult();value.points[1].converged=false;value.points[1].status="out_of_domain";value.points[1].model_domain.status="outside";
+  const csv=buildThrottleCsv(value),svg=buildThrottleSvg(value);
+  assert.match(csv,/氧轴转速_rpm/);assert.match(csv,/氧泵功率_W/);assert.match(csv,/局部标定指纹/);assert.match(csv,/snapshot-123/);assert.match(csv,/calibration-456/);assert.match(csv,/fixed_geometry_local_throttle_v1/);
+  const failed=csv.split("\r\n").find(row=>row.startsWith('"86",'));assert.match(failed,/"86","860","","",""/);assert.doesNotMatch(failed,/"40000000"|"0.95"/);
+  assert.match(svg,/height="1960"/);assert.match(svg,/y="1942"/);assert.match(svg,/固定几何节流 · 局部估算/);assert.equal((svg.match(/th-export-panel-title"/g)||[]).length,10);
+});
+
+test("unready configuration shows the missing source data and cannot submit",async()=>{
+  const view=container(),calls=[],ui=mountOperatingThrottle(view,{getContext:source,api:async(path,method)=>{calls.push({path,method});return path.endsWith("-config")?{ready:false,issues:["没有保存实际推力"]}:[];}});
+  await ui.refresh();assert.match(view.innerHTML,/没有保存实际推力/);view.action("run");await tick();assert.equal(calls.filter(c=>c.method==="POST").length,0);ui.onLeave();
+});
+
+test("changing the source record invalidates a pending operating configuration on the same project",async()=>{
+  const view=container(),pending=deferred();let context=source();
+  const ui=mountOperatingThrottle(view,{getContext:()=>context,api:async path=>path.endsWith("-config")?pending.promise:[]});
+  const request=ui.refresh();context=clone(context);context.record.id="new-design";ui.sync();pending.resolve(configuration());await request;
+  assert.match(view.innerHTML,/new-design/);assert.doesNotMatch(view.innerHTML,/1,000.001/);assert.match(view.innerHTML,/data-throttle-action="run" disabled/);ui.onLeave();
+});
+
+test("tiny displayed residuals use scientific notation without rounding exported source values or magnifying numerical noise",()=>{
+  const value=operatingResult();
+  for(const point of value.points){point.summary.thrust_N=point.thrust_target_N-1e-7;point.assessment.numerical.residual=8.32123456789e-13;}
+  const before=clone(value),html=renderThrottleResult(value,.8),detail=html.slice(0,html.indexOf('<details class="th-raw"'));
+  assert.match(detail,/8.32e-13/);assert.doesNotMatch(detail,/0\.000000000000832/);
+  const chart=renderThrottleCharts(value).match(/data-throttle-chart="tracking"[\s\S]*?<\/article>/)[0];
+  assert.match(chart,/>-0\.001<\/text>/);assert.match(chart,/>0\.001<\/text>/);
+  const error=(value.points[0].summary.thrust_N-value.points[0].thrust_target_N)/value.points[0].thrust_target_N*100;
+  assert.ok(buildThrottleCsv(value).includes(`"${error}"`));assert.deepEqual(value,before);
+});
+
+test("operating temperature checks distinguish provisional, documented and unset limits without claiming system validation",()=>{
+  const value=operatingResult();value.points[0].assessment.checks=[
+    {key:"ox_preburner_temperature",label:"富氧预燃室温度上限",actual:755,limit:800,unit:"K",status:"pass",limit_status:"provisional",basis:"初步材料假设"},
+    {key:"fuel_preburner_temperature",label:"富燃预燃室温度上限",actual:850,limit:900,unit:"K",status:"pass",limit_status:"documented",basis:"保存的依据 <review>"},
+    {key:"unset_limit",label:"未设条件",actual:700,limit:null,unit:"K",status:"not_evaluated",limit_status:"unset",basis:""},
+  ];
+  const html=renderThrottleResult(value,.8),detail=html.slice(html.indexOf('aria-label="所选节流点诊断"'),html.indexOf('<details class="th-raw"'));
+  assert.match(detail,/局部温度检查/);assert.doesNotMatch(detail,/系统约束/);
+  assert.match(detail,/暂定上限/);assert.match(detail,/未超过暂定上限/);assert.match(detail,/有依据上限/);assert.match(detail,/未超过有依据上限/);assert.match(detail,/未设上限/);assert.match(detail,/未评估/);
+  assert.match(detail,/初步材料假设/);assert.match(detail,/保存的依据 &lt;review&gt;/);assert.doesNotMatch(detail,/<review>/);
+  assert.match(renderThrottleResult(result(),.85),/系统约束 · 未通过/);
 });

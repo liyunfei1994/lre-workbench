@@ -19,7 +19,7 @@
 2026-10-23 算法修订：先修复收敛逻辑，未进行推力或比冲参数拟合。FFSC/GG 的预燃室温度
 二分反求返回实际评估点，Newton 边界差分采用真实位移，最后允许步也进行残差验收。
 温度目标迭代只保存实际求解过的混合比；主室反馈同时检查 Tc、γ、M；达到上限、非有限值、
-迭代停滞和未到目标工况分别保存失败原因。完整状态由 `src/convergence.py` 统一评估，
+迭代停滞和未到目标工况分别保存失败原因。完整状态由 `src/lre_workbench/solvers/convergence.py` 统一评估，
 不能只依靠内层残差。`CycleResults.convergence` 的版本化证据包含四层判定及全部嵌套迭代轨迹。
 给定吸热量但自动估计冷却压降时仍执行热反馈闭合；只有吸热量和压降均给定才禁用该层。
 
@@ -30,11 +30,11 @@ CH₄ 交叉供给裕度仍为 −4.30415 MPa，系统约束失败。该复算�
 四条供给支路和全系统热量账的下一步闭合。复现脚本与冻结结果保存在
 `diagnostics/convergence_fix_20261023/`，未写回旧计算记录。
 
-- `src/cycle.py` 和 `src/gg_cycle.py` 已有 FFSC/GG 的流量分配、泵/涡轮功率和燃烧/冷却耦合，不能重复建设另一套只输出近似缩放的“稳态模型”。
-- `src/pump.py` 已采用 CoolProp 的入口熵—等熵出口焓—效率修正实际出口焓路线；`src/turbine.py` 调用热物性膨胀模型。比只用常数密度/比热更完整，但仍须报告后端、物种、适用范围和回退。
-- `src/engineering_assessment.py` 已把数值收敛与供给压力、分轴功率、温度约束分开；`webapp/validation_checks.py` 已有质量/功率及部件能量闭合、物性复核、带工况容差和独立留出角色的试验对比。因此优先增强覆盖和可解释性，不重复创建同名校核。
+- `src/lre_workbench/systems/ffsc.py` 和 `src/lre_workbench/legacy/gg_cycle.py` 已有 FFSC/GG 的流量分配、泵/涡轮功率和燃烧/冷却耦合，不能重复建设另一套只输出近似缩放的“稳态模型”。
+- `src/lre_workbench/components/pumps/model.py` 已采用 CoolProp 的入口熵—等熵出口焓—效率修正实际出口焓路线；`src/lre_workbench/components/turbines/model.py` 调用热物性膨胀模型。比只用常数密度/比热更完整，但仍须报告后端、物种、适用范围和回退。
+- `src/lre_workbench/analysis/assessment.py` 已把数值收敛与供给压力、分轴功率、温度约束分开；`webapp/validation_checks.py` 已有质量/功率及部件能量闭合、物性复核、带工况容差和独立留出角色的试验对比。因此优先增强覆盖和可解释性，不重复创建同名校核。
 - `webapp/throttle.py` 从不可变的设计记录建立基准，`throttle_sweep()` 固定主喷管喉部面积和膨胀比，逐点迭代室压，并保存独立几何闭合。其限制已经说明：GG排气喷管仍逐点重算、入口/总混合比/效率/压降假设沿用来源、缺少完整特性图和执行机构调节规律。
-- `src/propellants.py` 明确现阶段甲烷支持 FFSC/GG；煤油是正十二烷替代，仅支持GG，并限制物性范围。氢氧尚不是受支持的循环计算工质。本文的跨推进剂结论不能替代这些限制。
+- `src/lre_workbench/properties/propellants.py` 明确现阶段甲烷支持 FFSC/GG；煤油是正十二烷替代，仅支持GG，并限制物性范围。氢氧尚不是受支持的循环计算工质。本文的跨推进剂结论不能替代这些限制。
 
 ## 3. 优先级与最小改进
 
@@ -58,7 +58,7 @@ CH₄ 交叉供给裕度仍为 −4.30415 MPa，系统约束失败。该复算�
 ## 5. 数值方法修订与对照证据（2026-10-23 第二轮）
 
 本轮落实用户指定的前两项：先完善现有分块求解的完整热启动、自适应延续、缩放及步长
-控制，再加入 `least_squares(method="trf")`。共享内层后端在 `src/nonlinear_solver.py`，
+控制，再加入 `least_squares(method="trf")`。共享内层后端在 `src/lre_workbench/solvers/nonlinear.py`，
 FFSC/GG 仍分别负责物理残差和外环。没有改变压力／热量模型，也没有用推力或比冲做参数拟合。
 
 Newton 在缩放坐标中求解线性化方程，用边界内真实位移计算差分；秩亏时使用最小二乘

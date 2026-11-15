@@ -33,7 +33,7 @@ PARAMETERS = [
     field('volume_m3','反应容腔容积','L',1e-6,.1,.01,'容腔初态','独立研究几何，不能由设计推力唯一反推。',1000),
     field('initial_pressure_Pa','初始绝对压力','MPa',1e4,2e6,.01,'容腔初态','气相初态压力，需位于用户边界内部。',1e-6),
     field('initial_temperature_K','初始气体温度','K',300,2000,10,'容腔初态','氮气或未燃氧气/甲烷混合气，不是液体初态。'),
-    field('initial_of_ratio','初始预混气 O/F','—',.1,20,.1,'容腔初态','仅初始预混气使用；质量混合比，不是摩尔比。'),
+    field('initial_of_ratio','初始预混气 氧燃质量比','—',.1,20,.1,'容腔初态','仅初始预混气使用；质量混合比，不是摩尔比。'),
     field('supply_ox_pressure_Pa','氧气储源绝对压力','MPa',1e4,2e6,.05,'气相供给边界','独立固定压力边界，不是泵出口计算值。',1e-6),
     field('supply_fuel_pressure_Pa','甲烷储源绝对压力','MPa',1e4,2e6,.05,'气相供给边界','独立固定压力边界，不是泵出口计算值。',1e-6),
     field('supply_ox_temperature_K','氧气供给温度','K',300,1500,10,'气相供给边界','只接受气相等效入口，不沿用低温液氧入口。'),
@@ -69,6 +69,8 @@ PARAMETERS = [
 
 
 def _source(source):
+    from webapp.design_scope import require_supported_source
+    require_supported_source(source)
     calc=(source.get('result') or {}).get('calculation') or {}
     if source.get('status')!='succeeded' or not isinstance(calc.get('inputs'),dict):
         raise ValueError('请选择已完成的设计记录以保存工质及方案来源。')
@@ -81,7 +83,7 @@ def ignition_setup(source):
     issues=[]; defaults={}
     try:
         _source(source)
-        from ignition import IgnitionModel, default_settings
+        from lre_workbench.operations.ignition import IgnitionModel, default_settings
         defaults=default_settings()
         IgnitionModel(defaults)
     except (ValueError,TypeError,KeyError,OverflowError) as exc:
@@ -99,7 +101,7 @@ def normalize_request(value,source):
         raise ValueError('点火事件研究请求含未知字段；不接受液体快照或额外成功判据。')
     if value.get('source_job_id')!=source.get('id'):
         raise ValueError('来源记录不匹配。')
-    from ignition import default_settings, validate_settings
+    from lre_workbench.operations.ignition import default_settings, validate_settings
     out={'source_job_id':source['id'],**default_settings()}
     for p in PARAMETERS:
         v=value.get(p['key'],out[p['key']])
@@ -121,8 +123,8 @@ def normalize_request(value,source):
 
 
 def calculate_ignition(request,source,progress=None):
-    from ignition import IgnitionModel
-    from version import APP_VERSION
+    from lre_workbench.operations.ignition import IgnitionModel
+    from lre_workbench.version import APP_VERSION
     request=normalize_request(request,source)
     model=IgnitionModel({k:v for k,v in request.items() if k!='source_job_id'})
     result=dict(schema_version=1,application_version=APP_VERSION,analysis_type='gaseous_ignition_event',

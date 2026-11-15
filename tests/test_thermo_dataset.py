@@ -9,9 +9,9 @@ import unittest
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import thermo
-from core import EngineInputs, ValidationError
-from thermo_data import active_methane_dataset, methane_dataset_scope, model_thermo_scope
+import lre_workbench.properties.thermochemistry as thermo
+from lre_workbench.domain.models import EngineInputs, ValidationError
+from lre_workbench.properties.datasets import active_methane_dataset, methane_dataset_scope, model_thermo_scope
 
 
 class DatasetContractTests(unittest.TestCase):

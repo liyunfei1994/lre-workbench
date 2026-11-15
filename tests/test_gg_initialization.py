@@ -4,9 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from tests.test_gg_convergence import AnalyticGG
-from core import EngineInputs
-from gg_cycle import GGCycleModel
-from convergence import numerical_convergence
+from lre_workbench.domain.models import EngineInputs
+from lre_workbench.legacy.gg_cycle import GGCycleModel
+from lre_workbench.solvers.convergence import numerical_convergence
 
 
 class SeededAnalyticGG(AnalyticGG):

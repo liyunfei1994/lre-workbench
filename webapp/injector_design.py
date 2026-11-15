@@ -196,12 +196,16 @@ def _preburner(calc, side):
                          - port["chamber_pressure_pa"]), "Pa", atol=1.),
         ]
         if network.get("mode") == "design":
-            ratio = _num(_obj(network.get("design_loss_inputs")).get("injector_ratio"), True)
+            loss_inputs = _obj(network.get("design_loss_inputs"))
+            saved_branch = _obj(_obj(loss_inputs.get("branches")).get(branch_id))
+            ratio = _num(saved_branch.get("injector_ratio") if "branches" in loss_inputs
+                         else loss_inputs.get("injector_ratio"), True)
             checks.append(_check(prefix + "喷注压降与保存设计压降比", port["pressure_drop_pa"],
                                  _calc(lambda: ratio * port["chamber_pressure_pa"]), "Pa", atol=1.))
-            if "injector_dp_Pa" in component:
+            component_key = "oxidizer_injector_dp_Pa" if propellant == "ox" else "fuel_injector_dp_Pa"
+            if component_key in component or "injector_dp_Pa" in component:
                 checks.append(_check(prefix + "喷注压降与预燃室部件", port["pressure_drop_pa"],
-                                     component.get("injector_dp_Pa"), "Pa", atol=1.))
+                                     component.get(component_key, component.get("injector_dp_Pa")), "Pa", atol=1.))
         elif network.get("mode") == "fixed_resistance":
             # Off-design branch drops need not match the design-ratio value
             # still reported by the lumped preburner component.

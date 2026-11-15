@@ -8,8 +8,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from cfturbo_export import build_cfturbo_markdown, export_cfturbo_markdown
-from core import ComponentResult, CycleResults, EngineInputs, FlowState
+from lre_workbench.integrations.cfturbo import build_cfturbo_markdown, export_cfturbo_markdown
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs, FlowState
 
 
 def result_fixture(cycle="ffsc", layout="single_shaft", pair="lox_methane"):
@@ -44,7 +44,7 @@ def result_fixture(cycle="ffsc", layout="single_shaft", pair="lox_methane"):
 
 class CFturboExportTests(unittest.TestCase):
     def setUp(self):
-        self.props = patch("cfturbo_export._fluid_props", return_value=None).start()
+        self.props = patch('lre_workbench.integrations.cfturbo._fluid_props', return_value=None).start()
         self.addCleanup(patch.stopall)
 
     def test_legacy_nodes_are_not_presented_as_total_or_static_boundaries(self):
@@ -109,7 +109,7 @@ class CFturboExportTests(unittest.TestCase):
         self.assertIn("质量分数 Y（非摩尔分数）", text)
         self.assertIn("| O2 | 0.63 |", text)
         self.assertIn("| H2 | 0.2 |", text)
-        self.assertIn("记录的建议级数 | 3 |", text)
+        self.assertIn("记录的候选级数 | 3 |", text)
         for invented in ("92%", "78%", "CH₄ 为主", "**2 级**", "安全系数回到", "三者自洽 cp="):
             self.assertNotIn(invented, text)
 
@@ -133,7 +133,7 @@ class CFturboExportTests(unittest.TestCase):
         result.components["ox_preburner_turbine"].outputs["reaction_degree"] = 0
         result.states["ox_preburner_outlet"].composition = {"O2": .2, "H2O": .3}
         text = build_cfturbo_markdown(result)
-        self.assertIn("反动度 R | 0.00 |", text)
+        self.assertIn("反动度初选值 R | 0.00 |", text)
         self.assertIn("| O2 | 0.2 |", text)
         self.assertIn("未通过非负性／归一化检查", text)
 
@@ -147,6 +147,59 @@ class CFturboExportTests(unittest.TestCase):
             returned = export_cfturbo_markdown(result, str(destination))
             self.assertEqual(returned, destination.read_text(encoding="utf-8"))
             self.assertEqual(returned, text)
+
+    def test_legacy_bar_pressures_and_si_turbine_pressures_display_in_mpa(self):
+        text = build_cfturbo_markdown(result_fixture())
+        self.assertIn("节点压升 Δp | 39.200 | MPa", text)
+        self.assertIn("入口节点压力 p | 0.800 | MPa", text)
+        self.assertIn("| 压力 [MPa] | 0.800 | 40.000 |", text)
+        self.assertIn("入口节点压力 p（口径待确认） | 9.000 | MPa", text)
+        self.assertIn("出口节点压力 p（口径待确认） | 0.500 | MPa", text)
+        self.assertNotIn("bar", text)
+        self.assertEqual(self.props.call_args_list[0].args, ("Oxygen", 95., 8e5))
+
+    def test_si_pressure_wins_over_inconsistent_engineering_unit_copies(self):
+        result = result_fixture()
+        result.components["ox_pump"].outputs.update(
+            p_in_Pa=1.25e6, p_out_Pa=42e6, delta_p_Pa=40.75e6,
+            p_in_MPa=7, p_out_MPa=8, delta_p_MPa=9)
+        before = dict(result.components["ox_pump"].outputs)
+        text = build_cfturbo_markdown(result).split("### 甲烷")[0]
+        self.assertIn("| 压力 [MPa] | 1.250 | 42.000 |", text)
+        self.assertIn("节点压升 Δp | 40.750 | MPa", text)
+        self.assertEqual(self.props.call_args_list[0].args, ("Oxygen", 95., 1.25e6))
+        self.assertEqual(result.components["ox_pump"].outputs, before)
+
+    def test_mpa_fallback_and_legacy_turbine_zero_preserve_units(self):
+        result = result_fixture()
+        result.components["ox_pump"].outputs.update(
+            p_in_Pa=None, p_in_MPa=1.2, p_out_MPa=41, delta_p_MPa=39.8)
+        turbine = result.components["ox_preburner_turbine"].outputs
+        del turbine["p_in_Pa"], turbine["p_out_Pa"]
+        turbine.update(p_in_bar=90, p_out_bar=0)
+        text = build_cfturbo_markdown(result)
+        self.assertIn("| 压力 [MPa] | 1.200 | 41.000 |", text)
+        self.assertIn("节点压升 Δp | 39.800 | MPa", text)
+        self.assertIn("出口节点压力 p（口径待确认） | 0.000 | MPa", text)
+        self.assertEqual(self.props.call_args_list[0].args, ("Oxygen", 95., 1.2e6))
+
+    def test_vapor_pressure_is_converted_from_property_si_to_mpa(self):
+        self.props.return_value = {"rho": 1100, "mu": .0002, "nu": .2, "lam": .1,
+                                   "cp": 1700, "pv": 101325}
+        text = build_cfturbo_markdown(result_fixture())
+        self.assertIn("Vapor pressure pv | 0.101325 | MPa", text)
+
+    def test_pump_reference_head_and_available_suction_are_not_design_certification(self):
+        result = result_fixture()
+        result.components["ox_pump"].outputs.update(head_m=4000, npsh_available_m=25,
+            suction_specific_speed_nss_eu=500, suction_specific_speed_Nss=25800)
+        text = build_cfturbo_markdown(result)
+        self.assertIn("入口密度参考扬程 Href（非已校正总扬程） | 4000", text)
+        self.assertIn("吸入比转速 nss(EU)（按可用 NPSHa） | 500", text)
+        self.assertIn("系统效率不能直接替代液力效率和容积效率", text)
+        self.assertIn("不是原计算记录保存的物性快照", text)
+        self.assertNotIn("150–400", text)
+        self.assertNotIn("| Head H |", text)
 
 
 if __name__ == "__main__":

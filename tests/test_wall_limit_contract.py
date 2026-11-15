@@ -6,13 +6,13 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import ComponentResult, CycleResults, EngineInputs, ValidationError, wall_temperature_constraint
-from cooling_marching import march_regen_circuit
-from engineering_assessment import assess_engineering
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs, ValidationError, wall_temperature_constraint
+from lre_workbench.components.cooling.marching import march_regen_circuit
+from lre_workbench.analysis.assessment import assess_engineering
 from tests.cooling_profile_fixture import cooling_profile
 from tests.test_regen_circuit import BASE
-from wall_thermal import material_summary, audit_cell, wall_limit_assessment
-from wall_materials import get_wall_dataset, GRCOP84_DATASET_ID
+from lre_workbench.components.cooling.wall_thermal import material_summary, audit_cell, wall_limit_assessment
+from lre_workbench.materials.wall import get_wall_dataset, GRCOP84_DATASET_ID
 
 
 class WallLimitContractTests(unittest.TestCase):
@@ -112,8 +112,8 @@ class WallLimitContractTests(unittest.TestCase):
 
     def test_desktop_scorecard_does_not_invent_coking_velocity_or_manufacturing_allowances(self):
         from tests.test_saved_cooling_views import result_fixture
-        from thermal_structural import wall_field_from_profile
-        from chamber_design import compute_scorecard, channel_feasibility
+        from lre_workbench.analysis.thermal_structural import wall_field_from_profile
+        from lre_workbench.components.chambers.design import compute_scorecard, channel_feasibility
         result = result_fixture()
         wf = wall_field_from_profile(result.components["cooling_channel"].profile,
                                      result.summary, {}, domain="full")

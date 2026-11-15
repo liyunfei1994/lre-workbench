@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from windows_identity import create_workbench_shortcut, APP_USER_MODEL_ID
+from lre_workbench.desktop.windows_identity import create_workbench_shortcut, APP_USER_MODEL_ID
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows taskbar properties")
@@ -55,8 +55,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path.cwd() / 'src'))
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-from workbench import WorkbenchWindow
-from windows_identity import read_taskbar_identity, APP_USER_MODEL_ID
+from lre_workbench.desktop.workbench import WorkbenchWindow
+from lre_workbench.desktop.windows_identity import read_taskbar_identity, APP_USER_MODEL_ID
 app = QApplication([])
 w = WorkbenchWindow()
 w.setAttribute(Qt.WA_DontShowOnScreen, True)

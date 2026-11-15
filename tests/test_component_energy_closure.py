@@ -5,14 +5,14 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import thermo
-from core import FlowState
-from pump import Pump, fluid_density
-from cooling import CoolingChannel
-from preburner import Preburner
-from chamber import MainChamber
-from gg_cycle import GGCycleModel
-from core import EngineInputs
+import lre_workbench.properties.thermochemistry as thermo
+from lre_workbench.domain.models import FlowState
+from lre_workbench.components.pumps.model import Pump, fluid_density
+from lre_workbench.components.cooling.model import CoolingChannel
+from lre_workbench.components.preburners.model import Preburner
+from lre_workbench.components.chambers.model import MainChamber
+from lre_workbench.legacy.gg_cycle import GGCycleModel
+from lre_workbench.domain.models import EngineInputs
 from types import SimpleNamespace
 
 
@@ -20,7 +20,7 @@ from types import SimpleNamespace
                      "Cantera and CoolProp are required")
 class ComponentEnergyClosureTests(unittest.TestCase):
     def test_gg_chamber_preserves_actual_port_enthalpy_and_explicit_heat_sink(self):
-        from thermo_data import methane_dataset_scope
+        from lre_workbench.properties.datasets import methane_dataset_scope
         for fuel, tf, mr in (("CH4",380.,3.6),("c12h26",400.,2.6)):
             with self.subTest(fuel=fuel), methane_dataset_scope("gri30_highT"):
                 hf = thermo.reactant_enthalpy(fuel,tf,60e6,fuel)

@@ -11,7 +11,7 @@ import CoolProp.CoolProp as CP
 import numpy as np
 from scipy.optimize import brentq
 
-from chilldown import ChilldownModel, hem_mass_flux
+from lre_workbench.operations.chilldown import ChilldownModel, hem_mass_flux
 
 
 def reference_fixture():

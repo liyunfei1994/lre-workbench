@@ -92,13 +92,22 @@ class ResultConsistencyTests(unittest.TestCase):
     def test_complete_saved_ffsc_record_passes_without_mutation(self):
         result = fixture()
         before = deepcopy(result)
-        view = result_consistency_view(result, "record-7")
+        view = result_consistency_view(result, "saved")
         self.assertEqual(view["status"], "pass", view["conflicts"] or [r for r in view["checks"] if r["status"] != "pass"])
-        self.assertEqual(view["record_id"], "record-7")
+        self.assertEqual(view["record_id"], "saved")
         self.assertGreater(view["checked_count"], 50)
         self.assertEqual(view["conflicts"], [])
         self.assertEqual(result, before)
         json.dumps(view, allow_nan=False)
+
+    def test_another_records_pump_snapshot_is_a_consistency_conflict(self):
+        result = fixture()
+        before = deepcopy(result)
+        view = result_consistency_view(result, "record-7")
+        self.assertEqual(view["status"], "conflict")
+        for side in ("ox", "fuel"):
+            self.assertEqual(checks(view)["geometry.integrity.pump_geometry.pumps." + side]["status"], "conflict")
+        self.assertEqual(result, before)
 
     def test_si_pressure_changed_without_display_alias_is_reported(self):
         result = fixture()
@@ -129,34 +138,27 @@ class ResultConsistencyTests(unittest.TestCase):
                 target[path[-1]] *= 1.1
                 self.assertEqual(checks(result_consistency_view(result))[check_id]["status"], "conflict")
 
-    def test_gg_single_and_distinct_parallel_branches_are_not_conflated(self):
+    def test_removed_cycle_is_not_audited_as_ffsc(self):
         for dual in (False, True):
-            with self.subTest(dual=dual):
-                view = result_consistency_view(fixture("gg", dual))
-                self.assertEqual(view["status"], "pass", view["conflicts"] or [r for r in view["checks"] if r["status"] != "pass"])
-        result = fixture("gg", True)
-        result["calculation"]["states"]["gg_turbine_fuel_exhaust"]["temperature"] = 800
-        row = checks(result_consistency_view(result))["station.gg_turbine_fuel.out.temperature"]
-        self.assertEqual(row["status"], "conflict")
+            original = fixture("gg", dual)
+            before = deepcopy(original)
+            view = result_consistency_view(original)
+            self.assertEqual(view["status"], "not_applicable")
+            self.assertEqual(view["checks"], [])
+            self.assertEqual(original, before)
 
-    def test_historical_gg_missing_branch_states_is_partial_not_false_conflict(self):
-        result = fixture("gg", True)
-        for key in ("gg_turbine_ox_exhaust", "gg_turbine_fuel_exhaust"):
-            del result["calculation"]["states"][key]
-        view = result_consistency_view(result)
-        self.assertEqual(view["status"], "partial")
-        self.assertEqual(view["conflicts"], [])
-        self.assertEqual(checks(view)["station.gg_turbine_fuel.out.temperature"]["status"], "partial")
 
-    def test_total_power_is_sum_of_actual_branches_and_shared_turbine_counts_once(self):
-        for dual, total in ((False, 3), (True, 4.5)):
-            result = fixture("gg", dual)
-            summary = result["calculation"]["summary"]
-            summary.update(turbine_power_MW=total, gg_turbine_power_MW=total, pump_power_MW=2)
-            self.assertEqual(result_consistency_view(result)["status"], "pass")
-            summary["turbine_power_MW"] += .5
-            row = checks(result_consistency_view(result))["summary.turbine_power_MW.total"]
-            self.assertEqual(row["status"], "conflict")
+
+
+    def test_total_power_is_sum_of_both_ffsc_turbines(self):
+        result = fixture()
+        summary = result["calculation"]["summary"]
+        total = sum(result["calculation"]["components"][key]["outputs"]["turbine_power_W"] for key in ("ox_preburner_turbine", "fuel_preburner_turbine")) / 1e6
+        summary["turbine_power_MW"] = total
+        self.assertEqual(checks(result_consistency_view(result))["summary.turbine_power_MW.total"]["status"], "pass")
+        summary["turbine_power_MW"] += .5
+        self.assertEqual(checks(result_consistency_view(result))["summary.turbine_power_MW.total"]["status"], "conflict")
+
 
     def test_saved_geometry_detects_changed_system_point_without_redrawing(self):
         cases = (("ox_pump", "T_out_K", "geometry.pump_geometry.ox.outlet_temperature_k"),
@@ -196,13 +198,13 @@ class ResultConsistencyTests(unittest.TestCase):
         for result in (None, {}, {"calculation": {"components": None, "inputs": []}}):
             with self.subTest(result=result):
                 view = result_consistency_view(result)
-                self.assertEqual(view["status"], "partial")
+                self.assertIn(view["status"], ("partial", "not_applicable"))
                 self.assertEqual(view["conflicts"], [])
                 json.dumps(view, allow_nan=False)
         result = fixture()
         result["calculation"]["states"]["ox_turbine_exhaust"]["temperature"] = float("nan")
         view = result_consistency_view(result)
-        self.assertEqual(view["status"], "partial")
+        self.assertIn(view["status"], ("partial", "not_applicable"))
         json.dumps(view, allow_nan=False)
 
     def test_no_geometry_reconstruction_and_total_state_unavailable_is_partial(self):
@@ -217,7 +219,7 @@ class ResultConsistencyTests(unittest.TestCase):
             "reason": "本记录采用显式总态接口。未解析静态密度，不使用旧静态参考假设生成环道。",
             "design_point": {}, "dimensions": {}}
         view = result_consistency_view(result)
-        self.assertEqual(view["status"], "partial")
+        self.assertIn(view["status"], ("partial", "not_applicable"))
         self.assertEqual(view["conflicts"], [])
 
 

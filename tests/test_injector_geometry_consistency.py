@@ -12,9 +12,9 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from geometry.injector import compute_injector
-from geometry import compute_geometry
-from core import EngineInputs
+from lre_workbench.components.injectors.geometry import compute_injector
+from lre_workbench.systems.geometry import compute_geometry
+from lre_workbench.domain.models import EngineInputs
 
 
 def saved_outputs():
@@ -42,8 +42,8 @@ class InjectorGeometrySnapshotTests(unittest.TestCase):
                                 Ae_m2=math.pi * .1 ** 2 * inputs.expansion_ratio),
         }, summary=dict(mdot_total_kg_s=150., mdot_ox_kg_s=100.,
                         mdot_fuel_kg_s=50., thrust_N=400e3))
-        with patch("geometry.estimate_pump"), patch("geometry.estimate_turbine"), \
-                patch("geometry.compute_preburner"):
+        with patch('lre_workbench.systems.geometry.estimate_pump'), patch('lre_workbench.systems.geometry.estimate_turbine'), \
+                patch('lre_workbench.systems.geometry.compute_preburner'):
             result = compute_geometry(source)
         self.assertEqual(result.injector.num_elements, 383)
         self.assertEqual(result.injector.face_diameter_m, .31)
@@ -116,7 +116,7 @@ class InjectorDrawingTests(unittest.TestCase):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
-        from ui_drawings.injector import fig, explain
+        from lre_workbench.desktop.drawings.injector import fig, explain
         cls.figure = staticmethod(fig)
         cls.explain = staticmethod(explain)
 

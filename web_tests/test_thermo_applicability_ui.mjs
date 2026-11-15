@@ -96,3 +96,13 @@ test("steady overview contains applicability independently of convergence",()=>{
   assert.match(html,/热力学适用性与模型假设/);
   assert.match(html,/热力学适用性待核实/);
 });
+
+test("BM applicability keeps species reference data separate from the saved station EOS",()=>{
+  const bm="Peng-Robinson-Boston-Mathias",input={thermodynamic_applicability:{...evidence,
+    states:[{...state,gas_model:bm}],gas_model:{id:bm,label:"PR–BM 全燃气流程受限候选"},
+    thermochemical_data:{id:"gri30_highT",label:"高温热数据",species_count:16,cantera_version:"3.2.0",sha256:"saved-data"}}};
+  const before=structuredClone(input),html=renderThermodynamicApplicability(input);
+  assert.match(html,/实际状态方程/);assert.match(html,/<td>Peng-Robinson-Boston-Mathias<\/td>/);
+  assert.match(html,/物种热数据与状态方程分别记录/);assert.doesNotMatch(html,/不改变理想气体状态方程/);
+  assert.deepEqual(input,before);
+});

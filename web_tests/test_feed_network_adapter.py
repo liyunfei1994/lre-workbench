@@ -55,11 +55,12 @@ class FeedAdapterTests(unittest.TestCase):
         json.dumps(result,allow_nan=False)
 
     def test_fluid_models_and_invalid_reference_fail_closed(self):
-        for kerosene in (False,True):
-            source=source_fixture('gg',kerosene)
-            setup=feed_setup(source)
-            self.assertTrue(setup['ready'],setup['issues'])
-            self.assertEqual(setup['defaults']['circuits'][1]['property_evidence']['fluid'],'n-Dodecane' if kerosene else 'Methane')
+        setup=feed_setup(source_fixture())
+        self.assertTrue(setup['ready'],setup['issues'])
+        self.assertEqual(setup['defaults']['circuits'][1]['property_evidence']['fluid'],'Methane')
+        for source in (source_fixture('gg'),source_fixture('ffsc',True)):
+            self.assertFalse(feed_setup(source)['ready'])
+            with self.assertRaises(ValueError):normalize_request({'source_job_id':source['id']},source)
         for change in ('unknown','gas','no_eta','pending'):
             source=source_fixture()
             if change=='unknown':source['result']['calculation']['inputs']['propellant_pair']='unknown'

@@ -6,8 +6,8 @@ import unittest
 import CoolProp.CoolProp as CP
 import numpy as np
 
-from chilldown import ChilldownModel, PropertyDomainError, hem_mass_flux, validate_settings
-from task_control import CancellationToken, TaskCancelled, cancellation_scope
+from lre_workbench.operations.chilldown import ChilldownModel, PropertyDomainError, hem_mass_flux, validate_settings
+from lre_workbench.runtime.tasks import CancellationToken, TaskCancelled, cancellation_scope
 
 
 def chill_fixture():

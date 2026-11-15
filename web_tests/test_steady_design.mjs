@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {renderSteadyDesignSummary,renderSteadyDesignBasis,renderSupplyBasis} from "../webapp/static/steady-design.js";
+import {renderSteadyDesignSummary,renderSteadyDesignBasis,renderSupplyBasis,renderDesignTraceability} from "../webapp/static/steady-design.js";
 import {renderGasHandoff} from "../webapp/static/gas-handoff.js";
 
 const fixture=()=>({schema_version:1,status:"review_required",scope_label:"FFSC 稳态总体设计基线",source:"保存记录 A",gates:[{id:"energy",label:"能量闭合",status:"pass",target:"checks",detail:"重核保存状态"},{id:"constraints",label:"系统约束",status:"review",target:"checks",detail:"壁温限值未设定"}],models:[{label:"燃气 EOS",value:"ideal-gas"}],modules:[{label:"泵",status:"recorded",delivers:"所需泵功",pending:"特性图验证"}],actions:[{label:"高压筛查",detail:"选择同一记录",target:"models"}],stations:[{label:"涡轮入口",p_Pa:60e6,T_K:750,state_basis:{pressure:"total",temperature:"total"},status:"complete"}]});
+
+test("steady summary carries the same project, revision and evidence as pump handoff",()=>{
+  const trace={status:"verified",source:{project_id:"project-A",revision:7,record_id:"job-A"},
+    calculation_sha256:"solution-hash",geometry_sha256:{ox:"ox-geometry",fuel:"fuel-geometry"}};
+  const report={...fixture(),traceability:trace},before=structuredClone(report);
+  const html=renderSteadyDesignSummary(report);
+  for(const text of ["project-A","v7","job-A","solution-hash","ox-geometry","fuel-geometry","来源与保存证据一致"])assert.ok(html.includes(text),text);
+  assert.deepEqual(report,before);
+  assert.equal(renderDesignTraceability(null),"");
+  assert.match(renderDesignTraceability({...trace,status:"legacy"}),/追溯证据未冻结/);
+  const conflict=renderDesignTraceability({...trace,status:"conflict",issues:['<script>bad</script>']});
+  assert.match(conflict,/暂停泵几何交接/);assert.match(conflict,/&lt;script&gt;/);assert.doesNotMatch(conflict,/<script>/);
+});
 
 test("overall evidence separates equation closure from hardware and preserves source",()=>{
   const r=fixture(), before=JSON.stringify(r), html=renderSteadyDesignSummary(r)+renderSteadyDesignBasis(r);
@@ -14,10 +27,41 @@ test("overall evidence separates equation closure from hardware and preserves so
 test("unsupported or missing framework is not fabricated",()=>{
   for(const r of [null,{}, {schema_version:1,status:"not_applicable"}])assert.equal(renderSteadyDesignSummary(r)+renderSteadyDesignBasis(r),"");
 });
+test("FFSC scope explains target closure without inferring a historical mode or success",()=>{
+  for(const status of ["review_required","blocked"]){
+    const r={...fixture(),scope:"lox_methane_ffsc_steady_design",status},before=structuredClone(r);
+    const html=renderSteadyDesignSummary(r);
+    assert.match(html,/推力达到输入目标属于约束闭合/);
+    assert.match(html,/仍需结合专业设计校核/);
+    assert.doesNotMatch(html,/已满足目标推力|指定预燃室温度|指定预燃室氧燃质量比/);
+    assert.deepEqual(r,before);
+  }
+  for(const scope of [undefined,"gg_steady_design","<script>"]){
+    assert.doesNotMatch(renderSteadyDesignSummary({...fixture(),scope}),/sd-design-scope/);
+  }
+});
 test("source strings are escaped and actions restricted to existing tabs",()=>{
   const r=fixture();r.gates[0].label='<img src=x onerror="bad()">';r.gates[0].target='" onclick="bad()';
   const html=renderSteadyDesignSummary(r);
   assert.doesNotMatch(html,/<img| onclick=/);assert.match(html,/&lt;img/);
+});
+test("gate-specific range labels preserve status styling and legacy fallbacks",()=>{
+  const r=fixture();
+  r.gates=[
+    {id:"range",label:"流体物性声明范围",status:"pass",status_label:"数据温区内",target:"models"},
+    {id:"wall_thermal_range",label:"壁面材料热物性数据范围",status:"fail",status_label:"超出数据温区",target:"cooling"},
+    {id:"legacy",label:"历史门卡",status:"review",status_label:"  "},
+  ];
+  const before=structuredClone(r),html=renderSteadyDesignSummary(r);
+  assert.match(html,/sd-state sd-pass">数据温区内/);
+  assert.match(html,/sd-state sd-fail">超出数据温区/);
+  assert.match(html,/sd-state sd-review">待确认/);
+  assert.deepEqual(r,before);
+});
+test("gate-specific status text is escaped rather than inserted as markup",()=>{
+  const r=fixture();r.gates[0].status_label='<img src=x onerror="bad()">';
+  const html=renderSteadyDesignSummary(r);
+  assert.match(html,/&lt;img/);assert.doesNotMatch(html,/<img| onerror="bad/);
 });
 test("legacy enthalpy percentages are suppressed and path evidence absence is visible",()=>{
   const s={stations:[{label:"test",eos_comparisons:[{backend:"PR",status:"computed",paired_ideal_baseline:{enthalpy_j_kg:-100},candidate:{enthalpy_j_kg:-90},differences:{enthalpy_j_kg:{difference:10,relative_difference:.1}},frozen_expansion:{status:"computed",isentropic_drop_j_kg:2000}}]}]};

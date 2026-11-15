@@ -5,7 +5,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from windows_identity import configure_shortcut_identity, read_taskbar_identity
+from lre_workbench.desktop.windows_identity import configure_shortcut_identity, read_taskbar_identity
 
 
 def main():

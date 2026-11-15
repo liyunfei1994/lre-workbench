@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtCore import QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QMessageBox, QWidget
-from case_safety import CaseSafetyMixin
+from lre_workbench.desktop.case_safety import CaseSafetyMixin
 
 
 class SmallCaseWindow(CaseSafetyMixin, QWidget):
@@ -143,8 +143,8 @@ class CaseSafetyTests(unittest.TestCase):
         self.assertTrue(old_store.path.exists())
         with patch.object(new, "_ask_case_recovery", return_value="restore"), \
                 patch.object(new._case_recovery_store, "save", side_effect=OSError("disk full")), \
-                patch("case_safety.QMessageBox.warning"), \
-                self.assertLogs("case_safety", level="ERROR"):
+                patch('lre_workbench.desktop.case_safety.QMessageBox.warning'), \
+                self.assertLogs("lre_workbench.desktop.case_safety", level="ERROR"):
             self.assertFalse(new.offer_case_recovery())
         self.assertTrue(old_store.path.exists())
         self.assertEqual(new.input_edits["p_c"].text(), "35")
@@ -175,7 +175,7 @@ class CaseSafetyTests(unittest.TestCase):
         self.assertTrue(window._has_unsaved_changes())
 
     def test_offscreen_default_uses_ephemeral_directory_without_recovery_prompt(self):
-        with patch("case_safety.QMessageBox.exec", side_effect=AssertionError("constructor must not prompt")):
+        with patch('lre_workbench.desktop.case_safety.QMessageBox.exec', side_effect=AssertionError("constructor must not prompt")):
             window = SmallCaseWindow()
         self.addCleanup(window.close)
         directory = window._case_recovery_store.directory

@@ -15,9 +15,9 @@ if QT_AVAILABLE:
     from PySide6.QtCore import QCoreApplication, QEvent
     from PySide6.QtWidgets import QApplication, QComboBox, QListView, QMessageBox, QSpacerItem
     from shiboken6 import isValid
-    from workbench import WorkbenchWindow
+    from lre_workbench.desktop.workbench import WorkbenchWindow
     from test_saved_cooling_views import result_fixture
-    import chamber_design as cd
+    import lre_workbench.components.chambers.design as cd
 
 
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 is required for the desktop smoke test")
@@ -52,7 +52,7 @@ class SavedCoolingQtTests(unittest.TestCase):
     def test_saved_profile_mounts_cooling_and_thermal_loads_without_solver(self):
         w = self.window
         before = deepcopy(self.result.components["cooling_channel"].profile)
-        with patch("thermal_structural.compute_chamber_wall_field", side_effect=AssertionError("duplicate solve")) as duplicate:
+        with patch('lre_workbench.analysis.thermal_structural.compute_chamber_wall_field', side_effect=AssertionError("duplicate solve")) as duplicate:
             w._populate_cooling(self.result)
             w._populate_thermstr(self.result)
             self.app.processEvents()
@@ -72,7 +72,7 @@ class SavedCoolingQtTests(unittest.TestCase):
         w._populate_cooling(self.result)
         w._populate_thermstr(self.result)
         self.result.components["cooling_channel"].profile = None
-        with patch("thermal_structural.compute_chamber_wall_field", side_effect=AssertionError("duplicate solve")) as duplicate:
+        with patch('lre_workbench.analysis.thermal_structural.compute_chamber_wall_field', side_effect=AssertionError("duplicate solve")) as duplicate:
             w._populate_cooling(self.result)
             w._populate_thermstr(self.result)
         duplicate.assert_not_called()

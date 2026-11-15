@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from convergence import attach_convergence_status, numerical_convergence
+from lre_workbench.solvers.convergence import attach_convergence_status, numerical_convergence
 from web_tests.convergence_fixture import converged_evidence
 
 
@@ -15,7 +15,7 @@ class ConvergenceContractTests(unittest.TestCase):
         return SimpleNamespace(summary={"solver_residual_norm": 1e-5}, convergence=converged_evidence())
 
     def test_unified_feedback_requires_all_six_original_physical_tolerances(self):
-        from regen_coupling import coupling_checks, COUPLING_CRITERIA
+        from lre_workbench.systems.regenerative import coupling_checks, COUPLING_CRITERIA
         r = self.result()
         thermal = r.convergence["layers"]["thermal"]
         thermal.update(source="regen_quasi1d_ph_v1", residual=1e-5, tolerance=.001,

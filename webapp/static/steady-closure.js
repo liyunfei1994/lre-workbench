@@ -94,7 +94,7 @@ function pressureContract(network, result) {
   const pumps=objects(capability.pumps), gasPaths=objects(contract.gas_paths), roles=objects(contract.parameter_roles), branchLinks=objects(contract.branch_state_links);
   const pumpRows=pumps.map(pump=>`<tr>${cell(pump.label || "未命名泵")}${cell(fmt(scaled(pump.model_outlet_pressure_Pa,1e-6)))}${cell(fmt(scaled(pump.required_outlet_pressure_Pa,1e-6)))}${cell(fmt(scaled(pump.required_rise_Pa,1e-6)))}</tr>`);
   const gasRows=gasPaths.map(path=>`<tr>${cell(path.label || "未命名热气支路")}${cell(fmt(scaled(path.preburner_pressure_Pa,1e-6)))}${cell(fmt(scaled(path.turbine_inlet_pressure_Pa,1e-6)))}${cell(fmt(scaled(path.turbine_outlet_pressure_Pa,1e-6)))}${cell(fmt(scaled(path.chamber_pressure_Pa,1e-6)))}${cell(fmt(path.turbine_pressure_ratio))}${cell(fmt(path.preburner_chamber_pressure_ratio))}${cell(fmt(scaled(path.hot_gas_drop_Pa,1e-6)))}</tr>`);
-  const roleLabels={design_budget:"设计压降预算",specified_design_budget:"给定压降预算",initial_guess:"数值初值",solved_result:"求解结果",fixed_resistance:"冻结阻力系数",model_assumption:"模型假设",inactive_with_frozen_resistance:"当前不生效（采用冻结阻力）",inactive_with_hydraulic_model:"当前不生效（采用水力模型）"};
+  const roleLabels={design_budget:"设计压降预算",specified_design_budget:"给定压降预算",concept_pressure_estimate:"概略压降估计",initial_guess:"数值初值",solved_result:"求解结果",fixed_resistance:"冻结阻力系数",model_assumption:"模型假设",inactive_with_concept_estimate:"当前不生效（采用概略估计）",inactive_with_frozen_resistance:"当前不生效（采用冻结阻力）",inactive_with_hydraulic_model:"当前不生效（采用水力模型）"};
   const evidenceLabels={unverified:"未核实实机数据",not_verified:"未核实实机数据",unverified_engineering_assumption:"工程假设；未核实实机数据",engineering_assumption:"工程假设",not_recorded:"未记录",model_result:"模型结果"};
   const roleRows=roles.map(role=>`<tr>${cell(role.label || role.key || "未命名参数")}${cell(role.unit === "Pa" ? `${fmt(scaled(role.value,1e-6))} MPa` : `${fmt(role.value)}${role.unit && role.unit !== "1" ? ` ${role.unit}` : ""}`)}${cell(roleLabels[role.role] || "身份未记录或未识别")}${cell(evidenceLabels[role.source_status] || "依据未记录或未识别")}${cell(role.detail || "未记录说明")}</tr>`);
   const linkStatus=pressureContractDisplayState(contract);
@@ -139,6 +139,7 @@ function coolingEvidence(result = {}) {
   const calculation=object(result.calculation ?? result), inputs=object(calculation.inputs), summary=object(calculation.summary);
   const component=object(object(calculation.components).cooling_channel), outputs=object(component.outputs), profile=object(component.profile);
   const hasProfile=Object.keys(profile).length>0, unified=profile.version===1 && profile.model_id==="regen_quasi1d_ph_v1";
+  const concept=profile.version===1 && profile.model_id==="regen_concept_heat_v1";
   const profileDrop=scaled(object(profile.summary).dp_total_Pa,1e-6);
   const componentDrop=firstDrop(scaled(outputs.dp_total_Pa,1e-6),outputs.delta_P_MPa);
   const value=unified ? firstDrop(profileDrop,componentDrop) : firstDrop(componentDrop,summary.cooling_dp_MPa);
@@ -146,13 +147,14 @@ function coolingEvidence(result = {}) {
   const automatic=!hasProfile && (recordedSource===1 || (recordedSource===undefined && (legacyFlag===true || (finite(legacyFlag) && legacyFlag>0))));
   const prescribed=!hasProfile && (recordedSource===0 || (recordedSource===undefined && (legacyFlag===false || legacyFlag===0)));
   const dropMismatch=unified && nonnegative(profileDrop) && nonnegative(componentDrop) && Math.abs(profileDrop-componentDrop)>1e-6;
-  return {unified,hasProfile,automatic,prescribed,value,dropMismatch,outputs};
+  return {unified,concept,hasProfile,automatic,prescribed,value,dropMismatch,outputs};
 }
 
 function coolingHydraulics(result) {
-  const {unified,hasProfile,automatic,prescribed,value,dropMismatch,outputs}=coolingEvidence(result);
-  const source=unified ? "统一准一维沿程解" : automatic ? "水力迭代计算" : prescribed ? "给定压降，未证明与通道几何一致" : "未知";
+  const {unified,concept,hasProfile,automatic,prescribed,value,dropMismatch,outputs}=coolingEvidence(result);
+  const source=unified ? "统一准一维沿程解" : concept ? "概略压降估计 · 未求解通道水力" : automatic ? "水力迭代计算" : prescribed ? "给定压降，未证明与通道几何一致" : "未知";
   const detail=unified ? "吸热量、压降与出口状态来自同一冷却剖面；给定压降预算与旧兼容开关不控制该模式。模型计算不等于部件试验验证。"
+    : concept ? "燃气侧热流按概略型面估算并积分，压降单独给定工程估计；此值参与循环匹配，不是允许压降上限，也不是数值初猜。"
     : automatic ? "根据本次组件记录或历史水力标记识别；是否完成迭代与守恒闭合，仍以本次记录的对应判据为准。"
     : prescribed ? "供给网络采用给定压降预算；本记录不提供由通道几何求解的沿程水力证据。"
     : hasProfile ? "本记录包含未识别版本的沿程数据，不根据旧输入开关推断当前模型身份。"

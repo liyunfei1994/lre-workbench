@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from cfd_exchange import (create_cfd_job, load_cfd_job, import_cfd_result, load_imported_result,
+from lre_workbench.integrations.cfd_exchange import (create_cfd_job, load_cfd_job, import_cfd_result, load_imported_result,
                           MAX_FILE_BYTES, METRIC_RULES)
-from core import ComponentResult, CycleResults, EngineInputs, FlowState
+from lre_workbench.domain.models import ComponentResult, CycleResults, EngineInputs, FlowState
 
 
 def model_result(cycle="ffsc"):
@@ -295,7 +295,7 @@ class CfdExchangeTests(unittest.TestCase):
         import_cfd_result(self.job)
         old = (self.job / "imported_result.json").read_bytes()
         self.write_result(self.result_document(metrics={"efficiency": {"value": .9, "unit": "1"}}))
-        with patch("cfd_exchange.os.replace", side_effect=OSError("write interrupted")):
+        with patch('lre_workbench.integrations.cfd_exchange.os.replace', side_effect=OSError("write interrupted")):
             with self.assertRaises(OSError):
                 import_cfd_result(self.job)
         self.assertEqual((self.job / "imported_result.json").read_bytes(), old)

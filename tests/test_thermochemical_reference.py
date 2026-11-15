@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from webapp import thermo_compare as comparison
-import thermo
+import lre_workbench.properties.thermochemistry as thermo
 
 
 class ReferenceRequestTests(unittest.TestCase):

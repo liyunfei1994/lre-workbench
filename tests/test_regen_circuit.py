@@ -6,9 +6,9 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from core import ComponentResult
-import cooling_marching as cm
-from regen_geometry import build_regen_geometry
+from lre_workbench.domain.models import ComponentResult
+import lre_workbench.components.cooling.marching as cm
+from lre_workbench.components.cooling.geometry import build_regen_geometry
 
 
 BASE = dict(mdot_coolant=166.3, T_in=122.35, p_in=74.89e6,
@@ -46,7 +46,7 @@ class RegenGeometryTests(unittest.TestCase):
                 build_regen_geometry(**(GEOM | kwargs))
 
     def test_branching_requires_explicit_model(self):
-        from chamber_design import ChannelRow
+        from lre_workbench.components.chambers.design import ChannelRow
         rows = [ChannelRow(anchor="injector", n=100), ChannelRow(anchor="throat", n=200)]
         with self.assertRaisesRegex(ValueError, "manifold"):
             build_regen_geometry(**GEOM, channel_table=rows)
@@ -185,7 +185,7 @@ class CoolingWrapperTests(unittest.TestCase):
             n_points=80, throat_area_m2=3.141592653589793*.11586**2)
 
     def test_outputs_and_state_are_directly_from_profile(self):
-        from cooling import CoolingChannel
+        from lre_workbench.components.cooling.model import CoolingChannel
         state, result = CoolingChannel(**self.kwargs()).evaluate()
         profile = result.profile
         self.assertEqual(state.enthalpy, profile["nodes"][-1]["h_Jkg"])
@@ -201,7 +201,7 @@ class CoolingWrapperTests(unittest.TestCase):
         self.assertAlmostEqual(zone, result.outputs["heat_load_W"], delta=1e-6)
 
     def test_bartz_inactive_budget_values_do_not_change_solution(self):
-        from cooling import CoolingChannel
+        from lre_workbench.components.cooling.model import CoolingChannel
         a = CoolingChannel(**self.kwargs(), dp_pa=1e6, dp_auto=False, cp=1000., heat_load=0.).evaluate()
         b = CoolingChannel(**self.kwargs(), dp_pa=200e6, dp_auto=True, cp=9000., heat_load=300e6).evaluate()
         self.assertEqual(a[0].pressure, b[0].pressure)
@@ -209,7 +209,7 @@ class CoolingWrapperTests(unittest.TestCase):
         self.assertEqual(a[1].outputs["heat_load_W"], b[1].outputs["heat_load_W"])
 
     def test_auto_sizing_has_no_hidden_depth_clip(self):
-        from cooling import CoolingChannel, resolve_channel_height
+        from lre_workbench.components.cooling.model import CoolingChannel, resolve_channel_height
         depth, clipped = resolve_channel_height(160., 450., 100., .0015, 150)
         self.assertGreater(depth, .015)
         self.assertFalse(clipped)
@@ -217,7 +217,7 @@ class CoolingWrapperTests(unittest.TestCase):
         self.assertGreater(result.outputs["channel_height_mm"], 15.)
 
     def test_budget_mode_no_profile_and_uses_enthalpy_not_cp(self):
-        from cooling import CoolingChannel
+        from lre_workbench.components.cooling.model import CoolingChannel
         a, ar = CoolingChannel(160.,125.,70e6,5e6,20e6,cp=1000.,bartz_mode=False).evaluate()
         b, br = CoolingChannel(160.,125.,70e6,5e6,20e6,cp=9000.,bartz_mode=False).evaluate()
         self.assertEqual(a.temperature, b.temperature)
@@ -225,7 +225,7 @@ class CoolingWrapperTests(unittest.TestCase):
         self.assertLess(abs(ar.outputs["energy_residual_W"]), .001)
 
     def test_legacy_pressure_guess_is_not_a_second_solver(self):
-        from cooling import estimate_regen_dp
+        from lre_workbench.components.cooling.model import estimate_regen_dp
         with self.assertRaisesRegex(RuntimeError,"停用"):
             estimate_regen_dp()
 

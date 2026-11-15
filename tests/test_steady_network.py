@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from steady_network import audit_network, solve_design, split_flows, validate_hardware, pressure_contract
+from lre_workbench.systems.steady_network import audit_network, solve_design, split_flows, validate_hardware, pressure_contract
 
 
 BASE = dict(total_fuel=100.0, total_ox=300.0, mr_ox=30.0, mr_fuel=.3,
@@ -276,7 +276,7 @@ class PressureContractTests(unittest.TestCase):
         branch = args[0]["branches"][0]
         self.assertAlmostEqual(branch["injector_drop_Pa"], .25e6)
         self.assertNotEqual(branch["injector_drop_Pa"], args[2]["preburner_injector_dp_ratio"] * branch["destination_pressure_Pa"])
-        self.assertEqual(report["legacy_summary_fields"]["status"], "design_budget_only")
+        self.assertEqual(report["legacy_summary_fields"]["status"], "common_actual_loss_or_null")
 
     def test_missing_state_is_unavailable_never_inferred_from_input_or_zero(self):
         network, states, inputs = self.fixture()
